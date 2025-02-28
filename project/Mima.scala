@@ -53,7 +53,8 @@ object Mima {
     val lastVersionInMajorVersion = Map(
       0 -> "0.8.0",
       1 -> "1.2.1",
-      2 -> "2.4.0"
+      2 -> "2.4.0",
+      3 -> "3.3.0"
     )
     if (minor == 0) {  // 1.0.0 or 2.0.0 or 3.0.0
       lastVersionInMajorVersion.getOrElse(major - 1, {
@@ -73,7 +74,8 @@ object Mima {
       // We skip from 0.6.0 to 3.0.0 when migrating connectors to the main delta repo
       0 -> "0.6.0",
       1 -> "0.6.0",
-      2 -> "0.6.0"
+      2 -> "0.6.0",
+      3 -> "0.6.0"
     )
     if (minor == 0) {  // 1.0.0
       majorToLastMinorVersions.getOrElse(major - 1, {

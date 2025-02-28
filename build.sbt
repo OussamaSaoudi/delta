@@ -587,7 +587,7 @@ lazy val sharing = (project in file("sharing"))
 lazy val kernelApi = (project in file("kernel/kernel-api"))
   .enablePlugins(ScalafmtPlugin)
   .settings(
-    name := "delta-kernel-api",
+    name := "delta-kernel-api-dbi",
     commonSettings,
     scalaStyleSettings,
     javaOnlyReleaseSettings,
@@ -675,13 +675,46 @@ lazy val kernelDefaults = (project in file("kernel/kernel-defaults"))
   .dependsOn(spark % "test->test")
   .dependsOn(goldenTables % "test")
   .settings(
-    name := "delta-kernel-defaults",
+    name := "delta-kernel-dbi",
     commonSettings,
     scalaStyleSettings,
     javaOnlyReleaseSettings,
     javafmtCheckSettings,
     scalafmtCheckSettings,
     Test / javaOptions ++= Seq("-ea"),
+    Compile / packageBin := assembly.value,
+    assembly / assemblyJarName := s"${name.value}-${version.value}.jar",
+    assembly / logLevel := Level.Info,
+    assembly / test := {},
+    assembly / assemblyExcludedJars := {
+      val cp = (assembly / fullClasspath).value
+      val allowedPrefixes = Set("META_INF", "io", "jackson")
+      cp.filter { f =>
+        !allowedPrefixes.exists(prefix => f.data.getName.startsWith(prefix))
+      }
+    },
+
+
+    assembly / assemblyOption ~= {
+      _.withIncludeScala(false) // Unless you need Scala libraries
+      .withIncludeDependency(true)
+    },
+
+
+    assembly / assemblyShadeRules := Seq(
+      ShadeRule.rename("com.fasterxml.jackson.**" -> "io.delta.kernel.shaded.com.fasterxml.jackson.@1").inAll,
+      ShadeRule.rename("io.delta.**" -> "shadedfordbi.io.delta.@1").inAll
+    ),
+    assembly / assemblyMergeStrategy := {
+      // Discard `module-info.class` to fix the `different file contents found` error.
+      case "module-info.class" => MergeStrategy.discard
+      case PathList("META-INF", "services", xs @ _*) => MergeStrategy.concat // Changed to concat
+      case PathList("META-INF", xs @ _*) => MergeStrategy.discard
+      case x if x.endsWith(".class") => MergeStrategy.first
+      case x =>
+        val oldStrategy = (assembly / assemblyMergeStrategy).value
+        oldStrategy(x)
+    },
     libraryDependencies ++= Seq(
       "org.apache.hadoop" % "hadoop-client-runtime" % hadoopVersion,
       "com.fasterxml.jackson.core" % "jackson-databind" % "2.13.5",
