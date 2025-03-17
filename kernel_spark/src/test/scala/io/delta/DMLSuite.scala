@@ -38,10 +38,45 @@ class DMLSuite extends QueryTest with SharedSparkSession {
     val tableName = s"table_${UUID.randomUUID().toString.substring(0, 8)}"
     val tid = s"my_delta_catalog.$tableName"
     val path = s"/tmp/spark_warehouse/$tableName"
-    println(s"Using table id: $tid")
-    println(s"Using table path: $path")
+//    println(s"Using table id: $tid")
+//    println(s"Using table path: $path")
     test(tid, path)
   }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  test("read a delta table with rust dsv2") {
+    println("RUST")
+    val id = "my_delta_catalog.benchmark_table_oxidized_java"
+    val readDataDSv2 =
+      spark.read
+        .format("delta2") // Use delta spark connector v2
+        .table(id)
+    readDataDSv2.show(5)
+  }
+
+
+
+
+
+
+
+
+
+
+
+
 
   test("aaa") {
     withUniqueTableIdAndItsPath { (tableId, path) =>
@@ -52,25 +87,22 @@ class DMLSuite extends QueryTest with SharedSparkSession {
       val path2 = "/tmp/spark_warehouse/benchmark_table_oxidized_java"
       val condition = "true"
       // tests_added > 5 AND repository = 'analytics' AND NOT (committer_age IS NULL) AND  NOT (region = 'Australia')
-      println("DSV1")
-      val postMergeDSv1 = spark.time(
-        spark.read
-          .format("delta")
-          .load(path2)
-          .where(condition)
-          )
-//      print(postMergeDSv1.inputFiles.mkString("Array(", ", ", ")"))
-//      postMergeDSv1.show(5)
-
+//      println("DSV1")
+//      val postMergeDSv1 = spark.time(
+//        spark.read
+//          .format("delta")
+//          .load(path2)
+//          .where(condition)
+//          )
+////      print(postMergeDSv1.inputFiles.mkString("Array(", ", ", ")"))
+////      postMergeDSv1.show(5)
+//
       println("RUST")
-      val readDataDSv2 = spark.time(
-        spark.read
+      val readDataDSv2 = spark.read
           .format("delta2")
           .table(id2)
-          .where(condition)
-          )
-//      print(readDataDSv2.inputFiles.mkString("Array(", ", ", ")"))
-//      readDataDSv2.show(5)
+//          .where(condition)
+      readDataDSv2.show(5)
     }
   }
 
