@@ -568,14 +568,28 @@ lazy val kernelSpark = (project in file("kernel_spark"))
   .settings(
     name := "delta-kernel-spark",
     commonSettings,
-
+    // Add the flag to both main and test JVM options
+    javaOptions += "--enable-native-access=ALL-UNNAMED",
+    javaOptions in Test += "--add-opens java.base/sun.nio.ch=ALL-UNNAMED",
     Test / javaOptions ++= Seq(
       "-ea",
+      "--enable-native-access=ALL-UNNAMED",
       s"-Dlog4j.configuration=file:${baseDirectory.value}/src/test/resources/log4j.properties"
     ),
+    Compile / compile := {
+      val analysis = (Compile / compile).value
+      //scalastyle:off
+      println("Classpath: " + (Compile / dependencyClasspath).value.map(_.data).mkString(":"))
+      //scalastyle:on println
+      analysis
+    },
+    // Add the unmanaged JAR dependency
+    unmanagedBase := baseDirectory.value / ".." / "lib",
+
     libraryDependencies ++= Seq(
       "org.apache.spark" %% "spark-core" % "3.5.1" % "provided",
       "org.apache.spark" %% "spark-sql" % "3.5.1" % "provided",
+      "com.fasterxml.jackson.module" %% "jackson-module-scala" % "2.13.2",
 
       // Test deps
       "org.scalatest" %% "scalatest" % scalaTestVersion % "test",

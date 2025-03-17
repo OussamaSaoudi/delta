@@ -1,38 +1,36 @@
 package io.delta.read
 
-import io.delta.kernel.{Scan => KernelScan}
-import io.delta.kernel.defaults.internal.json.JsonUtils
-import io.delta.kernel.engine.{Engine => KernelEngine}
 import org.apache.spark.sql.types.{StructType => SparkStructType}
 import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReaderFactory, Scan => SparkScan}
 import org.apache.spark.sql.types.StructType
+import kernel.oxidized_java.{KernelStringSlice, RustEngine, RustEngineBuilder, RustScan, RustScanFileIter, RustScanFileRow, RustScanFileState, RustSnapshot}
+
+import java.lang.foreign.Arena
 
 class DeltaScan(
-    val kernelScan: KernelScan,
-    tableEngine: KernelEngine,
+    val scan: RustScan,
+    engine: RustEngine,
+    snapshot: RustSnapshot,
     sparkReadSchema: SparkStructType)
     extends SparkScan
     with Batch {
   import DeltaScan._
 
-  private val serializedScanState = JsonUtils.rowToJson(kernelScan.getScanState(tableEngine))
+//  private val serializedScanState = JsonUtils.rowToJson(kernelScan.getScanState(tableEngine))
 
   /** Get the Kernel ScanFiles ColumnarBatchIter and convert to [[DeltaInputPartition]] array. */
   private lazy val planPartitions: Array[InputPartition] = {
     val scanFileAsInputPartitionBuffer = scala.collection.mutable.ArrayBuffer[DeltaInputPartition]()
+    val arena = Arena.ofAuto();
+    val scanFileIter = new RustScanFileIter(arena, engine, scan, snapshot.tableRoot(), snapshot);
 
-    kernelScan
-      .getScanFiles(tableEngine)
-      .map { columnarBatch => columnarBatch.getRows }
-      .forEachRemaining { rowIter =>
-        rowIter.forEachRemaining { row =>
-          val serializedScanFileRow = JsonUtils.rowToJson(row)
-          logger.info(s"serializedScanFileRow: $serializedScanFileRow")
-          val inputPartition = DeltaInputPartition(serializedScanFileRow, serializedScanState)
-          scanFileAsInputPartitionBuffer += inputPartition
-        }
-      }
-
+    val state = scanFileIter.state()
+    val stateJson = state.toJson
+    scanFileIter.forEachRemaining(row => {
+      val json = row.toJson
+      val inputPartition = DeltaInputPartition(json, stateJson)
+      scanFileAsInputPartitionBuffer += inputPartition
+    })
     scanFileAsInputPartitionBuffer.toArray
   }
 

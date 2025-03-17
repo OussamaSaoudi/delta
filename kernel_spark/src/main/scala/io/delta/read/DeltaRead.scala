@@ -2,13 +2,10 @@ package io.delta.read
 
 import io.delta.data.{KernelColumnarBatchToSparkColumnarBatchWrapper, KernelRowToSparkRowWrapper}
 import io.delta.engine.KernelSparkEngine
-import io.delta.kernel.{Scan => KernelScan}
-import io.delta.kernel.defaults.internal.json.JsonUtils
-import io.delta.kernel.internal.InternalScanFileUtils
 import io.delta.kernel.internal.data.ScanStateRow
-import io.delta.kernel.internal.util.Utils
-import io.delta.kernel.utils.CloseableIterator
-import org.apache.hadoop.conf.Configuration
+import io.delta.kernel.internal.util.{JsonUtils, Utils}
+import io.delta.kernel.utils.{CloseableIterator, FileStatus}
+import kernel.oxidized_java.{RustScanFileRow, RustScanFileState}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
@@ -53,23 +50,19 @@ abstract class DeltaPartitionReader[T](deltaInputPartition: DeltaInputPartition)
     extends PartitionReader[T] {
   protected val engine = KernelSparkEngine.createOnExecutor()
 
-  protected val scanFileRow = JsonUtils.rowFromJson(
-    deltaInputPartition.serializedScanFileRow,
-    InternalScanFileUtils.SCAN_FILE_SCHEMA)
-
-  protected val addFileStatus = InternalScanFileUtils.getAddFileStatus(scanFileRow)
-
-  protected val scanStateRow =
-    JsonUtils.rowFromJson(deltaInputPartition.serializedScanState, ScanStateRow.SCHEMA)
+  protected val scanFileRow: RustScanFileRow =
+    RustScanFileRow.fromJson(deltaInputPartition.serializedScanFileRow)
+  protected val scanState: RustScanFileState =
+    RustScanFileState.fromJson(deltaInputPartition.serializedScanState)
 
   protected val physicalRowDataIter = engine.getParquetHandler
     .readParquetFiles(
-      Utils.singletonCloseableIterator(addFileStatus),
-      ScanStateRow.getPhysicalDataReadSchema(engine, scanStateRow),
+      Utils.singletonCloseableIterator(FileStatus.of(scanFileRow.path, scanFileRow.size, 0)),
+      ScanStateRow.getPhysicalDataReadSchema(engine, null),
       java.util.Optional.empty() /* predicate */ )
 
   protected val logicalRowDataColumnarBatchIter =
-    KernelScan.transformPhysicalData(engine, scanStateRow, scanFileRow, physicalRowDataIter)
+    Transformer.transformPhysicalData(engine, scanState, scanFileRow, physicalRowDataIter)
 }
 
 /** Created on the executor. */

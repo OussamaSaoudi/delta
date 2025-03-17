@@ -5,9 +5,14 @@ import io.delta.kernel.{Table => KernelTable}
 import io.delta.kernel.engine.{Engine => KernelEngine}
 import io.delta.kernel.expressions.{And => KernelAnd}
 import io.delta.kernel.internal.ScanImpl
+import kernel.oxidized_java.{KernelStringSlice, PredicateVisitor, RustEngineBuilder, RustScan, RustScanFileIter, RustSnapshot}
 import org.apache.spark.sql.connector.expressions.filter.Predicate
 import org.apache.spark.sql.connector.read.{Scan, ScanBuilder, SupportsPushDownRequiredColumns, SupportsPushDownV2Filters}
 import org.apache.spark.sql.types.StructType
+
+import scala.collection.JavaConverters._
+import java.lang.foreign.Arena
+import java.util.Optional
 
 class DeltaScanBuilder(kernelTable: KernelTable, tableEngine: KernelEngine)
     extends ScanBuilder
@@ -17,6 +22,7 @@ class DeltaScanBuilder(kernelTable: KernelTable, tableEngine: KernelEngine)
 
   private val readSnapshot = kernelTable.getLatestSnapshot(tableEngine)
   private var scanBuilder = readSnapshot.getScanBuilder(tableEngine)
+  private var kernelPredicate: Option[io.delta.kernel.expressions.Predicate] = Option.empty
   private var sparkSchema =
     SchemaUtils.convertKernelSchemaToSparkSchema(readSnapshot.getSchema(tableEngine))
   private var pushedSparkPredicates = Array.empty[Predicate]
@@ -75,6 +81,7 @@ class DeltaScanBuilder(kernelTable: KernelTable, tableEngine: KernelEngine)
 
     if (kernelAndOpt.nonEmpty) {
       scanBuilder = scanBuilder.withFilter(tableEngine, kernelAndOpt.get)
+      kernelPredicate = kernelAndOpt
       val scan = scanBuilder.build()
       val kernelPushedOpt = scan.asInstanceOf[ScanImpl].getPartitionsFilters()
       val kernelRemainingOpt = scan.getRemainingFilter
@@ -127,7 +134,15 @@ class DeltaScanBuilder(kernelTable: KernelTable, tableEngine: KernelEngine)
   }
 
   override def build(): Scan = {
-    new DeltaScan(scanBuilder.build(), tableEngine, sparkSchema)
+    val arena = Arena.ofAuto()
+    val path = new KernelStringSlice(arena, kernelTable.getPath(tableEngine))
+    val builder = new RustEngineBuilder(arena, path)
+    val engine = builder.build
+
+    val snapshot = new RustSnapshot(arena, engine, path)
+
+    val scan = new RustScan(arena, snapshot, engine, Optional.ofNullable(kernelPredicate.orNull))
+    new DeltaScan(scan, engine, snapshot, sparkSchema)
   }
 }
 
