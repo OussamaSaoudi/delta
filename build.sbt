@@ -20,23 +20,19 @@ import java.io.BufferedInputStream
 import java.nio.file.Files
 import java.nio.file.attribute.PosixFilePermission
 import java.util
-
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import org.apache.commons.compress.utils.IOUtils
 
 import scala.collection.mutable
-import scala.sys.process._
+import scala.sys.process.*
 import scala.util.Using
-
 import sbt.internal.inc.Analysis
-import sbtprotoc.ProtocPlugin.autoImport._
-
+import sbtprotoc.ProtocPlugin.autoImport.*
 import xsbti.compile.CompileAnalysis
-
-import Checkstyle._
-import Mima._
-import Unidoc._
+import Checkstyle.*
+import Mima.*
+import Unidoc.{SourceFilePattern, unidocSourceFilePatterns, *}
 
 // Scala versions
 val scala212 = "2.12.18"
@@ -561,9 +557,51 @@ lazy val sharing = (project in file("sharing"))
     )
   ).configureUnidoc()
 
+lazy val oxidizedSettings = Seq(
+  organization := "kernel",
+  scalaVersion := default_scala_version.value,
+  crossScalaVersions := all_scala_versions,
+  fork := true,
+  scalacOptions ++= Seq("-Ywarn-unused:imports")
+)
+lazy val oxidizedKernel = (project in file("oxidizedKernel"))
+  .dependsOn(kernelApi)
+  .dependsOn(kernelDefaults)
+  .settings(
+    name := "kernel",
+    oxidizedSettings,
+    javaOnlyReleaseSettings,
+    // Add the flag to both main and test JVM options
+    javaOptions += "--enable-native-access=ALL-UNNAMED",
+    Test / javaOptions ++= Seq(
+      "-ea",
+      "--enable-native-access=ALL-UNNAMED",
+      s"-Dlog4j.configuration=file:${baseDirectory.value}/src/test/resources/log4j.properties"
+    ),
+    Compile / compile := {
+      val analysis = (Compile / compile).value
+      //scalastyle:off
+      println("Classpath: " + (Compile / dependencyClasspath).value.map(_.data).mkString(":"))
+      //scalastyle:on println
+      analysis
+    },
+    libraryDependencies ++= Seq(
+      "com.fasterxml.jackson.datatype" % "jackson-datatype-jdk8" % "2.12.5",
+      "org.apache.hadoop" % "hadoop-client-runtime" % hadoopVersion,
+      "com.fasterxml.jackson.core" % "jackson-databind" % "2.13.5",
+      "org.apache.parquet" % "parquet-hadoop" % "1.12.3",
+
+      "org.scalatest" %% "scalatest" % scalaTestVersion % "test",
+      "junit" % "junit" % "4.13.2" % "test",
+      "commons-io" % "commons-io" % "2.8.0" % "test",
+      "com.novocode" % "junit-interface" % "0.11" % "test",
+      "org.slf4j" % "slf4j-log4j12" % "1.7.36" % "test",
+    )
+  )
 lazy val kernelSpark = (project in file("kernel_spark"))
   .dependsOn(kernelApi)
   .dependsOn(kernelDefaults)
+  .dependsOn(oxidizedKernel)
   .dependsOn(spark % "test->test")
   .settings(
     name := "delta-kernel-spark",
@@ -584,7 +622,7 @@ lazy val kernelSpark = (project in file("kernel_spark"))
       analysis
     },
     // Add the unmanaged JAR dependency
-    unmanagedBase := baseDirectory.value / ".." / "lib",
+//    unmanagedBase := baseDirectory.value / ".." / "lib",
 
     libraryDependencies ++= Seq(
       "org.apache.spark" %% "spark-core" % "3.5.1" % "provided",

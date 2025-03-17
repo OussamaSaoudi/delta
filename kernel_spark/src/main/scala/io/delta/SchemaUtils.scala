@@ -1,8 +1,8 @@
 package io.delta
-
+import io.delta.kernel.{types => KernelTypes}
 import io.delta.kernel.types.{BooleanType => KernelBooleanType, DataType => KernelDataType, IntegerType => KernelIntegerType, LongType => KernelLongType, StringType => KernelStringType, StructField => KernelStructField, StructType => KernelStructType}
 import org.apache.spark.sql.types.{BooleanType => SparkBooleanType, DataType => SparkDataType, IntegerType => SparkIntegerType, LongType => SparkLongType, StringType => SparkStringType, StructField => SparkStructField, StructType => SparkStructType}
-
+import org.apache.spark.sql.{types => SparkType}
 import scala.collection.JavaConverters._
 
 object SchemaUtils {
@@ -26,6 +26,8 @@ object SchemaUtils {
       case _: KernelBooleanType => SparkBooleanType
       case _: KernelIntegerType => SparkIntegerType
       case _: KernelLongType => SparkLongType
+      case _: KernelTypes.TimestampType => SparkType.TimestampType
+      case _: KernelTypes.FloatType => SparkType.FloatType
       case x => throw new IllegalArgumentException(s"unsupported data type $x")
     }
   }
@@ -53,6 +55,8 @@ object SchemaUtils {
       case SparkBooleanType => KernelBooleanType.BOOLEAN
       case SparkIntegerType => KernelIntegerType.INTEGER
       case SparkLongType => KernelLongType.LONG
+      case SparkType.TimestampType => KernelTypes.TimestampType.TIMESTAMP
+      case SparkType.FloatType => KernelTypes.FloatType.FLOAT
       case x => throw new IllegalArgumentException(s"unsupported data type $x")
     }
   }

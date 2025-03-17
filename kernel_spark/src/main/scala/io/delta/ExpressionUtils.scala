@@ -4,8 +4,9 @@ import io.delta.kernel.expressions.{And => KernelAnd, Column => KernelColumn, Ex
 import io.delta.kernel.{types => kerneltypes}
 import org.apache.spark.sql.connector.expressions.{Expressions, Expression => SparkExpression, Literal => SparkLiteral, NamedReference => SparkNamedReference}
 import org.apache.spark.sql.connector.expressions.filter.{And => SparkAnd, Or => SparkOr, Predicate => SparkPredicate}
-import org.apache.spark.sql.sources.{EqualTo => SparkDSv1EqualTo, Filter => SparkDSv1Filter, GreaterThan => SparkDSv1GreaterThan, GreaterThanOrEqual => SparkDSv1GreaterThanOrEqual, LessThan => SparkDSv1LessThan, LessThanOrEqual => SparkDSv1LessThanOrEqual, And => SparkDSv1And, Or => SparkDSv1Or, Not => SparkDSv1Not}
+import org.apache.spark.sql.sources.{And => SparkDSv1And, EqualTo => SparkDSv1EqualTo, Filter => SparkDSv1Filter, GreaterThan => SparkDSv1GreaterThan, GreaterThanOrEqual => SparkDSv1GreaterThanOrEqual, LessThan => SparkDSv1LessThan, LessThanOrEqual => SparkDSv1LessThanOrEqual, Not => SparkDSv1Not, Or => SparkDSv1Or}
 import org.apache.spark.sql.{types => sparktypes}
+import org.apache.spark.unsafe.types.UTF8String
 
 object ExpressionUtils {
   private val logger = org.slf4j.LoggerFactory.getLogger(this.getClass)
@@ -193,8 +194,8 @@ object ExpressionUtils {
       case l: SparkLiteral[Long] if l.dataType.isInstanceOf[sparktypes.LongType] =>
         Some(KernelLiteral.ofLong(l.value))
 
-      case l: SparkLiteral[String] if l.dataType.isInstanceOf[sparktypes.StringType] =>
-        Some(KernelLiteral.ofString(l.value))
+      case l: SparkLiteral[UTF8String] if l.dataType.isInstanceOf[sparktypes.StringType] =>
+        Some(KernelLiteral.ofString(l.value.toString))
 
       case _ => None
     }

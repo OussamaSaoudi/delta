@@ -43,6 +43,7 @@ import java.util.stream.Collectors;
 public class RustExpressionEvaluator {
   private final Expression expression;
   private final StructType outType;
+  private final StructType inType;
 
   /**
    * Create a {@link DefaultExpressionEvaluator} instance bound to the given expression and
@@ -56,6 +57,7 @@ public class RustExpressionEvaluator {
       StructType inputSchema, Expression expression, StructType outputType) {
     this.expression = expression;
     this.outType = outputType;
+    this.inType = inputSchema;
   }
 
   public ColumnarBatch eval(ColumnarBatch input) {
@@ -63,10 +65,9 @@ public class RustExpressionEvaluator {
     int size = input.getSize();
     assert (expr.getName().equals("Struct"));
     ColumnVector[] columns =
-        (ColumnVector[])
-            expr.getChildren().stream()
-                .map(child -> new ExpressionEvalVisitor(input).visit(child))
-                .toArray();
+        expr.getChildren().stream()
+            .map(child -> new ExpressionEvalVisitor(input).visit(child))
+            .toArray(ColumnVector[]::new);
     return new DefaultColumnarBatch(size, outType, columns);
   }
 

@@ -48,6 +48,11 @@ object DeltaReaderFactory {
 /** Created on Executor */
 abstract class DeltaPartitionReader[T](deltaInputPartition: DeltaInputPartition)
     extends PartitionReader[T] {
+//  //scalastyle:off
+//  println("scan row: " + deltaInputPartition.serializedScanFileRow)
+//  println("scan state: " + deltaInputPartition.serializedScanState)
+//  // scalastyle:on
+
   protected val engine = KernelSparkEngine.createOnExecutor()
 
   protected val scanFileRow: RustScanFileRow =
@@ -58,7 +63,7 @@ abstract class DeltaPartitionReader[T](deltaInputPartition: DeltaInputPartition)
   protected val physicalRowDataIter = engine.getParquetHandler
     .readParquetFiles(
       Utils.singletonCloseableIterator(FileStatus.of(scanFileRow.path, scanFileRow.size, 0)),
-      ScanStateRow.getPhysicalDataReadSchema(engine, null),
+      scanState.readSchema,
       java.util.Optional.empty() /* predicate */ )
 
   protected val logicalRowDataColumnarBatchIter =

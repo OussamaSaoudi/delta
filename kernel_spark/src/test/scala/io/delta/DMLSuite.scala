@@ -47,54 +47,30 @@ class DMLSuite extends QueryTest with SharedSparkSession {
     withUniqueTableIdAndItsPath { (tableId, path) =>
       logger.info("Scott > STEP 1a: create table with dsv1")
 
-      spark
-        .range(10)
-        .withColumn("value", lit("test_value"))
-        .write
-        .format("delta")
-        .mode("overwrite")
-        .option("delta.enableDeletionVectors", "true")
-        .save(path)
 
-      logger.info("Scott > STEP 1b: read table with dsv1")
+      val id2 = "my_delta_catalog.benchmark_table_oxidized_java"
+      val path2 = "/tmp/spark_warehouse/benchmark_table_oxidized_java"
+      val condition = "true"
+      // tests_added > 5 AND repository = 'analytics' AND NOT (committer_age IS NULL) AND  NOT (region = 'Australia')
+      println("DSV1")
+      val postMergeDSv1 = spark.time(
+        spark.read
+          .format("delta")
+          .load(path2)
+          .where(condition)
+          )
+//      print(postMergeDSv1.inputFiles.mkString("Array(", ", ", ")"))
+//      postMergeDSv1.show(5)
 
-      val initialDataDSv1 = spark.read.format("delta").load(path)
-      assert(initialDataDSv1.count() == 10)
-      initialDataDSv1.show()
-
-      logger.info("Scott > STEP 1c: read table with dsv2")
-      val initialDataDSv2 = spark.read.format("delta2").table(tableId)
-      assert(initialDataDSv2.count() == 10)
-      initialDataDSv2.show()
-
-      // Step 2: Perform a MERGE operation using DeltaTable API (DSV1)
-      logger.info("Scott > STEP 2a: prepare source data")
-      import io.delta.tables._
-      val sourceData = spark.range(8, 12).withColumn("value", concat(lit("updated_"), col("id")))
-
-      logger.info("Scott > STEP 2b: perform merge with DeltaTable API (dsv1)")
-      val deltaTable = DeltaTable.forPath(spark, path)
-      deltaTable.as("target")
-        .merge(
-          sourceData.as("source"),
-          "target.id = source.id"
-        )
-        .whenMatched()
-        .updateExpr(Map("value" -> "source.value"))
-        .whenNotMatched()
-        .insertExpr(Map("id" -> "source.id", "value" -> "source.value"))
-        .execute()
-
-      // Validate the data after MERGE
-      logger.info("Scott > STEP 3a: read table after merge with dsv1")
-      val postMergeDSv1 = spark.read.format("delta").load(path)
-      postMergeDSv1.show()
-      assert(postMergeDSv1.count() == 12)
-
-      logger.info("Scott > STEP 3b: read table after merge with dsv2")
-      val readDataDSv2 = spark.read.format("delta2").table(tableId)
-      readDataDSv2.show()
-      assert(readDataDSv2.count() == 12)
+      println("RUST")
+      val readDataDSv2 = spark.time(
+        spark.read
+          .format("delta2")
+          .table(id2)
+          .where(condition)
+          )
+//      print(readDataDSv2.inputFiles.mkString("Array(", ", ", ")"))
+//      readDataDSv2.show(5)
     }
   }
 

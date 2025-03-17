@@ -134,6 +134,7 @@ class DeltaScanBuilder(kernelTable: KernelTable, tableEngine: KernelEngine)
   }
 
   override def build(): Scan = {
+    println("Got to build")
     val arena = Arena.ofAuto()
     val path = new KernelStringSlice(arena, kernelTable.getPath(tableEngine))
     val builder = new RustEngineBuilder(arena, path)

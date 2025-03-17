@@ -19,7 +19,8 @@ class DeltaScan(
 //  private val serializedScanState = JsonUtils.rowToJson(kernelScan.getScanState(tableEngine))
 
   /** Get the Kernel ScanFiles ColumnarBatchIter and convert to [[DeltaInputPartition]] array. */
-  private lazy val planPartitions: Array[InputPartition] = {
+  private val planPartitions: Array[InputPartition] = {
+    println("got to plannning")
     val scanFileAsInputPartitionBuffer = scala.collection.mutable.ArrayBuffer[DeltaInputPartition]()
     val arena = Arena.ofAuto();
     val scanFileIter = new RustScanFileIter(arena, engine, scan, snapshot.tableRoot(), snapshot);

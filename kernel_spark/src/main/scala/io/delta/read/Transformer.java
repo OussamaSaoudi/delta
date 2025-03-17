@@ -6,6 +6,7 @@ import io.delta.kernel.data.FilteredColumnarBatch;
 import io.delta.kernel.data.Row;
 import io.delta.kernel.defaults.internal.expressions.RustExpressionEvaluator;
 import io.delta.kernel.engine.Engine;
+import io.delta.kernel.expressions.Expression;
 import io.delta.kernel.internal.InternalScanFileUtils;
 import io.delta.kernel.internal.actions.DeletionVectorDescriptor;
 import io.delta.kernel.internal.data.ScanStateRow;
@@ -75,8 +76,11 @@ public class Transformer {
                 }
 
                 if (scanFile.transform.isPresent()) {
-                    RustExpressionEvaluator evaluator = new RustExpressionEvaluator(state.readSchema, scanFile.transform.get(), state.logicalSchema);
-                    nextDataBatch = evaluator.eval(nextDataBatch);
+                    Expression transform = scanFile.transform.get();
+                    if (transform != null) {
+                        RustExpressionEvaluator evaluator = new RustExpressionEvaluator(state.readSchema, transform, state.logicalSchema);
+                        nextDataBatch = evaluator.eval(nextDataBatch);
+                    }
                 }
 
 

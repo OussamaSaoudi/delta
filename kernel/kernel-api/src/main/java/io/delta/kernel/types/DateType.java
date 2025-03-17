@@ -27,7 +27,7 @@ import io.delta.kernel.annotation.Evolving;
 public class DateType extends BasePrimitiveType {
   public static final DateType DATE = new DateType();
 
-  private DateType() {
+  public DateType() {
     super("date");
   }
 }
