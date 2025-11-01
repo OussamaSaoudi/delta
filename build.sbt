@@ -571,6 +571,11 @@ lazy val oxidizedKernel = (project in file("oxidizedKernel"))
     name := "kernel",
     oxidizedSettings,
     javaOnlyReleaseSettings,
+    // Require Java 22+ for FFM (Foreign Function & Memory API)
+    javacOptions ++= Seq(
+      "--release", "22",
+      "--enable-preview"  // For any preview features if needed
+    ),
     // Add the flag to both main and test JVM options
     javaOptions += "--enable-native-access=ALL-UNNAMED",
     Test / javaOptions ++= Seq(
