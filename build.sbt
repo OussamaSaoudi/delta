@@ -564,6 +564,9 @@ lazy val oxidizedSettings = Seq(
   fork := true,
   scalacOptions ++= Seq("-Ywarn-unused:imports")
 )
+
+val arrowVersion = "15.0.0"
+
 lazy val oxidizedKernel = (project in file("oxidizedKernel"))
   .dependsOn(kernelApi)
   .dependsOn(kernelDefaults)
@@ -581,6 +584,7 @@ lazy val oxidizedKernel = (project in file("oxidizedKernel"))
     Test / javaOptions ++= Seq(
       "-ea",
       "--enable-native-access=ALL-UNNAMED",
+      "--add-opens=java.base/java.nio=ALL-UNNAMED",  // Required by Arrow Java
       s"-Dlog4j.configuration=file:${baseDirectory.value}/src/test/resources/log4j.properties"
     ),
     Compile / compile := {
@@ -595,6 +599,11 @@ lazy val oxidizedKernel = (project in file("oxidizedKernel"))
       "org.apache.hadoop" % "hadoop-client-runtime" % hadoopVersion,
       "com.fasterxml.jackson.core" % "jackson-databind" % "2.13.5",
       "org.apache.parquet" % "parquet-hadoop" % "1.12.3",
+      
+      // Apache Arrow for C Data Interface
+      "org.apache.arrow" % "arrow-vector" % arrowVersion,
+      "org.apache.arrow" % "arrow-memory-netty" % arrowVersion,
+      "org.apache.arrow" % "arrow-c-data" % arrowVersion,
 
       "org.scalatest" %% "scalatest" % scalaTestVersion % "test",
       "junit" % "junit" % "4.13.2" % "test",

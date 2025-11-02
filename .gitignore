@@ -85,6 +85,10 @@ unit-tests.log
 work/
 docs/.jekyll-metadata
 
+# JVM crash logs
+hs_err_pid*.log
+replay_pid*.log
+
 # For Hive
 TempStatsStore/
 metastore/
