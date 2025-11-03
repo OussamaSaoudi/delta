@@ -601,9 +601,18 @@ lazy val oxidizedKernel = (project in file("oxidizedKernel"))
       "org.apache.parquet" % "parquet-hadoop" % "1.12.3",
       
       // Apache Arrow for C Data Interface
-      "org.apache.arrow" % "arrow-vector" % arrowVersion,
-      "org.apache.arrow" % "arrow-memory-netty" % arrowVersion,
-      "org.apache.arrow" % "arrow-c-data" % arrowVersion,
+      ("org.apache.arrow" % "arrow-vector" % arrowVersion)
+        .exclude("com.fasterxml.jackson.core", "jackson-databind")
+        .exclude("com.fasterxml.jackson.core", "jackson-core")
+        .exclude("com.fasterxml.jackson.core", "jackson-annotations"),
+      ("org.apache.arrow" % "arrow-memory-netty" % arrowVersion)
+        .exclude("com.fasterxml.jackson.core", "jackson-databind")
+        .exclude("com.fasterxml.jackson.core", "jackson-core")
+        .exclude("com.fasterxml.jackson.core", "jackson-annotations"),
+      ("org.apache.arrow" % "arrow-c-data" % arrowVersion)
+        .exclude("com.fasterxml.jackson.core", "jackson-databind")
+        .exclude("com.fasterxml.jackson.core", "jackson-core")
+        .exclude("com.fasterxml.jackson.core", "jackson-annotations"),
 
       "org.scalatest" %% "scalatest" % scalaTestVersion % "test",
       "junit" % "junit" % "4.13.2" % "test",
@@ -615,17 +624,35 @@ lazy val oxidizedKernel = (project in file("oxidizedKernel"))
 lazy val kernelSpark = (project in file("kernel_spark"))
   .dependsOn(kernelApi)
   .dependsOn(kernelDefaults)
-  .dependsOn(oxidizedKernel)
+  .dependsOn(oxidizedKernel % "compile->compile;test->test")
   .dependsOn(spark % "test->test")
   .settings(
     name := "delta-kernel-spark",
     commonSettings,
+    // Force Jackson version to be compatible with Spark/Delta
+    dependencyOverrides ++= Seq(
+      "com.fasterxml.jackson.core" % "jackson-databind" % "2.15.2",
+      "com.fasterxml.jackson.core" % "jackson-core" % "2.15.2",
+      "com.fasterxml.jackson.core" % "jackson-annotations" % "2.15.2"
+    ),
     // Add the flag to both main and test JVM options
     javaOptions += "--enable-native-access=ALL-UNNAMED",
-    javaOptions in Test += "--add-opens java.base/sun.nio.ch=ALL-UNNAMED",
     Test / javaOptions ++= Seq(
       "-ea",
       "--enable-native-access=ALL-UNNAMED",
+      "--add-opens=java.base/java.lang=ALL-UNNAMED",
+      "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+      "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED",
+      "--add-opens=java.base/java.io=ALL-UNNAMED",
+      "--add-opens=java.base/java.net=ALL-UNNAMED",
+      "--add-opens=java.base/java.nio=ALL-UNNAMED",
+      "--add-opens=java.base/java.util=ALL-UNNAMED",
+      "--add-opens=java.base/java.util.concurrent=ALL-UNNAMED",
+      "--add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED",
+      "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+      "--add-opens=java.base/sun.nio.cs=ALL-UNNAMED",
+      "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
+      "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED",
       s"-Dlog4j.configuration=file:${baseDirectory.value}/src/test/resources/log4j.properties"
     ),
     Compile / compile := {

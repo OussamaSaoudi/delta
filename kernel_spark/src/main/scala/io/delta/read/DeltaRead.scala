@@ -60,9 +60,24 @@ abstract class DeltaPartitionReader[T](deltaInputPartition: DeltaInputPartition)
   protected val scanState: RustScanFileState =
     RustScanFileState.fromJson(deltaInputPartition.serializedScanState)
 
+  // Construct absolute file path by combining table root and relative path
+  protected val absoluteFilePath = {
+    val tableRoot = scanState.tableRoot
+    val relativePath = scanFileRow.path
+    // URL-decode the path (Delta stores paths URL-encoded)
+    val decodedPath = java.net.URLDecoder.decode(relativePath, "UTF-8")
+    if (decodedPath.startsWith("/") || decodedPath.contains("://")) {
+      // Already absolute
+      decodedPath
+    } else {
+      // Relative path - combine with table root
+      s"$tableRoot/$decodedPath"
+    }
+  }
+
   protected val physicalRowDataIter = engine.getParquetHandler
     .readParquetFiles(
-      Utils.singletonCloseableIterator(FileStatus.of(scanFileRow.path, scanFileRow.size, 0)),
+      Utils.singletonCloseableIterator(FileStatus.of(absoluteFilePath, scanFileRow.size, 0)),
       scanState.readSchema,
       java.util.Optional.empty() /* predicate */ )
 

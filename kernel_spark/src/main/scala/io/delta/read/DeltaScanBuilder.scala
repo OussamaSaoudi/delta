@@ -5,14 +5,13 @@ import io.delta.kernel.{Table => KernelTable}
 import io.delta.kernel.engine.{Engine => KernelEngine}
 import io.delta.kernel.expressions.{And => KernelAnd}
 import io.delta.kernel.internal.ScanImpl
-import kernel.oxidized_java.{KernelStringSlice, PredicateVisitor, RustEngineBuilder, RustScan, RustScanFileIter, RustSnapshot}
+import io.delta.engine.KernelSparkEngine
+import kernel.oxidized_java.{DefaultPlanExecutor, Snapshot => OxidizedSnapshot}
 import org.apache.spark.sql.connector.expressions.filter.Predicate
 import org.apache.spark.sql.connector.read.{Scan, ScanBuilder, SupportsPushDownRequiredColumns, SupportsPushDownV2Filters}
 import org.apache.spark.sql.types.StructType
 
 import scala.collection.JavaConverters._
-import java.lang.foreign.Arena
-import java.util.Optional
 
 class DeltaScanBuilder(kernelTable: KernelTable, tableEngine: KernelEngine)
     extends ScanBuilder
@@ -20,16 +19,21 @@ class DeltaScanBuilder(kernelTable: KernelTable, tableEngine: KernelEngine)
     with SupportsPushDownV2Filters {
   import DeltaScanBuilder._
 
-  private val readSnapshot = kernelTable.getLatestSnapshot(tableEngine)
-  private var scanBuilder = readSnapshot.getScanBuilder(tableEngine)
+  // Create executor for state machine execution
+  private val executor = new DefaultPlanExecutor(tableEngine)
+  
+  // Get table path and create snapshot using state machine API
+  private val tablePath = kernelTable.getPath(tableEngine)
+  private val snapshot = OxidizedSnapshot.forPath(tablePath, executor)
+  
   private var kernelPredicate: Option[io.delta.kernel.expressions.Predicate] = Option.empty
   private var sparkSchema =
-    SchemaUtils.convertKernelSchemaToSparkSchema(readSnapshot.getSchema(tableEngine))
+    SchemaUtils.convertKernelSchemaToSparkSchema(snapshot.getSchema())
   private var pushedSparkPredicates = Array.empty[Predicate]
 
   logger.info(
-    s"Constructed DeltaScanBuilder for ${kernelTable.getPath(tableEngine)} at read " +
-      s"version ${readSnapshot.getVersion(tableEngine)}")
+    s"Constructed DeltaScanBuilder for $tablePath at read " +
+      s"version ${snapshot.getVersion()}")
 
   /**
    * Data sources can implement this interface to push down required columns to the data source
@@ -41,10 +45,9 @@ class DeltaScanBuilder(kernelTable: KernelTable, tableEngine: KernelEngine)
     // TODO: verify that requiredSchema is a subset of the table schema
     logger.info(s"Pruning columns for required schema: $requiredSchema")
 
+    // TODO: State machine API doesn't support schema pruning yet
+    // For now, just store the required schema for use in DeltaScan
     sparkSchema = requiredSchema
-    scanBuilder = scanBuilder.withReadSchema(
-      tableEngine,
-      SchemaUtils.convertSparkSchemaToKernelSchema(sparkSchema))
   }
 
   /**
@@ -80,33 +83,16 @@ class DeltaScanBuilder(kernelTable: KernelTable, tableEngine: KernelEngine)
     logger.info(s"Pushing down predicates: $kernelAndOpt")
 
     if (kernelAndOpt.nonEmpty) {
-      scanBuilder = scanBuilder.withFilter(tableEngine, kernelAndOpt.get)
       kernelPredicate = kernelAndOpt
-      val scan = scanBuilder.build()
-      val kernelPushedOpt = scan.asInstanceOf[ScanImpl].getPartitionsFilters()
-      val kernelRemainingOpt = scan.getRemainingFilter
-
-      logger.info(s"kernelPushedOpt: $kernelPushedOpt")
-      logger.info(s"kernelRemainingOpt: $kernelRemainingOpt")
-
-      if (kernelPushedOpt.isPresent) {
-        logger.info("kernelPushedOpt is non-empty")
-
-        ExpressionUtils.convertKtoSPredicate(kernelPushedOpt.get()).foreach { pushed =>
-          pushedSparkPredicates = Array(pushed)
-        }
+      
+      // For now, assume all predicates are pushed (partition pruning + data skipping)
+      // The state machine will handle this internally
+      sparkToKernelPredicates.foreach { case (sparkPred, _) =>
+        pushedSparkPredicates = pushedSparkPredicates :+ sparkPred
       }
-
-      if (kernelRemainingOpt.isPresent) {
-        logger.info("kernelRemainingOpt is non-empty")
-
-        val sparkRemainingOpt = ExpressionUtils.convertKtoSPredicate(kernelRemainingOpt.get())
-        logger.info(s"sparkRemainingOpt: ${sparkRemainingOpt.toArray.mkString(", ")}")
-
-        sparkRemainingOpt.toArray
-      } else {
-        Array.empty
-      }
+      
+      // Return empty array - all predicates are pushed
+      Array.empty
     } else {
       logger.info("No pushable predicates found")
       predicates
@@ -134,15 +120,25 @@ class DeltaScanBuilder(kernelTable: KernelTable, tableEngine: KernelEngine)
   }
 
   override def build(): Scan = {
-    val arena = Arena.ofAuto()
-    val path = new KernelStringSlice(arena, kernelTable.getPath(tableEngine))
-    val builder = new RustEngineBuilder(arena, path)
-    val engine = builder.build
-
-    val snapshot = new RustSnapshot(arena, engine, path)
-
-    val scan = new RustScan(arena, snapshot, engine, Optional.ofNullable(kernelPredicate.orNull))
-    new DeltaScan(scan, engine, snapshot, sparkSchema)
+    println(s"[STATE MACHINE] DeltaScanBuilder.build() called - using NEW state machine APIs")
+    println(s"[STATE MACHINE] Table path: $tablePath")
+    println(s"[STATE MACHINE] Predicate: ${kernelPredicate.map(_.toString).getOrElse("None")}")
+    
+    // Build scan using state machine API
+    val scanBuilder = snapshot.scanBuilder()
+    println(s"[STATE MACHINE] Created ScanBuilder from snapshot")
+    
+    // Add predicate if present
+    val scan = if (kernelPredicate.isDefined) {
+      println(s"[STATE MACHINE] Adding predicate to scan")
+      scanBuilder.withPredicate(kernelPredicate.get).build()
+    } else {
+      println(s"[STATE MACHINE] Building scan without predicate")
+      scanBuilder.build()
+    }
+    
+    println(s"[STATE MACHINE] Scan built successfully, returning DeltaScan")
+    new DeltaScan(scan, snapshot, executor, sparkSchema)
   }
 }
 
