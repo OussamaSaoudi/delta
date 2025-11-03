@@ -565,7 +565,7 @@ lazy val oxidizedSettings = Seq(
   scalacOptions ++= Seq("-Ywarn-unused:imports")
 )
 
-val arrowVersion = "15.0.0"
+val arrowVersion = "18.3.0"
 
 lazy val oxidizedKernel = (project in file("oxidizedKernel"))
   .dependsOn(kernelApi)
