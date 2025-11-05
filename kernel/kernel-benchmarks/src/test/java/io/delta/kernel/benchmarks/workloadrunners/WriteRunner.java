@@ -67,12 +67,15 @@ public class WriteRunner extends WorkloadRunner {
   public void setup() throws Exception {
     String tableRoot = workloadSpec.getTableInfo().getResolvedTableRoot();
 
-    // Get the current snapshot
-    SnapshotBuilder builder = TableManager.loadSnapshot(tableRoot);
-    currentSnapshot = builder.build(engine);
-
     // Capture initial listing of delta log files. This is used during cleanup to revert changes.
-    initialDeltaLogFiles = captureFileListing();
+    if (initialDeltaLogFiles == null) {
+      initialDeltaLogFiles = captureFileListing();
+    }
+
+    // Get the current snapshot before any commits
+    // For CCv2 tables, this uses UCCatalogManagedClient (production code path)
+    // For filesystem tables, uses TableManager directly
+    currentSnapshot = loadSnapshot(engine, workloadSpec.getTableInfo(), Optional.empty());
 
     // Load and parse all commit files if we haven't already done so
     if (commitContents.isEmpty()) {
@@ -110,6 +113,8 @@ public class WriteRunner extends WorkloadRunner {
   public void executeAsBenchmark(Blackhole blackhole) throws Exception {
     // Execute all commits in sequence
     for (List<DataFileStatus> actions : commitContents) {
+      // Build transaction using the snapshot's built-in committer
+      // For CCv2 tables, this will be UCCatalogManagedCommitter from UCCatalogManagedClient
       UpdateTableTransactionBuilder txnBuilder =
           currentSnapshot.buildUpdateTableTransaction("Delta-Kernel-Benchmarks", Operation.WRITE);
 
@@ -145,7 +150,7 @@ public class WriteRunner extends WorkloadRunner {
   @Override
   public void cleanup() throws Exception {
     if (initialDeltaLogFiles == null) {
-      return; // Setup didn't complete, nothing to clean up
+      throw new RuntimeException("Cannot cleanup before setup is called.");
     }
     // Delete any files that weren't present initially
     Set<String> currentFiles = captureFileListing();
@@ -156,22 +161,33 @@ public class WriteRunner extends WorkloadRunner {
     }
   }
 
-  /** @return a set of all file paths in the `_delta_log/` directory of the table. */
+  /**
+   * @return a set of all file paths in the `_delta_log/` directory of the table. If CCv2 is
+   *     enabled, also includes files in the `_delta_log/_staged_commit/`
+   */
   private Set<String> captureFileListing() throws IOException {
-    // Construct path prefix for all files in `_delta_log/`. The prefix is for file with name `0`
-    // because the filesystem client lists all _sibling_ files in the directory with a path greater
-    // than `0`.
-    String deltaLogPathPrefix =
-        new Path(workloadSpec.getTableInfo().getResolvedTableRoot(), "_delta_log/0")
-            .toUri()
-            .getPath();
+    List<String> prefixes = new ArrayList<>(Collections.singletonList("_delta_log"));
+    if (workloadSpec.getTableInfo().isCCv2Enabled()) {
+      prefixes.add("_delta_log/_staged_commits");
+    }
 
     Set<String> files = new HashSet<>();
-    try (CloseableIterator<FileStatus> filesIter =
-        engine.getFileSystemClient().listFrom(deltaLogPathPrefix)) {
-      while (filesIter.hasNext()) {
-        FileStatus file = filesIter.next();
-        files.add(file.getPath());
+    for (String prefix : prefixes) {
+      // Construct path prefix for all files in `_delta_log/`. The prefix is for file with name `0`
+      // because the filesystem client lists all _sibling_ files in the directory with a path
+      // greater than `0`.
+      String deltaLogPathPrefix =
+          new Path(workloadSpec.getTableInfo().getResolvedTableRoot(), new Path(prefix, "0"))
+              .toUri()
+              .getPath();
+
+      // List from the lowest version in the prefix
+      try (CloseableIterator<FileStatus> filesIter =
+          engine.getFileSystemClient().listFrom(deltaLogPathPrefix)) {
+        while (filesIter.hasNext()) {
+          FileStatus file = filesIter.next();
+          files.add(file.getPath());
+        }
       }
     }
     return files;

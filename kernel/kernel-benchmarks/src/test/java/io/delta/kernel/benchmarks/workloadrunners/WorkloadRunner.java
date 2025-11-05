@@ -16,7 +16,17 @@
 
 package io.delta.kernel.benchmarks.workloadrunners;
 
+import io.delta.kernel.Snapshot;
+import io.delta.kernel.TableManager;
+import io.delta.kernel.benchmarks.models.CCv2Info;
+import io.delta.kernel.benchmarks.models.TableInfo;
 import io.delta.kernel.benchmarks.models.WorkloadSpec;
+import io.delta.kernel.engine.Engine;
+import io.delta.unity.InMemoryUCClient;
+import io.delta.unity.UCCatalogManagedClient;
+import java.net.URI;
+import java.nio.file.Paths;
+import java.util.Optional;
 import org.openjdk.jmh.infra.Blackhole;
 
 /**
@@ -35,6 +45,7 @@ import org.openjdk.jmh.infra.Blackhole;
  * <p>The {@link #setup()} method must be called before any execution method.
  */
 public abstract class WorkloadRunner {
+
   public WorkloadRunner() {}
 
   /** @return the name of this workload derived from the contents of the workload specification. */
@@ -71,6 +82,48 @@ public abstract class WorkloadRunner {
    * @throws Exception if any error occurs during cleanup.
    */
   public abstract void cleanup() throws Exception;
+
+  /**
+   * Loads a snapshot for the given table, using the appropriate loading mechanism based on whether
+   * it's a CCv2 table or a regular filesystem table.
+   *
+   * <p>For CCv2 tables, uses {@link UCCatalogManagedClient} which handles staged commits and
+   * committer configuration automatically (production code path). For regular filesystem tables,
+   * uses {@link TableManager} directly.
+   *
+   * @param engine the engine to use for loading the snapshot
+   * @param tableInfo the table information containing configuration and paths
+   * @param versionOpt optional version to load (if empty, loads latest)
+   * @return a Snapshot for the table
+   * @throws Exception if there's an error loading the snapshot
+   */
+  protected Snapshot loadSnapshot(Engine engine, TableInfo tableInfo, Optional<Long> versionOpt)
+      throws Exception {
+    String tableRoot = tableInfo.getResolvedTableRoot();
+
+    if (tableInfo.isCCv2Enabled()) {
+      // Use production code path for CCv2 tables
+      CCv2Info ccv2Info = tableInfo.getCCv2Info();
+      InMemoryUCClient ucClient = ccv2Info.createUCClient(engine, tableRoot);
+      UCCatalogManagedClient catalogClient = new UCCatalogManagedClient(ucClient);
+
+      // Use Paths.get().toUri() to get properly formatted file:// URI
+      URI tableUri = Paths.get(tableRoot).toUri();
+      return catalogClient.loadSnapshot(
+          engine,
+          ccv2Info.getUcTableId(),
+          tableUri.toString(),
+          versionOpt,
+          Optional.empty() /* timestampOpt */);
+    } else {
+      // Use direct TableManager for regular filesystem tables
+      io.delta.kernel.SnapshotBuilder builder = TableManager.loadSnapshot(tableRoot);
+      if (versionOpt.isPresent()) {
+        builder = builder.atVersion(versionOpt.get());
+      }
+      return builder.build(engine);
+    }
+  }
 
   // TODO: Add executeAsTest() method for correctness validation
   // public abstract void executeAsTest() throws Exception;
