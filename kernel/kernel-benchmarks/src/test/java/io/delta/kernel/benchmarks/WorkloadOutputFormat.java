@@ -24,11 +24,14 @@ import java.util.Collection;
 import java.util.HashMap;
 import org.openjdk.jmh.infra.BenchmarkParams;
 import org.openjdk.jmh.infra.IterationParams;
+import org.openjdk.jmh.results.*;
 import org.openjdk.jmh.results.BenchmarkResult;
 import org.openjdk.jmh.results.IterationResult;
 import org.openjdk.jmh.results.Result;
 import org.openjdk.jmh.results.RunResult;
 import org.openjdk.jmh.runner.format.OutputFormat;
+import org.openjdk.jmh.runner.format.OutputFormatFactory;
+import org.openjdk.jmh.runner.options.VerboseMode;
 import org.openjdk.jmh.util.Statistics;
 
 /**
@@ -38,6 +41,9 @@ import org.openjdk.jmh.util.Statistics;
  * containing execution environment details, benchmark configuration, timing metrics, and secondary
  * metrics. The report includes detailed percentile analysis and is written to the working directory
  * as {@code benchmark_report.json}.
+ *
+ * <p>This format also delegates to JMH's standard text output format to provide real-time progress
+ * updates and intermediate step information during benchmark execution.
  *
  * <p>The generated report structure includes:
  *
@@ -49,7 +55,12 @@ import org.openjdk.jmh.util.Statistics;
  * </ul>
  */
 public class WorkloadOutputFormat implements OutputFormat {
-  public WorkloadOutputFormat() {}
+  private final OutputFormat delegate;
+
+  public WorkloadOutputFormat() {
+    // Delegate to JMH's standard text output format for real-time progress
+    this.delegate = OutputFormatFactory.createFormatInstance(System.out, VerboseMode.NORMAL);
+  }
 
   private static final double[] PERCENTILES = {0.5, 0.9, 0.95, 0.99, 0.999, 0.9999, 1.0};
 
@@ -283,24 +294,36 @@ public class WorkloadOutputFormat implements OutputFormat {
   }
 
   @Override
-  public void iteration(BenchmarkParams benchParams, IterationParams params, int iteration) {}
+  public void iteration(BenchmarkParams benchParams, IterationParams params, int iteration) {
+    delegate.iteration(benchParams, params, iteration);
+  }
 
   @Override
   public void iterationResult(
-      BenchmarkParams benchParams, IterationParams params, int iteration, IterationResult data) {}
+      BenchmarkParams benchParams, IterationParams params, int iteration, IterationResult data) {
+    delegate.iterationResult(benchParams, params, iteration, data);
+  }
 
   @Override
-  public void startBenchmark(BenchmarkParams benchParams) {}
+  public void startBenchmark(BenchmarkParams benchParams) {
+    delegate.startBenchmark(benchParams);
+  }
 
   @Override
-  public void endBenchmark(BenchmarkResult result) {}
+  public void endBenchmark(BenchmarkResult result) {
+    delegate.endBenchmark(result);
+  }
 
   @Override
-  public void startRun() {}
+  public void startRun() {
+    delegate.startRun();
+  }
 
   @Override
   public void endRun(Collection<RunResult> result) {
-    System.out.println("End run results:");
+    // Note: We do not delegate endRun to the standard output format, as we are generating
+    // our own custom report here.
+    System.out.println("\n=== Generating JSON Benchmark Report ===");
     ReportMetadata metadata =
         new ReportMetadata(
             String.valueOf(System.currentTimeMillis()),
@@ -313,33 +336,43 @@ public class WorkloadOutputFormat implements OutputFormat {
     HashMap<String, BenchmarkDetails> benchmarks = new HashMap<>();
 
     for (RunResult res : result) {
-      for (BenchmarkResult br : res.getBenchmarkResults()) {
-        try {
-          WorkloadSpec spec =
-              WorkloadSpec.fromJsonString(br.getParams().getParam("workloadSpecJson"));
-          HashMap<String, String> additionalParams = new HashMap<>();
-          additionalParams.put("engine", br.getParams().getParam("engineName"));
+      // We use getAggregatedResult() instead of iterating over getBenchmarkResults() because the
+      // aggregated result properly combines all iterations  and provides accurate statistics,
+      // whereas individual benchmark results would give us  multiple entries per benchmark (one per
+      // iteration).
+      BenchmarkResult br = res.getAggregatedResult();
+      try {
+        WorkloadSpec spec =
+            WorkloadSpec.fromJsonString(br.getParams().getParam("workloadSpecJson"));
+        HashMap<String, String> additionalParams = new HashMap<>();
+        additionalParams.put("engine", br.getParams().getParam("engineName"));
 
-          HashMap<String, Object> secondaryMetrics = new HashMap<>();
-          for (String resultKey : br.getSecondaryResults().keySet()) {
-            Result r = br.getSecondaryResults().get(resultKey);
-            if (r instanceof org.openjdk.jmh.results.SampleTimeResult) {
-              secondaryMetrics.put(r.getLabel(), TimingMetric.fromResult(r));
-            } else if (r instanceof org.openjdk.jmh.results.ScalarResult) {
+        HashMap<String, Object> secondaryMetrics = new HashMap<>();
+        for (String resultKey : br.getSecondaryResults().keySet()) {
+          Result r = br.getSecondaryResults().get(resultKey);
+          if (r instanceof org.openjdk.jmh.results.SampleTimeResult) {
+            secondaryMetrics.put(r.getLabel(), TimingMetric.fromResult(r));
+          } else if (r instanceof org.openjdk.jmh.results.ScalarResult) {
+            ScalarResult scalarResult = (ScalarResult) r;
+            if (scalarResult.getScoreUnit().equals("count")) {
+              // Convert count metrics to long integers to avoid decimal representation in JSON
+              // output (e.g., report "42" instead of "42.0" for file counts)
               secondaryMetrics.put(r.getLabel(), (long) r.getScore());
+            } else {
+              secondaryMetrics.put(r.getLabel(), r.getScore());
             }
           }
-
-          BenchmarkDetails details =
-              new BenchmarkDetails(
-                  spec,
-                  additionalParams,
-                  TimingMetric.fromResult(br.getPrimaryResult()),
-                  secondaryMetrics);
-          benchmarks.put(spec.getFullName(), details);
-        } catch (IOException e) {
-          throw new RuntimeException(e);
         }
+
+        BenchmarkDetails details =
+            new BenchmarkDetails(
+                spec,
+                additionalParams,
+                TimingMetric.fromResult(br.getPrimaryResult()),
+                secondaryMetrics);
+        benchmarks.put(spec.getFullName(), details);
+      } catch (IOException e) {
+        throw new RuntimeException(e);
       }
     }
 
@@ -361,23 +394,37 @@ public class WorkloadOutputFormat implements OutputFormat {
   }
 
   @Override
-  public void print(String s) {}
+  public void print(String s) {
+    delegate.print(s);
+  }
 
   @Override
-  public void println(String s) {}
+  public void println(String s) {
+    delegate.println(s);
+  }
 
   @Override
-  public void flush() {}
+  public void flush() {
+    delegate.flush();
+  }
 
   @Override
-  public void close() {}
+  public void close() {
+    delegate.close();
+  }
 
   @Override
-  public void verbosePrintln(String s) {}
+  public void verbosePrintln(String s) {
+    delegate.verbosePrintln(s);
+  }
 
   @Override
-  public void write(int b) {}
+  public void write(int b) {
+    delegate.write(b);
+  }
 
   @Override
-  public void write(byte[] b) throws IOException {}
+  public void write(byte[] b) throws IOException {
+    delegate.write(b);
+  }
 }
