@@ -77,7 +77,8 @@ public class WorkloadBenchmark<T> {
     final Optional<String> filter;
     final List<String> jmhArgs;
 
-    BenchmarkArgs(List<java.nio.file.Path> specDirectories, Optional<String> filter, List<String> jmhArgs) {
+    BenchmarkArgs(
+        List<java.nio.file.Path> specDirectories, Optional<String> filter, List<String> jmhArgs) {
       this.specDirectories = specDirectories;
       this.filter = filter;
       this.jmhArgs = jmhArgs;
@@ -86,6 +87,16 @@ public class WorkloadBenchmark<T> {
 
   /**
    * Parses command-line arguments to extract benchmark-specific options.
+   *
+   * <p>Supported custom arguments:
+   *
+   * <ul>
+   *   <li>--with_spec_path <path>: Add a custom directory to search for workload specs
+   *   <li>--filter <pattern>: Filter workloads to run by name pattern
+   * </ul>
+   *
+   * <p>All other arguments are passed through to JMH. For async-profiler support, use JMH's
+   * built-in profiler flag: -prof async:output=flamegraph
    *
    * @param args The command-line arguments to parse
    * @return Parsed benchmark arguments
@@ -111,7 +122,7 @@ public class WorkloadBenchmark<T> {
     List<java.nio.file.Path> specDirs = new ArrayList<>();
     specDirs.add(WORKLOAD_SPECS_DIR);
     customSpecPath.ifPresent(path -> specDirs.add(java.nio.file.Paths.get(path)));
-
+    System.out.println("Using workload spec directories: " + specDirs);
     return new BenchmarkArgs(specDirs, filter, jmhArgs);
   }
 
@@ -145,8 +156,23 @@ public class WorkloadBenchmark<T> {
     String[] workloadSpecsArray = specStream.map(WorkloadSpec::toJsonString).toArray(String[]::new);
 
     // Configure and run JMH benchmark with the loaded workload specs
+    // Start with command-line args to allow users to override defaults
+    OptionsBuilder optBuilder = new OptionsBuilder();
+
+    // Parse JMH command-line arguments if provided
+    if (!parsedArgs.jmhArgs.isEmpty()) {
+      try {
+        optBuilder.parent(
+            new org.openjdk.jmh.runner.options.CommandLineOptions(
+                parsedArgs.jmhArgs.toArray(new String[0])));
+      } catch (org.openjdk.jmh.runner.options.CommandLineOptionException e) {
+        throw new RunnerException("Failed to parse JMH command-line arguments", e);
+      }
+    }
+
+    // Apply our defaults (can be overridden by command-line args above)
     Options opt =
-        new OptionsBuilder()
+        optBuilder
             .include(WorkloadBenchmark.class.getSimpleName())
             .shouldFailOnError(true)
             .param("workloadSpecJson", workloadSpecsArray)

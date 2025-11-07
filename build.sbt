@@ -956,6 +956,8 @@ lazy val kernelBenchmarks = (project in file("kernel/kernel-benchmarks"))
     libraryDependencies ++= Seq(
       "org.openjdk.jmh" % "jmh-core" % "1.37" % "test",
       "org.openjdk.jmh" % "jmh-generator-annprocess" % "1.37" % "test",
+      // async-profiler support for JMH
+      "me.bechberger" % "ap-loader-all" % "3.0-8" % "test",
       "org.apache.spark" %% "spark-hive" % defaultSparkVersion % "test" classifier "tests",
       "org.apache.spark" %% "spark-sql" % defaultSparkVersion % "test" classifier "tests",
       "org.apache.spark" %% "spark-core" % defaultSparkVersion % "test" classifier "tests",

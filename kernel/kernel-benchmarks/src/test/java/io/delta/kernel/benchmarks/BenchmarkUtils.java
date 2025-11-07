@@ -54,17 +54,18 @@ public class BenchmarkUtils {
   /**
    * Scans multiple workloads directories and loads all JSON workload specifications.
    *
-   * <p>This method loads workload specifications from multiple directories and combines them.
-   * If a directory doesn't exist or isn't accessible, a warning is printed and it is skipped.
+   * <p>This method loads workload specifications from multiple directories and combines them. If a
+   * directory doesn't exist or isn't accessible, a warning is printed and it is skipped.
    *
    * @param specDirPaths List of paths to directories containing workload specifications
    * @return List of loaded workload specifications (base specs, not variants)
    * @throws WorkloadLoadException if no valid workloads are found in any directory
    */
   public static List<WorkloadSpec> loadAllWorkloads(List<Path> specDirPaths) {
-    List<WorkloadSpec> allSpecs = specDirPaths.stream()
-        .flatMap(specDirPath -> loadWorkloadsFromDirectory(specDirPath).stream())
-        .collect(Collectors.toList());
+    List<WorkloadSpec> allSpecs =
+        specDirPaths.stream()
+            .flatMap(specDirPath -> loadWorkloadsFromDirectory(specDirPath).stream())
+            .collect(Collectors.toList());
 
     if (allSpecs.isEmpty()) {
       throw new WorkloadLoadException("No workloads found in any of the provided directories");
@@ -86,7 +87,8 @@ public class BenchmarkUtils {
           .flatMap(tableDir -> loadSpecsFromTable(tableDir).stream())
           .collect(Collectors.toList());
     } catch (WorkloadLoadException e) {
-      System.err.println("Warning: Failed to load workloads from " + specDirPath + ": " + e.getMessage());
+      System.err.println(
+          "Warning: Failed to load workloads from " + specDirPath + ": " + e.getMessage());
       return java.util.Collections.emptyList();
     }
   }
