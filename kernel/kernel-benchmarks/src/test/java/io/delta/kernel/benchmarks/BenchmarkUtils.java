@@ -52,32 +52,43 @@ public class BenchmarkUtils {
   }
 
   /**
-   * Scans the workloads directory and loads all JSON workload specifications.
+   * Scans multiple workloads directories and loads all JSON workload specifications.
    *
-   * <p>This method:
+   * <p>This method loads workload specifications from multiple directories and combines them.
+   * If a directory doesn't exist or isn't accessible, a warning is printed and it is skipped.
    *
-   * <ol>
-   *   <li>Finds all table directories in the workload specs directory
-   *   <li>Loads table_info.json from each table directory
-   *   <li>Loads all spec.json files from specs/ subdirectories
-   *   <li>Enriches each spec with tableInfo and caseName
-   *   <li>Returns loaded specs (not yet expanded into variants)
-   * </ol>
-   *
-   * <p>Note: Variant generation happens later via {@link WorkloadSpec#getWorkloadVariants()}.
+   * @param specDirPaths List of paths to directories containing workload specifications
+   * @return List of loaded workload specifications (base specs, not variants)
+   * @throws WorkloadLoadException if no valid workloads are found in any directory
+   */
+  public static List<WorkloadSpec> loadAllWorkloads(List<Path> specDirPaths) {
+    List<WorkloadSpec> allSpecs = specDirPaths.stream()
+        .flatMap(specDirPath -> loadWorkloadsFromDirectory(specDirPath).stream())
+        .collect(Collectors.toList());
+
+    if (allSpecs.isEmpty()) {
+      throw new WorkloadLoadException("No workloads found in any of the provided directories");
+    }
+
+    return allSpecs;
+  }
+
+  /**
+   * Loads workload specifications from a single directory, returning an empty list on error.
    *
    * @param specDirPath Path to the directory containing workload specifications
-   * @return List of loaded workload specifications (base specs, not variants)
-   * @throws WorkloadLoadException if workloads cannot be loaded
+   * @return List of loaded workload specifications, or empty list if loading fails
    */
-  public static List<WorkloadSpec> loadAllWorkloads(Path specDirPath) {
-    validateWorkloadDirectory(specDirPath);
-
-    List<Path> tableDirectories = findTableDirectories(specDirPath);
-
-    return tableDirectories.stream()
-        .flatMap(tableDir -> loadSpecsFromTable(tableDir).stream())
-        .collect(Collectors.toList());
+  private static List<WorkloadSpec> loadWorkloadsFromDirectory(Path specDirPath) {
+    try {
+      validateWorkloadDirectory(specDirPath);
+      return findTableDirectories(specDirPath).stream()
+          .flatMap(tableDir -> loadSpecsFromTable(tableDir).stream())
+          .collect(Collectors.toList());
+    } catch (WorkloadLoadException e) {
+      System.err.println("Warning: Failed to load workloads from " + specDirPath + ": " + e.getMessage());
+      return java.util.Collections.emptyList();
+    }
   }
 
   /** Validates that the workload directory exists and is accessible. */

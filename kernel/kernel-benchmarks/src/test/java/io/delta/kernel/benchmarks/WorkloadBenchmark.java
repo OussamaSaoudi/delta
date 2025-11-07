@@ -71,28 +71,78 @@ public class WorkloadBenchmark<T> {
     runner.executeAsBenchmark(blackhole);
   }
 
+  /** Helper class to hold parsed command-line arguments. */
+  private static class BenchmarkArgs {
+    final List<java.nio.file.Path> specDirectories;
+    final Optional<String> filter;
+    final List<String> jmhArgs;
+
+    BenchmarkArgs(List<java.nio.file.Path> specDirectories, Optional<String> filter, List<String> jmhArgs) {
+      this.specDirectories = specDirectories;
+      this.filter = filter;
+      this.jmhArgs = jmhArgs;
+    }
+  }
+
+  /**
+   * Parses command-line arguments to extract benchmark-specific options.
+   *
+   * @param args The command-line arguments to parse
+   * @return Parsed benchmark arguments
+   */
+  private static BenchmarkArgs parseArgs(String[] args) {
+    Optional<String> customSpecPath = Optional.empty();
+    Optional<String> filter = Optional.empty();
+    List<String> jmhArgs = new ArrayList<>();
+
+    for (int i = 0; i < args.length; i++) {
+      if ("--with_spec_path".equals(args[i]) && i + 1 < args.length) {
+        customSpecPath = Optional.of(args[i + 1]);
+        i++; // Skip the next argument (the path value)
+      } else if ("--filter".equals(args[i]) && i + 1 < args.length) {
+        filter = Optional.of(args[i + 1]);
+        i++; // Skip the next argument (the filter value)
+      } else {
+        jmhArgs.add(args[i]);
+      }
+    }
+
+    // Build list of spec directories to load from
+    List<java.nio.file.Path> specDirs = new ArrayList<>();
+    specDirs.add(WORKLOAD_SPECS_DIR);
+    customSpecPath.ifPresent(path -> specDirs.add(java.nio.file.Paths.get(path)));
+
+    return new BenchmarkArgs(specDirs, filter, jmhArgs);
+  }
+
   /**
    * TODO: In the future, this can be extracted so that new benchmarks with custom BenchmarkStates
    * can be easily constructed.
    */
   public static void main(String[] args) throws RunnerException, IOException {
-    // Get workload specs from the workloads directory
-    List<WorkloadSpec> workloadSpecs = BenchmarkUtils.loadAllWorkloads(WORKLOAD_SPECS_DIR);
+    // Parse command-line arguments
+    BenchmarkArgs parsedArgs = parseArgs(args);
+
+    // Get workload specs from all directories
+    List<WorkloadSpec> workloadSpecs = BenchmarkUtils.loadAllWorkloads(parsedArgs.specDirectories);
     if (workloadSpecs.isEmpty()) {
       throw new RunnerException(
           "No workloads found. Please add workload specs to the workloads directory.");
     }
 
-    // Parse the Json specs from the json paths
+    // Parse the Json specs from the json paths and apply filter if specified
     List<WorkloadSpec> filteredSpecs = new ArrayList<>();
     for (WorkloadSpec spec : workloadSpecs) {
-      // TODO(#5420): In the future, we can filter specific workloads using command line args here.
       filteredSpecs.addAll(spec.getWorkloadVariants());
     }
 
-    // Convert paths into a String array for JMH. JMH requires that parameters be of type String[].
-    String[] workloadSpecsArray =
-        filteredSpecs.stream().map(WorkloadSpec::toJsonString).toArray(String[]::new);
+    // Convert to JSON strings, applying filter if specified
+    java.util.stream.Stream<WorkloadSpec> specStream = filteredSpecs.stream();
+    if (parsedArgs.filter.isPresent()) {
+      String filterValue = parsedArgs.filter.get();
+      specStream = specStream.filter(spec -> spec.getFullName().contains(filterValue));
+    }
+    String[] workloadSpecsArray = specStream.map(WorkloadSpec::toJsonString).toArray(String[]::new);
 
     // Configure and run JMH benchmark with the loaded workload specs
     Options opt =
