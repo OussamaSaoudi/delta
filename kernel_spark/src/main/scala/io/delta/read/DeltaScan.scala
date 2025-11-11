@@ -16,6 +16,8 @@ class DeltaScan(
   import DeltaScan._
 
   // Serialize scan state for executors using RustScanFileState format
+  // Note: Predicates are used for data skipping (file-level) via the Rust scan builder,
+  // not for row-level filtering. Spark will apply row filters after reading.
   private val serializedScanState = {
     val tableSchema = snapshot.getSchema() // This is Kernel StructType
     val kernelReadSchema = io.delta.SchemaUtils.convertSparkSchemaToKernelSchema(sparkReadSchema)

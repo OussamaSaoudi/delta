@@ -75,11 +75,13 @@ abstract class DeltaPartitionReader[T](deltaInputPartition: DeltaInputPartition)
     }
   }
 
+  // Read Parquet files without row-level filtering
+  // Predicates are only used for data skipping (file-level filtering) via the Rust scan builder
   protected val physicalRowDataIter = engine.getParquetHandler
     .readParquetFiles(
       Utils.singletonCloseableIterator(FileStatus.of(absoluteFilePath, scanFileRow.size, 0)),
       scanState.readSchema,
-      java.util.Optional.empty() /* predicate */ )
+      java.util.Optional.empty() /* no row-level predicate - Spark filters post-read */ )
 
   protected val logicalRowDataColumnarBatchIter =
     Transformer.transformPhysicalData(engine, scanState, scanFileRow, physicalRowDataIter)
