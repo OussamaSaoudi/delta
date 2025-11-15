@@ -127,12 +127,7 @@ public class BenchmarkUtils {
 
   /** Validates that a table directory has the required structure. */
   private static void validateTableStructure(Path tableDir) {
-    Path deltaDir = tableDir.resolve(DELTA_DIR_NAME);
     Path specsDir = tableDir.resolve(SPECS_DIR_NAME);
-
-    if (!Files.exists(deltaDir) || !Files.isDirectory(deltaDir)) {
-      throw new WorkloadLoadException("Delta directory not found: " + deltaDir);
-    }
 
     if (!Files.exists(specsDir) || !Files.isDirectory(specsDir)) {
       throw new WorkloadLoadException("Specs directory not found: " + specsDir);

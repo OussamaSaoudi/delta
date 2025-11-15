@@ -978,6 +978,8 @@ lazy val kernelBenchmarks = (project in file("kernel/kernel-benchmarks"))
     libraryDependencies ++= Seq(
       "org.openjdk.jmh" % "jmh-core" % "1.37" % "test",
       "org.openjdk.jmh" % "jmh-generator-annprocess" % "1.37" % "test",
+      // Add hadoop-aws for S3 support in benchmarks
+      "org.apache.hadoop" % "hadoop-aws" % hadoopVersion % "test",
     ),
   )
 

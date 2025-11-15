@@ -50,10 +50,74 @@ public class WorkloadBenchmark<T> {
     @Override
     protected Engine getEngine(String engineName) {
       if (engineName.equals("default")) {
-        return DefaultEngine.create(new Configuration());
+        return DefaultEngine.create(configureHadoopConfiguration());
       } else {
         throw new IllegalArgumentException("Unsupported engine: " + engineName);
       }
+    }
+
+    /**
+     * Creates and configures a Hadoop Configuration object with S3 credentials from environment
+     * variables.
+     *
+     * <p>Reads the following environment variables if present:
+     *
+     * <ul>
+     *   <li>AWS_ACCESS_KEY_ID → fs.s3a.access.key (and fs.s3.access.key)
+     *   <li>AWS_SECRET_ACCESS_KEY → fs.s3a.secret.key (and fs.s3.secret.key)
+     *   <li>AWS_SESSION_TOKEN → fs.s3a.session.token (and fs.s3.session.token)
+     * </ul>
+     *
+     * <p>Also sets the S3A implementation and credentials provider based on whether a session token
+     * is present. Configures both s3:// and s3a:// schemes to use the same implementation.
+     *
+     * @return configured Hadoop Configuration object
+     */
+    private static Configuration configureHadoopConfiguration() {
+      Configuration conf = new Configuration();
+
+      // Set S3A implementation for both s3:// and s3a:// schemes
+      String s3aImpl = "org.apache.hadoop.fs.s3a.S3AFileSystem";
+      conf.set("fs.s3a.impl", s3aImpl);
+      conf.set("fs.s3.impl", s3aImpl);
+
+      // Read S3 credentials from standard AWS environment variables
+      String accessKey = System.getenv("AWS_ACCESS_KEY_ID");
+      String secretKey = System.getenv("AWS_SECRET_ACCESS_KEY");
+      String sessionToken = System.getenv("AWS_SESSION_TOKEN");
+
+      // Configure S3 credentials if provided (set for both s3 and s3a schemes)
+      if (accessKey != null && !accessKey.trim().isEmpty()) {
+        conf.set("fs.s3a.access.key", accessKey);
+        conf.set("fs.s3.access.key", accessKey);
+      }
+
+      if (secretKey != null && !secretKey.trim().isEmpty()) {
+        conf.set("fs.s3a.secret.key", secretKey);
+        conf.set("fs.s3.secret.key", secretKey);
+      }
+
+      if (sessionToken != null && !sessionToken.trim().isEmpty()) {
+        conf.set("fs.s3a.session.token", sessionToken);
+        conf.set("fs.s3.session.token", sessionToken);
+        // Use TemporaryAWSCredentialsProvider when session token is present
+        conf.set(
+            "fs.s3a.aws.credentials.provider",
+            "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider");
+        conf.set(
+            "fs.s3.aws.credentials.provider",
+            "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider");
+      } else if (accessKey != null && secretKey != null) {
+        // Use SimpleAWSCredentialsProvider when only access key and secret are present
+        conf.set(
+            "fs.s3a.aws.credentials.provider",
+            "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider");
+        conf.set(
+            "fs.s3.aws.credentials.provider",
+            "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider");
+      }
+
+      return conf;
     }
   }
 

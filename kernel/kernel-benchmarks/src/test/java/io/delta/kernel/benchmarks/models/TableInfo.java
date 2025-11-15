@@ -43,7 +43,8 @@ import java.util.Optional;
  * {
  *   "name": "large-table",
  *   "description": "A large Delta table with multi-part checkpoints for performance testing",
- *   "engineInfo": "Apache-Spark/3.5.1 Delta-Lake/3.1.0"
+ *   "engineInfo": "Apache-Spark/3.5.1 Delta-Lake/3.1.0",
+ *   "table_path": "s3a://my-bucket/benchmarks/large-table"
  * }
  * }</pre>
  */
@@ -68,6 +69,14 @@ public class TableInfo {
   private String tableInfoPath;
 
   /**
+   * Optional absolute path to the Delta table root. Can be a local filesystem path or an S3 URI
+   * (e.g., "s3a://bucket/path/to/table"). If specified, this path is used directly as the table
+   * root. If not specified, the table root is resolved as tableInfoPath/delta.
+   */
+  @JsonProperty("table_path")
+  private String tablePath;
+
+  /**
    * Whether this table is a Unity Catalog managed table. If true, the UC Catalog info is loaded
    * from a fixed path: catalog_managed_info.json in the same directory as table_info.json.
    */
@@ -88,9 +97,20 @@ public class TableInfo {
    */
   public TableInfo() {}
 
-  /** Resolves the table root path based on the table type and location configuration. */
+  /**
+   * Resolves the table root path based on the table type and location configuration.
+   *
+   * <p>If table_path is specified in the JSON, it is returned directly (supports S3 URIs and
+   * absolute local paths). Otherwise, defaults to tableInfoPath/delta for backward compatibility
+   * with local workload directories.
+   *
+   * @return the absolute path or URI to the Delta table root (where _delta_log is located)
+   */
   @JsonIgnore
   public String getResolvedTableRoot() {
+    if (tablePath != null && !tablePath.trim().isEmpty()) {
+      return tablePath;
+    }
     return Paths.get(tableInfoPath, "delta").toAbsolutePath().toString();
   }
 
