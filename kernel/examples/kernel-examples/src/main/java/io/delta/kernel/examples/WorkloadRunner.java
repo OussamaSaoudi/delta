@@ -78,9 +78,14 @@ public class WorkloadRunner {
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .enable(SerializationFeature.INDENT_OUTPUT);
 
+    private final Configuration hadoopConf;
     private final Engine engine;
     private final int warmupIterations;
     private final int measuredIterations;
+
+    // UC table resolution
+    private UCTableResolver ucResolver;
+    private UCTableResolver.TempCredentials cachedCredentials;
 
     /**
      * Create a runner with the given Hadoop configuration.
@@ -93,6 +98,7 @@ public class WorkloadRunner {
             Configuration hadoopConf,
             int warmupIterations,
             int measuredIterations) {
+        this.hadoopConf = hadoopConf;
         this.engine = DefaultEngine.create(hadoopConf);
         this.warmupIterations = warmupIterations;
         this.measuredIterations = measuredIterations;
@@ -178,6 +184,13 @@ public class WorkloadRunner {
     }
 
     private String resolveTablePath(Path tableDir, JsonNode tableInfo) {
+        // UC-managed tables: resolve via UC REST API
+        boolean isCatalogManaged = tableInfo.has("is_catalog_managed")
+                && tableInfo.get("is_catalog_managed").asBoolean(false);
+        if (isCatalogManaged && tableInfo.has("uc_table_name")) {
+            return resolveUCTable(tableInfo.get("uc_table_name").asText());
+        }
+
         // Prefer explicit table_root_path (used for S3/cloud tables)
         if (tableInfo.has("table_root_path")) {
             return tableInfo.get("table_root_path").asText();
@@ -194,6 +207,68 @@ public class WorkloadRunner {
         }
 
         return null;
+    }
+
+    /**
+     * Resolve a UC-managed table: look up storage location and obtain temp credentials.
+     */
+    private String resolveUCTable(String ucTableName) {
+        try {
+            ensureUCResolver();
+
+            UCTableResolver.UCTableInfo tableInfo = ucResolver.resolveTable(ucTableName);
+            System.out.println("Resolved UC table: " + ucTableName);
+            System.out.println("  Storage location: " + tableInfo.storageLocation);
+            System.out.println("  Table ID: " + tableInfo.tableId);
+
+            refreshCredentialsIfNeeded(tableInfo.tableId);
+
+            // Normalize s3:// to s3a:// — UC returns s3:// but Hadoop needs s3a://
+            String location = tableInfo.storageLocation;
+            if (location != null && location.startsWith("s3://")) {
+                location = "s3a://" + location.substring("s3://".length());
+                System.out.println("  Normalized storage location: " + location);
+            }
+
+            return location;
+        } catch (IOException e) {
+            System.err.println("Failed to resolve UC table '" + ucTableName + "': "
+                    + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Refresh temporary credentials if they are expired or not yet obtained.
+     */
+    private void refreshCredentialsIfNeeded(String tableId) throws IOException {
+        if (cachedCredentials != null && !cachedCredentials.isExpired()) {
+            return;
+        }
+
+        System.out.println("Fetching temporary credentials for table: " + tableId);
+        cachedCredentials = ucResolver.getTemporaryCredentials(tableId);
+
+        UCTableResolver.AwsTempCredentials aws = cachedCredentials.awsTempCredentials;
+        if (aws != null) {
+            hadoopConf.set("fs.s3a.access.key", aws.accessKeyId);
+            hadoopConf.set("fs.s3a.secret.key", aws.secretAccessKey);
+            if (aws.sessionToken != null) {
+                hadoopConf.set("fs.s3a.session.token", aws.sessionToken);
+                hadoopConf.set("fs.s3a.aws.credentials.provider",
+                        "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider");
+            }
+            System.out.println("Applied temporary AWS credentials to Hadoop config");
+        }
+    }
+
+    /**
+     * Lazily initialize the UC resolver from environment variables.
+     */
+    private void ensureUCResolver() {
+        if (ucResolver == null) {
+            ucResolver = UCTableResolver.fromEnvironment();
+        }
     }
 
     private BenchmarkResult runWorkload(
