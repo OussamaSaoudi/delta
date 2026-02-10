@@ -52,8 +52,13 @@ public class UCTableResolver implements AutoCloseable {
 
     private final String baseUri;
     private final String token;
+    private final String orgId;  // Optional workspace org ID for multi-workspace deployments
 
     public UCTableResolver(String ucEndpoint, String ucToken) {
+        this(ucEndpoint, ucToken, null);
+    }
+
+    public UCTableResolver(String ucEndpoint, String ucToken, String orgId) {
         if (ucEndpoint == null || ucEndpoint.isEmpty()) {
             throw new IllegalArgumentException("UC endpoint must not be null or empty");
         }
@@ -62,6 +67,7 @@ public class UCTableResolver implements AutoCloseable {
         }
         this.baseUri = ucEndpoint.replaceAll("/+$", "");
         this.token = ucToken;
+        this.orgId = orgId;
     }
 
     /**
@@ -85,7 +91,8 @@ public class UCTableResolver implements AutoCloseable {
         if (!endpoint.startsWith("http://") && !endpoint.startsWith("https://")) {
             endpoint = "https://" + endpoint;
         }
-        return new UCTableResolver(endpoint, token);
+        String orgId = System.getenv("DATABRICKS_ORG_ID");
+        return new UCTableResolver(endpoint, token, orgId);
     }
 
     /**
@@ -145,23 +152,21 @@ public class UCTableResolver implements AutoCloseable {
     /**
      * Get the latest table version ratified by UC (the maxCatalogVersion).
      * Calls: GET /api/2.1/unity-catalog/delta/preview/commits
-     * with tableId and tableUri in the request body.
+     *
+     * Note: This endpoint requires GET with a body, but HttpURLConnection silently
+     * converts GET to POST when setDoOutput(true) is called. So we pass parameters
+     * as query parameters instead, which the UC API also accepts.
      */
     public long getLatestTableVersion(String tableId, String tableUri) throws IOException {
-        String url = baseUri + "/api/2.1/unity-catalog/delta/preview/commits";
+        String encodedTableId = URLEncoder.encode(tableId, StandardCharsets.UTF_8.name());
+        String encodedTableUri = URLEncoder.encode(tableUri, StandardCharsets.UTF_8.name());
+        String url = baseUri + "/api/2.1/unity-catalog/delta/preview/commits"
+                + "?table_id=" + encodedTableId
+                + "&table_uri=" + encodedTableUri
+                + "&start_version=0";
 
-        String requestBody = MAPPER.writeValueAsString(
-                new GetCommitsRequest(tableId, tableUri, 0L));
-
-        // UC uses GET with a body for this endpoint
         HttpURLConnection conn = openConnection(url, "GET");
-        conn.setRequestProperty("Content-Type", "application/json");
-        conn.setDoOutput(true);
         try {
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(requestBody.getBytes(StandardCharsets.UTF_8));
-            }
-
             int status = conn.getResponseCode();
             String body = readResponse(conn);
             if (status != 200) {
@@ -186,6 +191,9 @@ public class UCTableResolver implements AutoCloseable {
         conn.setRequestMethod(method);
         conn.setRequestProperty("Authorization", "Bearer " + token);
         conn.setRequestProperty("Accept", "application/json");
+        if (orgId != null && !orgId.isEmpty()) {
+            conn.setRequestProperty("X-Databricks-Org-Id", orgId);
+        }
         conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
         conn.setReadTimeout(READ_TIMEOUT_MS);
         return conn;
