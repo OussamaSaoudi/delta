@@ -142,6 +142,40 @@ public class UCTableResolver implements AutoCloseable {
         }
     }
 
+    /**
+     * Get the latest table version ratified by UC (the maxCatalogVersion).
+     * Calls: GET /api/2.1/unity-catalog/delta/preview/commits
+     * with tableId and tableUri in the request body.
+     */
+    public long getLatestTableVersion(String tableId, String tableUri) throws IOException {
+        String url = baseUri + "/api/2.1/unity-catalog/delta/preview/commits";
+
+        String requestBody = MAPPER.writeValueAsString(
+                new GetCommitsRequest(tableId, tableUri, 0L));
+
+        // UC uses GET with a body for this endpoint
+        HttpURLConnection conn = openConnection(url, "GET");
+        conn.setRequestProperty("Content-Type", "application/json");
+        conn.setDoOutput(true);
+        try {
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(requestBody.getBytes(StandardCharsets.UTF_8));
+            }
+
+            int status = conn.getResponseCode();
+            String body = readResponse(conn);
+            if (status != 200) {
+                throw new IOException(String.format(
+                        "Failed to get commits for table '%s': HTTP %d - %s",
+                        tableId, status, body));
+            }
+            GetCommitsResponse response = MAPPER.readValue(body, GetCommitsResponse.class);
+            return response.latestTableVersion;
+        } finally {
+            conn.disconnect();
+        }
+    }
+
     @Override
     public void close() {
         // No resources to close with HttpURLConnection
@@ -178,6 +212,27 @@ public class UCTableResolver implements AutoCloseable {
     // =========================================================================
     // Data classes
     // =========================================================================
+
+    private static class GetCommitsRequest {
+        @JsonProperty("table_id")
+        public String tableId;
+        @JsonProperty("table_uri")
+        public String tableUri;
+        @JsonProperty("start_version")
+        public long startVersion;
+
+        GetCommitsRequest(String tableId, String tableUri, long startVersion) {
+            this.tableId = tableId;
+            this.tableUri = tableUri;
+            this.startVersion = startVersion;
+        }
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    static class GetCommitsResponse {
+        @JsonProperty("latest_table_version")
+        public long latestTableVersion;
+    }
 
     private static class TempCredentialRequest {
         @JsonProperty("table_id")

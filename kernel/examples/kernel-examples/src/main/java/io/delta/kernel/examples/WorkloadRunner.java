@@ -34,6 +34,7 @@ import org.apache.hadoop.conf.Configuration;
 
 import io.delta.kernel.Scan;
 import io.delta.kernel.Snapshot;
+import io.delta.kernel.SnapshotBuilder;
 import io.delta.kernel.TableManager;
 import io.delta.kernel.data.FilteredColumnarBatch;
 import io.delta.kernel.data.Row;
@@ -87,6 +88,10 @@ public class WorkloadRunner {
     private UCTableResolver ucResolver;
     private UCTableResolver.TempCredentials cachedCredentials;
 
+    // Per-table UC info (set by resolveUCTable, used by snapshot loading)
+    private String currentUCTableId;
+    private String currentUCStorageLocation;  // Original s3:// location for UC API calls
+
     /**
      * Create a runner with the given Hadoop configuration.
      *
@@ -120,6 +125,10 @@ public class WorkloadRunner {
         }
 
         for (File tableDir : tableDirs) {
+            // Reset per-table UC state
+            currentUCTableId = null;
+            currentUCStorageLocation = null;
+
             Path tableInfoPath = tableDir.toPath().resolve("table_info.json");
             if (!Files.exists(tableInfoPath)) {
                 System.err.println("No table_info.json in " + tableDir + ", skipping");
@@ -223,6 +232,10 @@ public class WorkloadRunner {
 
             refreshCredentialsIfNeeded(tableInfo.tableId);
 
+            // Store UC table info for use by snapshot loading (maxCatalogVersion)
+            currentUCTableId = tableInfo.tableId;
+            currentUCStorageLocation = tableInfo.storageLocation;
+
             // Normalize s3:// to s3a:// — UC returns s3:// but Hadoop needs s3a://
             String location = tableInfo.storageLocation;
             if (location != null && location.startsWith("s3://")) {
@@ -288,6 +301,24 @@ public class WorkloadRunner {
     }
 
     /**
+     * Build a snapshot for the given table path.
+     * For catalogManaged (UC) tables, fetches maxCatalogVersion from UC.
+     */
+    private Snapshot buildSnapshot(String tablePath) {
+        SnapshotBuilder builder = TableManager.loadSnapshot(tablePath);
+        if (currentUCTableId != null && currentUCStorageLocation != null) {
+            try {
+                long maxVersion = ucResolver.getLatestTableVersion(
+                        currentUCTableId, currentUCStorageLocation);
+                builder = builder.withMaxCatalogVersion(maxVersion);
+            } catch (IOException e) {
+                System.err.println("Warning: failed to get maxCatalogVersion: " + e.getMessage());
+            }
+        }
+        return builder.build(engine);
+    }
+
+    /**
      * Benchmark snapshot construction (log replay) time.
      */
     private BenchmarkResult runSnapshotConstruction(String tablePath, String workloadName) {
@@ -296,14 +327,14 @@ public class WorkloadRunner {
         // Warmup
         for (int i = 0; i < warmupIterations; i++) {
             System.out.println("  Warmup " + (i + 1) + "/" + warmupIterations);
-            TableManager.loadSnapshot(tablePath).build(engine);
+            buildSnapshot(tablePath);
         }
 
         // Measured iterations
         List<Long> durations = new ArrayList<>();
         for (int i = 0; i < measuredIterations; i++) {
             long startNanos = System.nanoTime();
-            Snapshot snapshot = TableManager.loadSnapshot(tablePath).build(engine);
+            Snapshot snapshot = buildSnapshot(tablePath);
             long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
             durations.add(elapsedMs);
             System.out.println("  Measured " + (i + 1) + "/" + measuredIterations
@@ -354,7 +385,7 @@ public class WorkloadRunner {
     }
 
     private ReadResult executeRead(String tablePath, String operationType) {
-        Snapshot snapshot = TableManager.loadSnapshot(tablePath).build(engine);
+        Snapshot snapshot = buildSnapshot(tablePath);
         int schemaFieldCount = snapshot.getSchema().length();
 
         if ("read_metadata".equals(operationType)) {
