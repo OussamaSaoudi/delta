@@ -244,9 +244,10 @@ public class WorkloadRunner {
             }
 
             return location;
-        } catch (IOException e) {
+        } catch (Exception e) {
             System.err.println("Failed to resolve UC table '" + ucTableName + "': "
                     + e.getMessage());
+            e.printStackTrace(System.err);
             return null;
         }
     }
@@ -308,12 +309,20 @@ public class WorkloadRunner {
         SnapshotBuilder builder = TableManager.loadSnapshot(tablePath);
         if (currentUCTableId != null && currentUCStorageLocation != null) {
             try {
+                System.out.println("Fetching maxCatalogVersion for tableId=" + currentUCTableId);
                 long maxVersion = ucResolver.getLatestTableVersion(
                         currentUCTableId, currentUCStorageLocation);
+                System.out.println("Got maxCatalogVersion=" + maxVersion);
                 builder = builder.withMaxCatalogVersion(maxVersion);
-            } catch (IOException e) {
-                System.err.println("Warning: failed to get maxCatalogVersion: " + e.getMessage());
+            } catch (Exception e) {
+                throw new RuntimeException(
+                        "Failed to get maxCatalogVersion for catalogManaged table "
+                        + currentUCTableId + ": " + e.getMessage(), e);
             }
+        } else {
+            System.out.println("Non-UC table, skipping maxCatalogVersion "
+                    + "(ucTableId=" + currentUCTableId
+                    + ", ucStorageLocation=" + currentUCStorageLocation + ")");
         }
         return builder.build(engine);
     }
