@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -34,12 +35,12 @@ import org.apache.hadoop.conf.Configuration;
 
 import io.delta.kernel.Scan;
 import io.delta.kernel.Snapshot;
-import io.delta.kernel.SnapshotBuilder;
 import io.delta.kernel.TableManager;
 import io.delta.kernel.data.FilteredColumnarBatch;
 import io.delta.kernel.data.Row;
 import io.delta.kernel.defaults.engine.DefaultEngine;
 import io.delta.kernel.engine.Engine;
+import io.delta.kernel.unitycatalog.UCCatalogManagedClient;
 import io.delta.kernel.utils.CloseableIterator;
 
 /**
@@ -84,9 +85,13 @@ public class WorkloadRunner {
     private final int warmupIterations;
     private final int measuredIterations;
 
-    // UC table resolution
+    // UC table resolution and credential vending
     private UCTableResolver ucResolver;
     private UCTableResolver.TempCredentials cachedCredentials;
+
+    // UC catalog-managed client (uses UCClient for coordinated commits)
+    private UCCatalogManagedClient ucCatalogClient;
+    private UCRestClient ucRestClient;
 
     // Per-table UC info (set by resolveUCTable, used by snapshot loading)
     private String currentUCTableId;
@@ -223,7 +228,7 @@ public class WorkloadRunner {
      */
     private String resolveUCTable(String ucTableName) {
         try {
-            ensureUCResolver();
+            ensureUCClients();
 
             UCTableResolver.UCTableInfo tableInfo = ucResolver.resolveTable(ucTableName);
             System.out.println("Resolved UC table: " + ucTableName);
@@ -277,11 +282,15 @@ public class WorkloadRunner {
     }
 
     /**
-     * Lazily initialize the UC resolver from environment variables.
+     * Lazily initialize UC clients from environment variables.
      */
-    private void ensureUCResolver() {
+    private void ensureUCClients() {
         if (ucResolver == null) {
             ucResolver = UCTableResolver.fromEnvironment();
+        }
+        if (ucRestClient == null) {
+            ucRestClient = UCRestClient.fromEnvironment();
+            ucCatalogClient = new UCCatalogManagedClient(ucRestClient);
         }
     }
 
@@ -303,28 +312,25 @@ public class WorkloadRunner {
 
     /**
      * Build a snapshot for the given table path.
-     * For catalogManaged (UC) tables, fetches maxCatalogVersion from UC.
+     * For catalogManaged (UC) tables, uses {@link UCCatalogManagedClient#loadSnapshot}
+     * which handles getCommits, ParsedLogData, withCommitter, withLogData, and
+     * withMaxCatalogVersion internally.
      */
     private Snapshot buildSnapshot(String tablePath) {
-        SnapshotBuilder builder = TableManager.loadSnapshot(tablePath);
-        if (currentUCTableId != null && currentUCStorageLocation != null) {
-            try {
-                System.out.println("Fetching maxCatalogVersion for tableId=" + currentUCTableId);
-                long maxVersion = ucResolver.getLatestTableVersion(
-                        currentUCTableId, currentUCStorageLocation);
-                System.out.println("Got maxCatalogVersion=" + maxVersion);
-                builder = builder.withMaxCatalogVersion(maxVersion);
-            } catch (Exception e) {
-                throw new RuntimeException(
-                        "Failed to get maxCatalogVersion for catalogManaged table "
-                        + currentUCTableId + ": " + e.getMessage(), e);
-            }
+        if (currentUCTableId != null && ucCatalogClient != null) {
+            System.out.println("Loading UC catalog-managed snapshot for tableId="
+                    + currentUCTableId + " at " + tablePath);
+            return ucCatalogClient.loadSnapshot(
+                    engine,
+                    currentUCTableId,
+                    tablePath,
+                    Optional.empty(),  // no version time-travel
+                    Optional.empty()); // no timestamp time-travel
         } else {
-            System.out.println("Non-UC table, skipping maxCatalogVersion "
-                    + "(ucTableId=" + currentUCTableId
-                    + ", ucStorageLocation=" + currentUCStorageLocation + ")");
+            System.out.println("Non-UC table, loading snapshot directly from "
+                    + tablePath);
+            return TableManager.loadSnapshot(tablePath).build(engine);
         }
-        return builder.build(engine);
     }
 
     /**
