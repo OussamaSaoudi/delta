@@ -40,7 +40,13 @@ import io.delta.kernel.data.FilteredColumnarBatch;
 import io.delta.kernel.data.Row;
 import io.delta.kernel.defaults.engine.DefaultEngine;
 import io.delta.kernel.engine.Engine;
+import io.delta.kernel.metrics.MetricsReport;
+import io.delta.kernel.metrics.ScanMetricsResult;
+import io.delta.kernel.metrics.ScanReport;
+import io.delta.kernel.metrics.SnapshotMetricsResult;
+import io.delta.kernel.metrics.SnapshotReport;
 import io.delta.kernel.unitycatalog.UCCatalogManagedClient;
+import io.delta.kernel.unitycatalog.metrics.UcLoadSnapshotTelemetry;
 import io.delta.kernel.utils.CloseableIterator;
 
 /**
@@ -81,7 +87,7 @@ public class WorkloadRunner {
             .enable(SerializationFeature.INDENT_OUTPUT);
 
     private final Configuration hadoopConf;
-    private final Engine engine;
+    private final MetricsCapturingEngine metricsEngine;
     private final int warmupIterations;
     private final int measuredIterations;
 
@@ -109,7 +115,7 @@ public class WorkloadRunner {
             int warmupIterations,
             int measuredIterations) {
         this.hadoopConf = hadoopConf;
-        this.engine = DefaultEngine.create(hadoopConf);
+        this.metricsEngine = new MetricsCapturingEngine(DefaultEngine.create(hadoopConf));
         this.warmupIterations = warmupIterations;
         this.measuredIterations = measuredIterations;
     }
@@ -321,7 +327,7 @@ public class WorkloadRunner {
             System.out.println("Loading UC catalog-managed snapshot for tableId="
                     + currentUCTableId + " at " + tablePath);
             return ucCatalogClient.loadSnapshot(
-                    engine,
+                    metricsEngine,
                     currentUCTableId,
                     tablePath,
                     Optional.empty(),  // no version time-travel
@@ -329,7 +335,7 @@ public class WorkloadRunner {
         } else {
             System.out.println("Non-UC table, loading snapshot directly from "
                     + tablePath);
-            return TableManager.loadSnapshot(tablePath).build(engine);
+            return TableManager.loadSnapshot(tablePath).build(metricsEngine);
         }
     }
 
@@ -342,12 +348,16 @@ public class WorkloadRunner {
         // Warmup
         for (int i = 0; i < warmupIterations; i++) {
             System.out.println("  Warmup " + (i + 1) + "/" + warmupIterations);
+            metricsEngine.clearReports();
             buildSnapshot(tablePath);
         }
 
         // Measured iterations
         List<Long> durations = new ArrayList<>();
+        Map<String, List<Double>> perIterationMetrics = new HashMap<>();
+
         for (int i = 0; i < measuredIterations; i++) {
+            metricsEngine.clearReports();
             long startNanos = System.nanoTime();
             Snapshot snapshot = buildSnapshot(tablePath);
             long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
@@ -355,9 +365,15 @@ public class WorkloadRunner {
             System.out.println("  Measured " + (i + 1) + "/" + measuredIterations
                     + ": " + elapsedMs + "ms (schema fields: "
                     + snapshot.getSchema().length() + ")");
+
+            extractMetricsFromReports(metricsEngine.getReports(), perIterationMetrics);
         }
 
-        return BenchmarkResult.success(workloadName, "snapshot_construction", durations);
+        BenchmarkResult result = BenchmarkResult.success(
+                workloadName, "snapshot_construction", durations);
+        result.customMetrics = computeAverages(perIterationMetrics);
+        printKernelMetrics(result.customMetrics);
+        return result;
     }
 
     /**
@@ -370,14 +386,16 @@ public class WorkloadRunner {
         // Warmup
         for (int i = 0; i < warmupIterations; i++) {
             System.out.println("  Warmup " + (i + 1) + "/" + warmupIterations);
+            metricsEngine.clearReports();
             executeRead(tablePath, operationType);
         }
 
         // Measured iterations
         List<Long> durations = new ArrayList<>();
-        Map<String, Double> customMetrics = new HashMap<>();
+        Map<String, List<Double>> perIterationMetrics = new HashMap<>();
 
         for (int i = 0; i < measuredIterations; i++) {
+            metricsEngine.clearReports();
             long startNanos = System.nanoTime();
             ReadResult readResult = executeRead(tablePath, operationType);
             long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
@@ -385,17 +403,22 @@ public class WorkloadRunner {
             System.out.println("  Measured " + (i + 1) + "/" + measuredIterations
                     + ": " + elapsedMs + "ms");
 
-            // Capture metrics from last iteration
+            extractMetricsFromReports(metricsEngine.getReports(), perIterationMetrics);
+
+            // Capture read-specific metrics from last iteration
             if (i == measuredIterations - 1) {
-                customMetrics.put("schema_field_count", (double) readResult.schemaFieldCount);
+                accumulate(perIterationMetrics, "schema_field_count",
+                        (double) readResult.schemaFieldCount);
                 if (readResult.scanFileCount >= 0) {
-                    customMetrics.put("scan_file_count", (double) readResult.scanFileCount);
+                    accumulate(perIterationMetrics, "scan_file_count",
+                            (double) readResult.scanFileCount);
                 }
             }
         }
 
         BenchmarkResult result = BenchmarkResult.success(workloadName, "read", durations);
-        result.customMetrics = customMetrics;
+        result.customMetrics = computeAverages(perIterationMetrics);
+        printKernelMetrics(result.customMetrics);
         return result;
     }
 
@@ -411,7 +434,7 @@ public class WorkloadRunner {
         long scanFileCount = 0;
         Scan scan = snapshot.getScanBuilder().build();
 
-        try (CloseableIterator<FilteredColumnarBatch> fileIter = scan.getScanFiles(engine)) {
+        try (CloseableIterator<FilteredColumnarBatch> fileIter = scan.getScanFiles(metricsEngine)) {
             while (fileIter.hasNext()) {
                 FilteredColumnarBatch batch = fileIter.next();
                 try (CloseableIterator<Row> rows = batch.getRows()) {
@@ -436,6 +459,117 @@ public class WorkloadRunner {
             this.schemaFieldCount = schemaFieldCount;
             this.scanFileCount = scanFileCount;
         }
+    }
+
+    // =========================================================================
+    // Kernel metrics extraction
+    // =========================================================================
+
+    /**
+     * Extract kernel metrics from captured MetricsReport objects into an accumulator.
+     * Metric names follow the JMH profiler naming convention from KernelMetricsProfiler.
+     */
+    private void extractMetricsFromReports(
+            List<MetricsReport> reports, Map<String, List<Double>> accumulator) {
+        for (MetricsReport report : reports) {
+            if (report instanceof SnapshotReport) {
+                SnapshotReport sr = (SnapshotReport) report;
+                SnapshotMetricsResult m = sr.getSnapshotMetrics();
+                accumulate(accumulator,
+                        "snapshot.snapshot_metrics.load_snapshot_total_duration_ns",
+                        (double) m.getLoadSnapshotTotalDurationNs());
+                accumulate(accumulator,
+                        "snapshot.snapshot_metrics.load_protocol_metadata_total_duration_ns",
+                        (double) m.getLoadProtocolMetadataTotalDurationNs());
+                accumulate(accumulator,
+                        "snapshot.snapshot_metrics.load_log_segment_total_duration_ns",
+                        (double) m.getLoadLogSegmentTotalDurationNs());
+                accumulate(accumulator,
+                        "snapshot.snapshot_metrics.load_crc_total_duration_ns",
+                        (double) m.getLoadCrcTotalDurationNs());
+                m.getComputeTimestampToVersionTotalDurationNs().ifPresent(v ->
+                        accumulate(accumulator,
+                                "snapshot.snapshot_metrics.compute_timestamp_to_version_total_duration_ns",
+                                (double) v));
+                sr.getVersion().ifPresent(v ->
+                        accumulate(accumulator, "snapshot.version", (double) v));
+                sr.getCheckpointVersion().ifPresent(v ->
+                        accumulate(accumulator, "snapshot.checkpoint_version", (double) v));
+            }
+            if (report instanceof ScanReport) {
+                ScanReport scr = (ScanReport) report;
+                ScanMetricsResult m = scr.getScanMetrics();
+                accumulate(accumulator,
+                        "scan.scan_metrics.total_planning_duration_ns",
+                        (double) m.getTotalPlanningDurationNs());
+                accumulate(accumulator,
+                        "scan.scan_metrics.num_active_add_files",
+                        (double) m.getNumActiveAddFiles());
+                accumulate(accumulator,
+                        "scan.scan_metrics.num_add_files_seen",
+                        (double) m.getNumAddFilesSeen());
+                accumulate(accumulator,
+                        "scan.scan_metrics.num_add_files_seen_from_delta_files",
+                        (double) m.getNumAddFilesSeenFromDeltaFiles());
+                accumulate(accumulator,
+                        "scan.scan_metrics.num_duplicate_add_files",
+                        (double) m.getNumDuplicateAddFiles());
+                accumulate(accumulator,
+                        "scan.scan_metrics.num_remove_files_seen_from_delta_files",
+                        (double) m.getNumRemoveFilesSeenFromDeltaFiles());
+            }
+            if (report instanceof UcLoadSnapshotTelemetry.Report) {
+                UcLoadSnapshotTelemetry.Report ucr = (UcLoadSnapshotTelemetry.Report) report;
+                accumulate(accumulator,
+                        "uc.total_load_snapshot_duration_ns",
+                        (double) ucr.metrics.totalLoadSnapshotDurationNs);
+                accumulate(accumulator,
+                        "uc.get_commits_duration_ns",
+                        (double) ucr.metrics.getCommitsDurationNs);
+                accumulate(accumulator,
+                        "uc.num_catalog_commits",
+                        (double) ucr.metrics.numCatalogCommits);
+                accumulate(accumulator,
+                        "uc.kernel_snapshot_build_duration_ns",
+                        (double) ucr.metrics.kernelSnapshotBuildDurationNs);
+                accumulate(accumulator,
+                        "uc.resolved_snapshot_version",
+                        (double) ucr.metrics.resolvedSnapshotVersion);
+            }
+        }
+    }
+
+    private void accumulate(Map<String, List<Double>> acc, String key, double value) {
+        acc.computeIfAbsent(key, k -> new ArrayList<>()).add(value);
+    }
+
+    private Map<String, Double> computeAverages(Map<String, List<Double>> perIteration) {
+        Map<String, Double> result = new HashMap<>();
+        for (Map.Entry<String, List<Double>> entry : perIteration.entrySet()) {
+            List<Double> values = entry.getValue();
+            double avg = values.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
+            result.put(entry.getKey(), avg);
+        }
+        return result;
+    }
+
+    private void printKernelMetrics(Map<String, Double> metrics) {
+        if (metrics.isEmpty()) {
+            return;
+        }
+        System.out.println("  Kernel metrics (averages across iterations):");
+        metrics.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(e -> {
+                    String name = e.getKey();
+                    double value = e.getValue();
+                    if (name.endsWith("_ns")) {
+                        System.out.printf("    %-60s %.2f ms%n",
+                                name, value / 1_000_000.0);
+                    } else {
+                        System.out.printf("    %-60s %.2f%n", name, value);
+                    }
+                });
     }
 
     private static void printResult(BenchmarkResult result) {
