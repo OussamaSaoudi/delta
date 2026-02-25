@@ -29,12 +29,24 @@ import java.util.stream.Stream;
 public class BenchmarkUtils {
 
   public static final Path RESOURCES_DIR = getResourcesDirectory();
-  public static final Path WORKLOAD_SPECS_DIR = RESOURCES_DIR.resolve("workload_specs");
+  public static final Path WORKLOAD_SPECS_DIR = getWorkloadSpecsDirectory();
 
   private static final String DELTA_DIR_NAME = "delta";
   private static final String SPECS_DIR_NAME = "specs";
   private static final String SPEC_FILE_NAME = "spec.json";
   private static final String TABLE_INFO_FILE_NAME = "table_info.json";
+
+  /**
+   * Gets the workload specs directory. Checks the WORKLOAD_SPECS_DIR environment variable first,
+   * falling back to the default resources directory.
+   */
+  private static Path getWorkloadSpecsDirectory() {
+    String envDir = System.getenv("WORKLOAD_SPECS_DIR");
+    if (envDir != null && !envDir.trim().isEmpty()) {
+      return Paths.get(envDir);
+    }
+    return RESOURCES_DIR.resolve("workload_specs");
+  }
 
   /**
    * Gets the resources directory, ensuring user.dir system property is set.
