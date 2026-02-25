@@ -68,6 +68,13 @@ public class TableInfo {
   private String tableInfoPath;
 
   /**
+   * Explicit table root path for remote tables (S3, GCS, ABFS, etc.). When set, this overrides the
+   * default resolution of tableInfoPath/delta.
+   */
+  @JsonProperty("table_root_path")
+  private String tableRootPath;
+
+  /**
    * Whether this table is a Unity Catalog managed table. If true, the UC Catalog info is loaded
    * from a fixed path: catalog_managed_info.json in the same directory as table_info.json.
    */
@@ -91,6 +98,9 @@ public class TableInfo {
   /** Resolves the table root path based on the table type and location configuration. */
   @JsonIgnore
   public String getResolvedTableRoot() {
+    if (tableRootPath != null && !tableRootPath.isEmpty()) {
+      return tableRootPath;
+    }
     return Paths.get(tableInfoPath, "delta").toAbsolutePath().toString();
   }
 
