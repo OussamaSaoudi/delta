@@ -50,7 +50,16 @@ public class WorkloadBenchmark<T> {
     @Override
     protected Engine getEngine(String engineName) {
       if (engineName.equals("default")) {
-        return DefaultEngine.create(new Configuration());
+        Configuration conf = new Configuration();
+        // Configure S3 region from environment if available
+        String region = System.getenv("AWS_REGION");
+        if (region == null) {
+          region = System.getenv("AWS_DEFAULT_REGION");
+        }
+        if (region != null) {
+          conf.set("fs.s3a.endpoint.region", region);
+        }
+        return DefaultEngine.create(conf);
       } else {
         throw new IllegalArgumentException("Unsupported engine: " + engineName);
       }
