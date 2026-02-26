@@ -63,7 +63,8 @@ public class WorkloadOutputFormat implements OutputFormat {
   private final Path outputPath =
       Paths.get(System.getProperty("user.dir"), "benchmark_report.json");
 
-  private static final double[] PERCENTILES = {0.5, 0.9, 0.95, 0.99, 0.999, 0.9999, 1.0};
+  // JMH Statistics.getPercentile() expects values in the 0-100 range
+  private static final double[] PERCENTILES = {50, 90, 95, 99, 99.9, 99.99, 100};
 
   /** Metadata about the benchmark report itself. Json formatted */
   private static class ReportMetadata {
@@ -265,7 +266,8 @@ public class WorkloadOutputFormat implements OutputFormat {
       HashMap<String, Double> percentiles = new HashMap<>();
       Statistics stats = result.getStatistics();
       for (double p : PERCENTILES) {
-        String key = String.format("p%.2f", p);
+        // Key format: p0.50, p0.90, etc. (percentile as fraction)
+        String key = String.format("p%.2f", p / 100.0);
         percentiles.put(key, stats.getPercentile(p));
       }
       return new TimingMetric(
