@@ -46,6 +46,29 @@ public interface FileSystemClient {
   CloseableIterator<FileStatus> listFrom(String filePath) throws IOException;
 
   /**
+   * Recursively list files whose fully qualified paths are lexicographically greater than the given
+   * path, using unsigned UTF-8 byte ordering.
+   *
+   * <p>If {@code filePath} ends in {@code /}, it is treated as a directory and all files below it
+   * are returned. Otherwise, files are listed recursively below the path's parent directory and
+   * only paths strictly greater than {@code filePath} are returned. Results are sorted by their
+   * fully qualified paths.
+   *
+   * <p>This is separate from {@link #listFrom(String)}, whose historical contract is inclusive and
+   * nonrecursive. The default preserves binary compatibility for existing connector
+   * implementations; connectors that support recursive plan-based execution must override it.
+   *
+   * @param filePath Fully qualified file offset or directory path
+   * @return Closeable iterator of recursively listed files. The caller must close the iterator.
+   * @throws FileNotFoundException if the directory to list does not exist
+   * @throws IOException for any other IO error
+   * @throws UnsupportedOperationException if the connector does not implement recursive listing
+   */
+  default CloseableIterator<FileStatus> listFromRecursively(String filePath) throws IOException {
+    throw new UnsupportedOperationException("Recursive file listing is not supported");
+  }
+
+  /**
    * Resolve the given path to a fully qualified path.
    *
    * @param path Input path
@@ -66,6 +89,24 @@ public interface FileSystemClient {
    */
   CloseableIterator<ByteArrayInputStream> readFiles(CloseableIterator<FileReadRequest> readRequests)
       throws IOException;
+
+  /**
+   * Write raw bytes to a file.
+   *
+   * <p>If {@code overwrite} is false, the implementation must atomically fail instead of replacing
+   * a file that already exists. The default preserves binary compatibility; clients used for
+   * plan-based storage execution must override it.
+   *
+   * @param path fully qualified path to write
+   * @param data bytes to write
+   * @param overwrite whether an existing file may be replaced
+   * @throws java.nio.file.FileAlreadyExistsException if the file exists and overwrite is false
+   * @throws IOException for any other I/O error
+   * @throws UnsupportedOperationException if raw byte writes are not implemented
+   */
+  default void writeBytes(String path, byte[] data, boolean overwrite) throws IOException {
+    throw new UnsupportedOperationException("Raw byte writes are not supported");
+  }
 
   /**
    * Create a directory at the given path including parent directories. This mimicks the behavior of

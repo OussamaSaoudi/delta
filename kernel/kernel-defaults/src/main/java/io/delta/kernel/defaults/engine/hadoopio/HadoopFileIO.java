@@ -25,11 +25,17 @@ import io.delta.kernel.utils.FileStatus;
 import io.delta.storage.LogStore;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.RemoteIterator;
 
 /** Implementation of {@link FileIO} based on Hadoop APIs. */
 public class HadoopFileIO implements FileIO {
@@ -51,6 +57,32 @@ public class HadoopFileIO implements FileIO {
                     hadoopFileStatus.getPath().toString(),
                     hadoopFileStatus.getLen(),
                     hadoopFileStatus.getModificationTime()));
+  }
+
+  @Override
+  public CloseableIterator<FileStatus> listFromRecursively(String filePath) throws IOException {
+    Objects.requireNonNull(filePath, "filePath is null");
+
+    Path requestedPath = new Path(filePath);
+    FileSystem fs = requestedPath.getFileSystem(hadoopConf);
+    Path qualifiedOffset = fs.makeQualified(requestedPath);
+    Path listingRoot = filePath.endsWith("/") ? qualifiedOffset : qualifiedOffset.getParent();
+    if (listingRoot == null) {
+      throw new IOException("Cannot determine parent directory for " + filePath);
+    }
+
+    String offset = qualifiedOffset.toString();
+    List<FileStatus> files = new ArrayList<>();
+    RemoteIterator<LocatedFileStatus> listing = fs.listFiles(listingRoot, true /* recursive */);
+    while (listing.hasNext()) {
+      LocatedFileStatus status = listing.next();
+      String qualifiedPath = fs.makeQualified(status.getPath()).toString();
+      if (compareUtf8(qualifiedPath, offset) > 0) {
+        files.add(FileStatus.of(qualifiedPath, status.getLen(), status.getModificationTime()));
+      }
+    }
+    files.sort((left, right) -> compareUtf8(left.getPath(), right.getPath()));
+    return Utils.toCloseableIterator(files.iterator());
   }
 
   @Override
@@ -89,6 +121,22 @@ public class HadoopFileIO implements FileIO {
   }
 
   @Override
+  public void writeBytes(String path, byte[] data, boolean overwrite) throws IOException {
+    Objects.requireNonNull(path, "path is null");
+    Objects.requireNonNull(data, "data is null");
+    Path target = new Path(path);
+    FileSystem fs = target.getFileSystem(hadoopConf);
+    try (FSDataOutputStream output = fs.create(target, overwrite)) {
+      output.write(data);
+    } catch (org.apache.hadoop.fs.FileAlreadyExistsException failure) {
+      java.nio.file.FileAlreadyExistsException normalized =
+          new java.nio.file.FileAlreadyExistsException(path);
+      normalized.initCause(failure);
+      throw normalized;
+    }
+  }
+
+  @Override
   public boolean delete(String path) throws IOException {
     FileSystem fs = getFs(path);
     return fs.delete(new Path(path), false);
@@ -119,5 +167,18 @@ public class HadoopFileIO implements FileIO {
     } catch (IOException e) {
       throw new UncheckedIOException("Could not resolve the FileSystem", e);
     }
+  }
+
+  private static int compareUtf8(String left, String right) {
+    byte[] leftBytes = left.getBytes(StandardCharsets.UTF_8);
+    byte[] rightBytes = right.getBytes(StandardCharsets.UTF_8);
+    int sharedLength = Math.min(leftBytes.length, rightBytes.length);
+    for (int index = 0; index < sharedLength; index++) {
+      int comparison = Byte.compareUnsigned(leftBytes[index], rightBytes[index]);
+      if (comparison != 0) {
+        return comparison;
+      }
+    }
+    return Integer.compare(leftBytes.length, rightBytes.length);
   }
 }

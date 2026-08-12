@@ -58,6 +58,17 @@ class DefaultFileSystemClientSuite extends AnyFunSuite with TestUtils {
     }
   }
 
+  private def recursivelyListedPaths(path: String): Seq[String] = {
+    val listed = fsClient.listFromRecursively(path)
+    val paths = new ArrayBuffer[String]()
+    try {
+      listed.forEachRemaining(status => paths += status.getPath)
+      paths.toSeq
+    } finally {
+      listed.close()
+    }
+  }
+
   test("list from file") {
     val basePath = fsClient.resolvePath(getTestResourceFilePath("json-files"))
     val listFrom = fsClient.resolvePath(getTestResourceFilePath("json-files/2.json"))
@@ -78,6 +89,64 @@ class DefaultFileSystemClientSuite extends AnyFunSuite with TestUtils {
   test("list from non-existent file") {
     intercept[FileNotFoundException] {
       fsClient.listFrom("file:/non-existentfileTable/01.json")
+    }
+  }
+
+  test("recursive listing is exclusive, recursive, and sorted by full path") {
+    withTempDir { tempDir =>
+      val root = tempDir + "/listing"
+      writeFile(root + "/a.json", "a")
+      writeFile(root + "/nested/b.json", "b")
+      writeFile(root + "/z.json", "z")
+
+      val qualifiedRoot = fsClient.resolvePath(root)
+      val listed = recursivelyListedPaths(fsClient.resolvePath(root + "/a.json"))
+
+      assert(listed === Seq(
+        qualifiedRoot + "/nested/b.json",
+        qualifiedRoot + "/z.json"))
+    }
+  }
+
+  test("recursive listing treats a trailing slash as a directory") {
+    withTempDir { tempDir =>
+      val root = tempDir + "/directory"
+      writeFile(root + "/a.json", "a")
+      writeFile(root + "/nested/b.json", "b")
+
+      val qualifiedRoot = fsClient.resolvePath(root)
+      assert(recursivelyListedPaths(qualifiedRoot + "/") === Seq(
+        qualifiedRoot + "/a.json",
+        qualifiedRoot + "/nested/b.json"))
+    }
+  }
+
+  test("recursive listing uses unsigned UTF-8 path ordering") {
+    withTempDir { tempDir =>
+      val root = tempDir + "/unicode"
+      val bmpName = "\uE000.json"
+      val supplementaryName = "\uD800\uDC00.json"
+      writeFile(root + "/" + supplementaryName, "supplementary")
+      writeFile(root + "/" + bmpName, "bmp")
+
+      val qualifiedRoot = fsClient.resolvePath(root)
+      assert(recursivelyListedPaths(qualifiedRoot + "/") === Seq(
+        qualifiedRoot + "/" + bmpName,
+        qualifiedRoot + "/" + supplementaryName))
+    }
+  }
+
+  test("recursive listing supports a missing offset but not a missing directory") {
+    withTempDir { tempDir =>
+      val root = tempDir + "/offset"
+      writeFile(root + "/b.json", "b")
+      val qualifiedRoot = fsClient.resolvePath(root)
+
+      assert(recursivelyListedPaths(qualifiedRoot + "/a.json") ===
+        Seq(qualifiedRoot + "/b.json"))
+      intercept[FileNotFoundException] {
+        recursivelyListedPaths(qualifiedRoot + "/missing/")
+      }
     }
   }
 
@@ -122,6 +191,23 @@ class DefaultFileSystemClientSuite extends AnyFunSuite with TestUtils {
   test("getFileStatus on non-existent file") {
     intercept[FileNotFoundException] {
       fsClient.getFileStatus("/non-existent-file.json")
+    }
+  }
+
+  test("writeBytes honors overwrite semantics") {
+    withTempDir { tempDir =>
+      val path = tempDir + "/bytes.bin"
+
+      fsClient.writeBytes(path, "first".getBytes("UTF-8"), false)
+      assert(readFile(path) == "first")
+
+      intercept[java.nio.file.FileAlreadyExistsException] {
+        fsClient.writeBytes(path, "rejected".getBytes("UTF-8"), false)
+      }
+      assert(readFile(path) == "first")
+
+      fsClient.writeBytes(path, "second".getBytes("UTF-8"), true)
+      assert(readFile(path) == "second")
     }
   }
 

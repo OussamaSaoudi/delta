@@ -70,6 +70,11 @@ public class DefaultFileSystemClient implements FileSystemClient {
   }
 
   @Override
+  public CloseableIterator<FileStatus> listFromRecursively(String filePath) throws IOException {
+    return fileIO.listFromRecursively(filePath);
+  }
+
+  @Override
   public String resolvePath(String path) throws IOException {
     return fileIO.resolvePath(path);
   }
@@ -84,6 +89,11 @@ public class DefaultFileSystemClient implements FileSystemClient {
   @Override
   public boolean mkdirs(String path) throws IOException {
     return fileIO.mkdirs(path);
+  }
+
+  @Override
+  public void writeBytes(String path, byte[] data, boolean overwrite) throws IOException {
+    fileIO.writeBytes(path, data, overwrite);
   }
 
   @Override
