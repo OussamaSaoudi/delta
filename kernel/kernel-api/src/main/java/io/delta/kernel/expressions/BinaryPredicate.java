@@ -26,7 +26,8 @@ public final class BinaryPredicate extends Predicate {
     LESS_THAN("<"),
     GREATER_THAN(">"),
     EQUAL("="),
-    DISTINCT("DISTINCT");
+    DISTINCT("DISTINCT"),
+    IN("IN_LIST");
 
     private final String expressionName;
 

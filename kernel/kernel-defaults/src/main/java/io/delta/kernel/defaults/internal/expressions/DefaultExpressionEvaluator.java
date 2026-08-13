@@ -485,7 +485,29 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     ExpressionTransformResult visitBinaryPredicate(BinaryPredicate predicate) {
       ExpressionTransformResult left = transformChild(predicate.getLeft());
       ExpressionTransformResult right = transformChild(predicate.getRight());
-      requireExactType(predicate, left.outputType, right.outputType, "comparison operands");
+      if (predicate.getOperator() == BinaryPredicate.Operator.IN) {
+        if (!(left.expression instanceof Literal)
+            || (!(right.expression instanceof Column) && !(right.expression instanceof Literal))
+            || !(right.outputType instanceof ArrayType)) {
+          throw unsupportedExpressionException(
+              predicate,
+              "Plan IN requires a literal left operand and an array column or literal on the "
+                  + "right");
+        }
+        requireExactType(
+            predicate,
+            left.outputType,
+            ((ArrayType) right.outputType).getElementType(),
+            "IN operands");
+        if (right.expression instanceof Column
+            && !PlanPredicateEvaluator.supportsColumnInElementType(left.outputType)) {
+          throw unsupportedExpressionException(
+              predicate,
+              "Plan IN does not support array column elements of type " + left.outputType);
+        }
+      } else {
+        requireExactType(predicate, left.outputType, right.outputType, "comparison operands");
+      }
       return new ExpressionTransformResult(
           new BinaryPredicate(predicate.getOperator(), left.expression, right.expression),
           BooleanType.BOOLEAN);
@@ -1112,6 +1134,12 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     ColumnVector visitBinaryPredicate(BinaryPredicate predicate) {
+      if (predicate.getOperator() == BinaryPredicate.Operator.IN) {
+        return PlanPredicateEvaluator.inList(
+            (Literal) predicate.getLeft(),
+            visit(predicate.getRight()),
+            predicate.getRight() instanceof Literal);
+      }
       ColumnVector left = visit(predicate.getLeft());
       ColumnVector right;
       try {
