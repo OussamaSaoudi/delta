@@ -154,6 +154,25 @@ class DefaultPlanExecutorSuite extends AnyFunSuite with MockEngineUtils {
     }
   }
 
+  test("a caller-owned I/O executor survives early close and exhaustion") {
+    val plan = new Plan(Seq(node(values(idSchema, row(idSchema, LongJ.valueOf(7))))).asJava)
+    val ioExecutor = Executors.newFixedThreadPool(1)
+
+    try {
+      val closedEarly = DefaultPlanExecutor.execute(plan, mockEngine(), ioExecutor)
+      closedEarly.close()
+      assert(!ioExecutor.isShutdown)
+
+      PlanTestUtils.assertRows(
+        DefaultPlanExecutor.execute(plan, mockEngine(), ioExecutor),
+        Seq(row(idSchema, LongJ.valueOf(7))))
+      assert(!ioExecutor.isShutdown)
+    } finally {
+      ioExecutor.shutdownNow()
+      assert(ioExecutor.awaitTermination(10, TimeUnit.SECONDS))
+    }
+  }
+
   test("rejects unsupported operators before starting leaf I/O") {
     var opened = false
     val handler = new BaseMockParquetHandler {

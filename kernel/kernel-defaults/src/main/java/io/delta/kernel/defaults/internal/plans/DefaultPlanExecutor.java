@@ -73,8 +73,13 @@ public final class DefaultPlanExecutor {
     }
   }
 
-  /** Executes with a caller-owned executor. */
-  static CloseableIterator<FilteredColumnarBatch> execute(
+  /**
+   * Executes with a caller-owned executor.
+   *
+   * <p>Closing or exhausting the returned iterator cancels this query's outstanding work but does
+   * not shut down {@code ioExecutor}. The caller remains responsible for the executor's lifecycle.
+   */
+  public static CloseableIterator<FilteredColumnarBatch> execute(
       Plan plan, Engine engine, ExecutorService ioExecutor) {
     return execute(plan, engine, ioExecutor, false);
   }
