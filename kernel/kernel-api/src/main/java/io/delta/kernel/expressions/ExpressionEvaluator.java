@@ -32,6 +32,10 @@ public interface ExpressionEvaluator extends AutoCloseable {
   /**
    * Evaluate the expression on given {@link ColumnarBatch} data.
    *
+   * <p>The evaluator borrows the input vectors. Closing the returned vector does not close or
+   * invalidate vectors in {@code input}, and the caller must keep the input vectors valid while
+   * reading the lazily evaluated result.
+   *
    * @param input input data in columnar format.
    * @return Result of the expression as a {@link ColumnVector}. Contains one value for each row of
    *     the input. The data type of the output is same as the type output of the expression this

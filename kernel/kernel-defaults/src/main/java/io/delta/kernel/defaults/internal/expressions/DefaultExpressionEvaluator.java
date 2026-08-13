@@ -28,9 +28,11 @@ import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.ColumnarBatch;
 import io.delta.kernel.defaults.internal.data.vector.DefaultBooleanVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultConstantVector;
+import io.delta.kernel.defaults.internal.data.vector.DefaultViewVector;
 import io.delta.kernel.engine.ExpressionHandler;
 import io.delta.kernel.expressions.*;
 import io.delta.kernel.internal.util.GeometryUtils;
+import io.delta.kernel.internal.util.Utils;
 import io.delta.kernel.types.*;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -253,31 +255,42 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     }
 
     @Override
-    ExpressionTransformResult visitAdd(ScalarExpression add) {
+    ExpressionTransformResult visitArithmetic(ScalarExpression arithmetic) {
       List<ExpressionTransformResult> children =
-          add.getChildren().stream().map(this::visit).collect(Collectors.toList());
+          arithmetic.getChildren().stream().map(this::visit).collect(Collectors.toList());
+      String operation = arithmetic.getName();
       if (children.size() != 2) {
         throw unsupportedExpressionException(
-            add, "ADD requires exactly two arguments: left and right operands");
+            arithmetic,
+            format("%s requires exactly two arguments: left and right operands", operation));
       }
-      if (!children.get(0).outputType.equivalent(children.get(1).outputType)) {
+      DataType outputType = children.get(0).outputType;
+      if (!outputType.equivalent(children.get(1).outputType)) {
         throw unsupportedExpressionException(
-            add, "ADD is only supported for arguments of the same type");
+            arithmetic, format("%s is only supported for arguments of the same type", operation));
       }
-      if (!(children.get(0).outputType instanceof ByteType
-          || children.get(0).outputType instanceof ShortType
-          || children.get(0).outputType instanceof IntegerType
-          || children.get(0).outputType instanceof LongType
-          || children.get(0).outputType instanceof FloatType
-          || children.get(0).outputType instanceof DoubleType)) {
+      if (!isPrimitiveNumeric(outputType)) {
         throw unsupportedExpressionException(
-            add, "ADD is only supported for numeric types: byte, short, int, long, float, double");
+            arithmetic,
+            format(
+                "%s is only supported for numeric types: byte, short, int, long, float, double",
+                operation));
       }
 
       return new ExpressionTransformResult(
           new ScalarExpression(
-              "ADD", Arrays.asList(children.get(0).expression, children.get(1).expression)),
-          children.get(0).outputType);
+              arithmetic.getName(),
+              children.stream().map(c -> c.expression).collect(Collectors.toList())),
+          outputType);
+    }
+
+    private static boolean isPrimitiveNumeric(DataType dataType) {
+      return dataType instanceof ByteType
+          || dataType instanceof ShortType
+          || dataType instanceof IntegerType
+          || dataType instanceof LongType
+          || dataType instanceof FloatType
+          || dataType instanceof DoubleType;
     }
 
     @Override
@@ -614,7 +627,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
         }
       }
       assertColumnExists(columnVector != null, input.getSchema(), column);
-      return columnVector;
+      return new DefaultViewVector(columnVector, 0, columnVector.getSize());
     }
 
     @Override
@@ -676,46 +689,21 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     }
 
     @Override
-    ColumnVector visitAdd(ScalarExpression add) {
-      List<ColumnVector> childResults =
-          add.getChildren().stream().map(this::visit).collect(toList());
-
-      // NOTE: The current implementation only supports operands of the same type, and it does not
-      // check for overflows (i.e., values will wrap around when overflowing).
-      return DefaultExpressionUtils.arithmeticVector(
-          childResults.get(0),
-          childResults.get(1),
-          new ArithmeticOperator() {
-            @Override
-            public byte apply(byte a, byte b) {
-              return (byte) (a + b);
-            }
-
-            @Override
-            public short apply(short a, short b) {
-              return (short) (a + b);
-            }
-
-            @Override
-            public int apply(int a, int b) {
-              return a + b;
-            }
-
-            @Override
-            public long apply(long a, long b) {
-              return a + b;
-            }
-
-            @Override
-            public float apply(float a, float b) {
-              return a + b;
-            }
-
-            @Override
-            public double apply(double a, double b) {
-              return a + b;
-            }
-          });
+    ColumnVector visitArithmetic(ScalarExpression arithmetic) {
+      ColumnVector left = visit(childAt(arithmetic, 0));
+      ColumnVector right;
+      try {
+        right = visit(childAt(arithmetic, 1));
+      } catch (RuntimeException e) {
+        closeAfterFailure(e, left);
+        throw e;
+      }
+      try {
+        return arithmeticVector(left, right, arithmetic.getName());
+      } catch (RuntimeException e) {
+        closeAfterFailure(e, left, right);
+        throw e;
+      }
     }
 
     @Override
@@ -829,6 +817,14 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
           left.getSize(),
           right.getSize());
       return new PredicateChildrenEvalResult(left.getSize(), left, right);
+    }
+
+    private static void closeAfterFailure(RuntimeException failure, AutoCloseable... closeables) {
+      try {
+        Utils.closeCloseables(closeables);
+      } catch (RuntimeException closeFailure) {
+        failure.addSuppressed(closeFailure);
+      }
     }
   }
 
