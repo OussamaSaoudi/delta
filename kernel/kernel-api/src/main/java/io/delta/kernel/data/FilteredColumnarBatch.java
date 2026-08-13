@@ -19,11 +19,9 @@ import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.annotation.Evolving;
-import io.delta.kernel.internal.data.ColumnarBatchRow;
 import io.delta.kernel.types.BooleanType;
 import io.delta.kernel.types.DataType;
 import io.delta.kernel.utils.CloseableIterator;
-import java.util.NoSuchElementException;
 import java.util.Optional;
 
 /**
@@ -121,6 +119,12 @@ public class FilteredColumnarBatch {
     return selectionVector;
   }
 
+  /** Returns whether the row at {@code rowId} is selected by this batch. */
+  public boolean isSelected(int rowId) {
+    checkArgument(rowId >= 0 && rowId < data.getSize(), "Invalid rowId: %s", rowId);
+    return !selectionVector.isPresent() || selected(selectionVector.get(), rowId);
+  }
+
   /**
    * Returns a filtered batch over replacement data while preserving this batch's selection and
    * metadata.
@@ -163,39 +167,8 @@ public class FilteredColumnarBatch {
     if (!selectionVector.isPresent()) {
       return data.getRows();
     }
-
-    return new CloseableIterator<Row>() {
-      private int rowId = 0;
-      private int maxRowId = data.getSize();
-      private int nextRowId = -1;
-
-      @Override
-      public boolean hasNext() {
-        for (; rowId < maxRowId && nextRowId == -1; rowId++) {
-          boolean isSelected =
-              !selectionVector.get().isNullAt(rowId) && selectionVector.get().getBoolean(rowId);
-          if (isSelected) {
-            nextRowId = rowId;
-            rowId++;
-            break;
-          }
-        }
-        return nextRowId != -1;
-      }
-
-      @Override
-      public Row next() {
-        if (!hasNext()) {
-          throw new NoSuchElementException();
-        }
-        Row row = new ColumnarBatchRow(data, nextRowId);
-        nextRowId = -1;
-        return row;
-      }
-
-      @Override
-      public void close() {}
-    };
+    int[] rowId = {0};
+    return data.getRows().filter(ignored -> isSelected(rowId[0]++));
   }
 
   /**
@@ -203,7 +176,7 @@ public class FilteredColumnarBatch {
    *     <p>If present, this value was computed ahead of time and can be used without incurring any
    *     additional cost. This occurs in two cases:
    *     <ul>
-   *       <li>When the selection vector is absent, which implies that all rows are selected — in
+   *       <li>When the selection vector is absent, which implies that all rows are selected; in
    *           this case, the number of selected rows is equal to the batch size.
    *       <li>When the number of selected rows was explicitly pre-computed and passed in.
    *     </ul>
@@ -228,6 +201,10 @@ public class FilteredColumnarBatch {
               vector.getSize(),
               data.getSize());
         });
+  }
+
+  private static boolean selected(ColumnVector vector, int rowId) {
+    return !vector.isNullAt(rowId) && vector.getBoolean(rowId);
   }
 
   private static final class CombinedSelectionVector implements ColumnVector {
@@ -263,15 +240,11 @@ public class FilteredColumnarBatch {
     @Override
     public boolean getBoolean(int rowId) {
       validateRowId(rowId);
-      return (!left.isPresent() || isSelected(left.get(), rowId)) && isSelected(right, rowId);
+      return (!left.isPresent() || selected(left.get(), rowId)) && selected(right, rowId);
     }
 
     private void validateRowId(int rowId) {
       checkArgument(rowId >= 0 && rowId < getSize(), "Invalid rowId: %s", rowId);
-    }
-
-    private static boolean isSelected(ColumnVector vector, int rowId) {
-      return !vector.isNullAt(rowId) && vector.getBoolean(rowId);
     }
   }
 }

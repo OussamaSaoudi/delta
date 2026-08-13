@@ -95,6 +95,19 @@ class FilteredColumnarBatchSuite extends AnyFunSuite with VectorTestUtils with M
     assert((0 until 4).forall(!selection.isNullAt(_)))
   }
 
+  test("isSelected handles absent, false, and null selection entries") {
+    val data = columnarBatch(testSchema, Seq(longVector(Seq(0L, 1L, 2L))))
+    val unfiltered = new FilteredColumnarBatch(data, Optional.empty())
+    val filtered = new FilteredColumnarBatch(
+      data,
+      Optional.of(booleanVector(Seq[BooleanJ](true, false, null))))
+
+    assert((0 until 3).map(unfiltered.isSelected) === Seq(true, true, true))
+    assert((0 until 3).map(filtered.isSelected) === Seq(true, false, false))
+    intercept[IllegalArgumentException](filtered.isSelected(-1))
+    intercept[IllegalArgumentException](filtered.isSelected(3))
+  }
+
   test("withSelectionVector returns a borrowed non-null view without an existing selection") {
     val data = columnarBatch(testSchema, Seq(longVector(Seq(0L, 1L))))
     val additional = booleanVector(Seq[BooleanJ](null, true))

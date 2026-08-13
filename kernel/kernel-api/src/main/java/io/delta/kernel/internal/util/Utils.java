@@ -26,7 +26,6 @@ import io.delta.kernel.utils.CloseableIterator;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.Iterator;
-import java.util.NoSuchElementException;
 import java.util.Optional;
 
 /**
@@ -119,6 +118,23 @@ public class Utils {
     }
   }
 
+  /** Closes every non-null closeable and adds any close failures to {@code failure}. */
+  public static void closeCloseablesAndAddSuppressed(
+      Throwable failure, AutoCloseable... closeables) {
+    for (AutoCloseable closeable : closeables) {
+      if (closeable == null) {
+        continue;
+      }
+      try {
+        closeable.close();
+      } catch (Throwable closeFailure) {
+        if (closeFailure != failure) {
+          failure.addSuppressed(closeFailure);
+        }
+      }
+    }
+  }
+
   /**
    * Close the given list of {@link AutoCloseable} objects. Any exception thrown is silently
    * ignored.
@@ -133,48 +149,10 @@ public class Utils {
     }
   }
 
-  // Utility class to support `intoRows` below
-  private static class FilteredBatchToRowIter implements CloseableIterator<Row> {
-    private final CloseableIterator<FilteredColumnarBatch> sourceBatches;
-    private CloseableIterator<Row> current;
-    private boolean isClosed = false;
-
-    FilteredBatchToRowIter(CloseableIterator<FilteredColumnarBatch> sourceBatches) {
-      this.sourceBatches = sourceBatches;
-    }
-
-    @Override
-    public boolean hasNext() {
-      if (isClosed) {
-        return false;
-      }
-      while ((current == null || !current.hasNext()) && sourceBatches.hasNext()) {
-        closeCloseables(current);
-        FilteredColumnarBatch next = sourceBatches.next();
-        current = next.getRows();
-      }
-      return current != null && current.hasNext();
-    }
-
-    @Override
-    public Row next() {
-      if (!hasNext()) {
-        throw new java.util.NoSuchElementException("No more rows available");
-      }
-      return current.next();
-    }
-
-    @Override
-    public void close() throws IOException {
-      isClosed = true;
-      closeCloseables(current, sourceBatches);
-    }
-  }
-
   /** Convert a ClosableIterator of FilteredColumnarBatch into a CloseableIterator of Row */
   public static CloseableIterator<Row> intoRows(
       CloseableIterator<FilteredColumnarBatch> sourceBatches) {
-    return new FilteredBatchToRowIter(sourceBatches);
+    return sourceBatches.flatMap(FilteredColumnarBatch::getRows);
   }
 
   /**
@@ -192,50 +170,7 @@ public class Utils {
    */
   public static <T> CloseableIterator<T> flatten(
       CloseableIterator<CloseableIterator<T>> nestedIterator) {
-    return new CloseableIterator<>() {
-      private CloseableIterator<T> currentInnerIterator = null;
-
-      @Override
-      public boolean hasNext() {
-        while (true) {
-          if (currentInnerIterator != null && currentInnerIterator.hasNext()) {
-            return true;
-          }
-
-          if (currentInnerIterator != null) {
-            closeCloseables(currentInnerIterator);
-            currentInnerIterator = null;
-          }
-
-          if (!nestedIterator.hasNext()) {
-            return false;
-          }
-
-          try {
-            currentInnerIterator = nestedIterator.next();
-          } catch (Exception e) {
-            // Ensure cleanup on exception
-            closeCloseables(nestedIterator);
-            throw e;
-          }
-        }
-      }
-
-      @Override
-      public T next() {
-        if (!hasNext()) {
-          throw new NoSuchElementException();
-        }
-        return currentInnerIterator.next();
-      }
-
-      @Override
-      public void close() {
-        // Close both the current inner iterator and the outer iterator
-        // closeCloseables works with null closeable.
-        closeCloseables(currentInnerIterator, nestedIterator);
-      }
-    };
+    return nestedIterator.flatMap(iterator -> iterator);
   }
 
   /**
