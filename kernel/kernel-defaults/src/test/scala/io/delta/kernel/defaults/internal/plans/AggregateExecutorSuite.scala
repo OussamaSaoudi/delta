@@ -27,7 +27,7 @@ import io.delta.kernel.defaults.internal.expressions.DefaultValueComparator
 import io.delta.kernel.expressions.Column
 import io.delta.kernel.internal.data.GenericRow
 import io.delta.kernel.internal.plans.{Agg, Aggregate}
-import io.delta.kernel.internal.util.Utils
+import io.delta.kernel.internal.util.{Utils, VectorUtils}
 import io.delta.kernel.types._
 import io.delta.kernel.utils.CloseableIterator
 
@@ -146,28 +146,34 @@ class AggregateExecutorSuite extends AnyFunSuite {
     assert(result.getString(1) === "first")
   }
 
-  test("group keys use deep binary equality and normalize signed zero") {
+  test("group keys use nested binary equality and normalize signed zero") {
+    val partsType = new ArrayType(BinaryType.BINARY, false)
     val schema = new StructType()
-      .add("bytes", BinaryType.BINARY)
+      .add("parts", partsType)
       .add("number", FloatType.FLOAT)
       .add("value", IntegerType.INTEGER)
     val aggregate = Aggregate.groupBy(
       schema,
-      Seq(column("bytes"), column("number")).asJava)
+      Seq(column("parts"), column("number")).asJava)
       .max(column("value"))
       .build()
     val input = batch(
       schema,
       Seq(
-        row(schema, Array[Byte](1, 2), FloatJ.valueOf(0.0f), IntegerJ.valueOf(1)),
-        row(schema, Array[Byte](1, 2), FloatJ.valueOf(-0.0f), IntegerJ.valueOf(2)),
-        row(schema, Array[Byte](3), FloatJ.valueOf(Float.NaN), IntegerJ.valueOf(3)),
-        row(schema, Array[Byte](3), FloatJ.valueOf(Float.NaN), IntegerJ.valueOf(4))))
+        row(schema, binaryParts(1, 2), FloatJ.valueOf(0.0f), IntegerJ.valueOf(1)),
+        row(schema, binaryParts(1, 2), FloatJ.valueOf(-0.0f), IntegerJ.valueOf(2)),
+        row(schema, binaryParts(3), FloatJ.valueOf(Float.NaN), IntegerJ.valueOf(3)),
+        row(schema, binaryParts(3), FloatJ.valueOf(Float.NaN), IntegerJ.valueOf(4))))
 
     val results = execute(aggregate, schema, Seq(input))
     assert(results.size === 2)
     assert(results.map(_.getInt(2)) === Seq(2, 4))
   }
+
+  private def binaryParts(values: Byte*): io.delta.kernel.data.ArrayValue =
+    VectorUtils.buildArrayValue(
+      values.map(value => Array(value)).asJava,
+      BinaryType.BINARY)
 
   test("non-null-by returns nested Kernel rows with stripped field metadata") {
     val metadata = FieldMetadata.builder().putString("source", "input").build()

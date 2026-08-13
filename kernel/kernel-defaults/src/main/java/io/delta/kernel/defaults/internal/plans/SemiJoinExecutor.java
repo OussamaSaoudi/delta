@@ -15,13 +15,12 @@
  */
 package io.delta.kernel.defaults.internal.plans;
 
+import static io.delta.kernel.defaults.internal.plans.PlanValueUtils.canonicalize;
 import static java.util.Objects.requireNonNull;
 
-import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.ColumnarBatch;
 import io.delta.kernel.data.FilteredColumnarBatch;
-import io.delta.kernel.data.MapValue;
 import io.delta.kernel.defaults.internal.data.vector.DefaultBooleanVector;
 import io.delta.kernel.defaults.internal.expressions.DefaultExpressionEvaluator;
 import io.delta.kernel.expressions.Column;
@@ -29,31 +28,14 @@ import io.delta.kernel.expressions.ExpressionEvaluator;
 import io.delta.kernel.internal.plans.PlanSchemaUtils;
 import io.delta.kernel.internal.plans.SemiJoin;
 import io.delta.kernel.internal.util.Utils;
-import io.delta.kernel.types.ArrayType;
-import io.delta.kernel.types.BooleanType;
-import io.delta.kernel.types.ByteType;
 import io.delta.kernel.types.DataType;
-import io.delta.kernel.types.DateType;
-import io.delta.kernel.types.DecimalType;
-import io.delta.kernel.types.DoubleType;
-import io.delta.kernel.types.FloatType;
-import io.delta.kernel.types.IntegerType;
-import io.delta.kernel.types.LongType;
-import io.delta.kernel.types.MapType;
-import io.delta.kernel.types.ShortType;
-import io.delta.kernel.types.StringType;
 import io.delta.kernel.types.StructField;
 import io.delta.kernel.types.StructType;
-import io.delta.kernel.types.TimestampNTZType;
-import io.delta.kernel.types.TimestampType;
 import io.delta.kernel.utils.CloseableIterator;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -162,63 +144,6 @@ final class SemiJoinExecutor {
     }
   }
 
-  private static Object canonicalValue(ColumnVector vector, DataType type, int rowId) {
-    if (vector.isNullAt(rowId)) {
-      return null;
-    } else if (type instanceof BooleanType) {
-      return vector.getBoolean(rowId);
-    } else if (type instanceof ByteType) {
-      return vector.getByte(rowId);
-    } else if (type instanceof ShortType) {
-      return vector.getShort(rowId);
-    } else if (type instanceof IntegerType || type instanceof DateType) {
-      return vector.getInt(rowId);
-    } else if (type instanceof LongType
-        || type instanceof TimestampType
-        || type instanceof TimestampNTZType) {
-      return vector.getLong(rowId);
-    } else if (type instanceof FloatType) {
-      float value = vector.getFloat(rowId);
-      return value == 0.0f ? 0.0f : (Float.isNaN(value) ? Float.NaN : value);
-    } else if (type instanceof DoubleType) {
-      double value = vector.getDouble(rowId);
-      return value == 0.0d ? 0.0d : (Double.isNaN(value) ? Double.NaN : value);
-    } else if (type instanceof DecimalType) {
-      return vector.getDecimal(rowId);
-    } else if (type instanceof StringType) {
-      return vector.getString(rowId);
-    } else if (DataType.isTypeValueBinaryLike(type)) {
-      return ByteBuffer.wrap(vector.getBinary(rowId).clone()).asReadOnlyBuffer();
-    } else if (type instanceof StructType) {
-      StructType struct = (StructType) type;
-      List<Object> fields = new ArrayList<>(struct.length());
-      for (int ordinal = 0; ordinal < struct.length(); ordinal++) {
-        fields.add(
-            canonicalValue(vector.getChild(ordinal), struct.at(ordinal).getDataType(), rowId));
-      }
-      return fields;
-    } else if (type instanceof ArrayType) {
-      ArrayType arrayType = (ArrayType) type;
-      ArrayValue array = vector.getArray(rowId);
-      List<Object> elements = new ArrayList<>(array.getSize());
-      for (int index = 0; index < array.getSize(); index++) {
-        elements.add(canonicalValue(array.getElements(), arrayType.getElementType(), index));
-      }
-      return elements;
-    } else if (type instanceof MapType) {
-      MapType mapType = (MapType) type;
-      MapValue map = vector.getMap(rowId);
-      Map<Object, Object> entries = new HashMap<>();
-      for (int index = 0; index < map.getSize(); index++) {
-        Object key = canonicalValue(map.getKeys(), mapType.getKeyType(), index);
-        Object value = canonicalValue(map.getValues(), mapType.getValueType(), index);
-        entries.put(key, value);
-      }
-      return entries;
-    }
-    throw new UnsupportedOperationException("SemiJoin key has unsupported data type " + type);
-  }
-
   private static final class KeyProjection {
     private final List<ExpressionEvaluator> evaluators;
     private final List<DataType> types;
@@ -235,46 +160,11 @@ final class SemiJoinExecutor {
         StructField field =
             PlanSchemaUtils.resolveField(schema, column, "SemiJoin " + side + " key");
         DataType type = field.getDataType();
-        validateKeyType(type);
+        PlanValueUtils.validateCanonicalizable(type, "SemiJoin " + side + " key", true);
         evaluators.add(new DefaultExpressionEvaluator(schema, column, type));
         types.add(type);
       }
       return new KeyProjection(evaluators, types);
-    }
-
-    private static void validateKeyType(DataType type) {
-      if (type instanceof BooleanType
-          || type instanceof ByteType
-          || type instanceof ShortType
-          || type instanceof IntegerType
-          || type instanceof DateType
-          || type instanceof LongType
-          || type instanceof TimestampType
-          || type instanceof TimestampNTZType
-          || type instanceof FloatType
-          || type instanceof DoubleType
-          || type instanceof DecimalType
-          || type instanceof StringType
-          || DataType.isTypeValueBinaryLike(type)) {
-        return;
-      }
-      if (type instanceof StructType) {
-        for (StructField field : ((StructType) type).fields()) {
-          validateKeyType(field.getDataType());
-        }
-        return;
-      }
-      if (type instanceof ArrayType) {
-        validateKeyType(((ArrayType) type).getElementType());
-        return;
-      }
-      if (type instanceof MapType) {
-        MapType map = (MapType) type;
-        validateKeyType(map.getKeyType());
-        validateKeyType(map.getValueType());
-        return;
-      }
-      throw new UnsupportedOperationException("SemiJoin key has unsupported data type " + type);
     }
 
     EvaluatedKeys evaluate(ColumnarBatch data) {
@@ -303,7 +193,7 @@ final class SemiJoinExecutor {
     List<Object> keyAt(int rowId) {
       List<Object> key = new ArrayList<>(vectors.size());
       for (int index = 0; index < vectors.size(); index++) {
-        key.add(canonicalValue(vectors.get(index), types.get(index), rowId));
+        key.add(canonicalize(vectors.get(index), types.get(index), rowId));
       }
       return key;
     }

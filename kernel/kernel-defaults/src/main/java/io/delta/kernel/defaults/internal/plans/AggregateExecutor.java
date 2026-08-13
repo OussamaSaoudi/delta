@@ -17,10 +17,11 @@ package io.delta.kernel.defaults.internal.plans;
 
 import static io.delta.kernel.defaults.internal.expressions.DefaultValueComparator.compare;
 import static io.delta.kernel.defaults.internal.expressions.DefaultValueComparator.supports;
+import static io.delta.kernel.defaults.internal.plans.PlanValueUtils.canonicalize;
+import static io.delta.kernel.defaults.internal.plans.PlanValueUtils.read;
 import static io.delta.kernel.internal.util.Utils.singletonCloseableIterator;
 import static java.util.Objects.requireNonNull;
 
-import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.FilteredColumnarBatch;
 import io.delta.kernel.data.Row;
@@ -32,28 +33,9 @@ import io.delta.kernel.internal.data.GenericRow;
 import io.delta.kernel.internal.plans.Agg;
 import io.delta.kernel.internal.plans.Aggregate;
 import io.delta.kernel.internal.util.Utils;
-import io.delta.kernel.types.ArrayType;
-import io.delta.kernel.types.BinaryType;
-import io.delta.kernel.types.BooleanType;
-import io.delta.kernel.types.ByteType;
 import io.delta.kernel.types.DataType;
-import io.delta.kernel.types.DateType;
-import io.delta.kernel.types.DecimalType;
-import io.delta.kernel.types.DoubleType;
-import io.delta.kernel.types.FloatType;
-import io.delta.kernel.types.GeographyType;
-import io.delta.kernel.types.GeometryType;
-import io.delta.kernel.types.IntegerType;
-import io.delta.kernel.types.LongType;
-import io.delta.kernel.types.MapType;
-import io.delta.kernel.types.ShortType;
-import io.delta.kernel.types.StringType;
-import io.delta.kernel.types.StructField;
 import io.delta.kernel.types.StructType;
-import io.delta.kernel.types.TimestampNTZType;
-import io.delta.kernel.types.TimestampType;
 import io.delta.kernel.utils.CloseableIterator;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -93,11 +75,13 @@ final class AggregateExecutor {
             if (!isSelected(batch, rowId)) {
               continue;
             }
-            List<Object> groupValues = values.readGroups(rowId);
-            GroupKey key = GroupKey.from(groupValues, bound.groupTypes);
-            groups
-                .computeIfAbsent(key, ignored -> bound.newState(groupValues))
-                .update(values, rowId);
+            GroupKey key = values.groupKey(rowId);
+            GroupState state = groups.get(key);
+            if (state == null) {
+              state = bound.newState(values.readGroups(rowId));
+              groups.put(key, state);
+            }
+            state.update(values, rowId);
           }
         }
       }
@@ -121,157 +105,6 @@ final class AggregateExecutor {
         || (!selection.get().isNullAt(rowId) && selection.get().getBoolean(rowId));
   }
 
-  private static Object read(ColumnVector vector, DataType type, int rowId) {
-    if (vector.isNullAt(rowId)) {
-      return null;
-    } else if (type instanceof BooleanType) {
-      return vector.getBoolean(rowId);
-    } else if (type instanceof ByteType) {
-      return vector.getByte(rowId);
-    } else if (type instanceof ShortType) {
-      return vector.getShort(rowId);
-    } else if (type instanceof IntegerType || type instanceof DateType) {
-      return vector.getInt(rowId);
-    } else if (type instanceof LongType
-        || type instanceof TimestampType
-        || type instanceof TimestampNTZType) {
-      return vector.getLong(rowId);
-    } else if (type instanceof FloatType) {
-      return vector.getFloat(rowId);
-    } else if (type instanceof DoubleType) {
-      return vector.getDouble(rowId);
-    } else if (type instanceof DecimalType) {
-      return vector.getDecimal(rowId);
-    } else if (type instanceof StringType
-        || type instanceof GeometryType
-        || type instanceof GeographyType) {
-      return vector.getString(rowId);
-    } else if (type instanceof BinaryType) {
-      return vector.getBinary(rowId);
-    } else if (type instanceof StructType) {
-      return io.delta.kernel.internal.data.StructRow.fromStructVector(vector, rowId);
-    } else if (type instanceof ArrayType) {
-      return vector.getArray(rowId);
-    } else if (type instanceof MapType) {
-      return vector.getMap(rowId);
-    }
-    throw new UnsupportedOperationException("Aggregate cannot materialize data type " + type);
-  }
-
-  private static void validateMaterializable(DataType type, String context) {
-    if (supports(type)) {
-      return;
-    }
-    if (type instanceof StructType) {
-      for (StructField field : ((StructType) type).fields()) {
-        validateMaterializable(field.getDataType(), context);
-      }
-      return;
-    }
-    if (type instanceof ArrayType) {
-      validateMaterializable(((ArrayType) type).getElementType(), context);
-      return;
-    }
-    if (type instanceof MapType) {
-      MapType map = (MapType) type;
-      validateMaterializable(map.getKeyType(), context);
-      validateMaterializable(map.getValueType(), context);
-      return;
-    }
-    throw new UnsupportedOperationException(context + " has unsupported data type " + type);
-  }
-
-  private static void validateGroupType(DataType type) {
-    if (type instanceof MapType) {
-      throw new UnsupportedOperationException("Aggregate group keys cannot contain maps");
-    }
-    if (type instanceof StructType) {
-      for (StructField field : ((StructType) type).fields()) {
-        validateGroupType(field.getDataType());
-      }
-    } else if (type instanceof ArrayType) {
-      validateGroupType(((ArrayType) type).getElementType());
-    } else {
-      validateMaterializable(type, "Aggregate group key");
-    }
-  }
-
-  private static Object canonicalize(Object value, DataType type) {
-    if (value == null) {
-      return null;
-    }
-    if (type instanceof BinaryType) {
-      return ByteBuffer.wrap(((byte[]) value).clone()).asReadOnlyBuffer();
-    }
-    if (type instanceof FloatType) {
-      float number = (Float) value;
-      return number == 0.0f ? 0.0f : (Float.isNaN(number) ? Float.NaN : number);
-    }
-    if (type instanceof DoubleType) {
-      double number = (Double) value;
-      return number == 0.0d ? 0.0d : (Double.isNaN(number) ? Double.NaN : number);
-    }
-    if (type instanceof StructType) {
-      Row row = (Row) value;
-      StructType struct = (StructType) type;
-      List<Object> fields = new ArrayList<>(struct.length());
-      for (int index = 0; index < struct.length(); index++) {
-        DataType childType = struct.at(index).getDataType();
-        fields.add(canonicalize(readRow(row, childType, index), childType));
-      }
-      return fields;
-    }
-    if (type instanceof ArrayType) {
-      ArrayType arrayType = (ArrayType) type;
-      ArrayValue array = (ArrayValue) value;
-      ColumnVector elements = array.getElements();
-      List<Object> values = new ArrayList<>(array.getSize());
-      for (int index = 0; index < array.getSize(); index++) {
-        Object element = read(elements, arrayType.getElementType(), index);
-        values.add(canonicalize(element, arrayType.getElementType()));
-      }
-      return values;
-    }
-    return value;
-  }
-
-  private static Object readRow(Row row, DataType type, int ordinal) {
-    if (row.isNullAt(ordinal)) {
-      return null;
-    } else if (type instanceof BooleanType) {
-      return row.getBoolean(ordinal);
-    } else if (type instanceof ByteType) {
-      return row.getByte(ordinal);
-    } else if (type instanceof ShortType) {
-      return row.getShort(ordinal);
-    } else if (type instanceof IntegerType || type instanceof DateType) {
-      return row.getInt(ordinal);
-    } else if (type instanceof LongType
-        || type instanceof TimestampType
-        || type instanceof TimestampNTZType) {
-      return row.getLong(ordinal);
-    } else if (type instanceof FloatType) {
-      return row.getFloat(ordinal);
-    } else if (type instanceof DoubleType) {
-      return row.getDouble(ordinal);
-    } else if (type instanceof DecimalType) {
-      return row.getDecimal(ordinal);
-    } else if (type instanceof StringType
-        || type instanceof GeometryType
-        || type instanceof GeographyType) {
-      return row.getString(ordinal);
-    } else if (type instanceof BinaryType) {
-      return row.getBinary(ordinal);
-    } else if (type instanceof StructType) {
-      return row.getStruct(ordinal);
-    } else if (type instanceof ArrayType) {
-      return row.getArray(ordinal);
-    } else if (type instanceof MapType) {
-      return row.getMap(ordinal);
-    }
-    throw new UnsupportedOperationException("Aggregate cannot materialize data type " + type);
-  }
-
   private static final class BoundAggregate implements AutoCloseable {
     private final List<BoundColumn> groups;
     private final List<DataType> groupTypes;
@@ -290,7 +123,7 @@ final class AggregateExecutor {
       List<DataType> groupTypes = new ArrayList<>(groups.size());
       for (int index = 0; index < aggregate.getGroupBy().size(); index++) {
         DataType type = outputSchema.at(index).getDataType();
-        validateGroupType(type);
+        PlanValueUtils.validateCanonicalizable(type, "Aggregate group key", false);
         groups.add(BoundColumn.bind(inputSchema, aggregate.getGroupBy().get(index), type));
         groupTypes.add(type);
       }
@@ -353,7 +186,7 @@ final class AggregateExecutor {
     }
 
     static BoundColumn bind(StructType inputSchema, Column column, DataType type) {
-      validateMaterializable(type, "Aggregate column `" + column + "`");
+      PlanValueUtils.validateMaterializable(type, "Aggregate column `" + column + "`");
       return new BoundColumn(new DefaultExpressionEvaluator(inputSchema, column, type), type);
     }
   }
@@ -435,6 +268,14 @@ final class AggregateExecutor {
         values.add(read(groups.get(index), groupTypes.get(index), rowId));
       }
       return values;
+    }
+
+    GroupKey groupKey(int rowId) {
+      List<Object> values = new ArrayList<>(groups.size());
+      for (int index = 0; index < groups.size(); index++) {
+        values.add(canonicalize(groups.get(index), groupTypes.get(index), rowId));
+      }
+      return new GroupKey(values);
     }
 
     @Override
@@ -540,14 +381,6 @@ final class AggregateExecutor {
 
     private GroupKey(List<Object> values) {
       this.values = Collections.unmodifiableList(new ArrayList<>(values));
-    }
-
-    static GroupKey from(List<Object> values, List<DataType> types) {
-      List<Object> canonical = new ArrayList<>(values.size());
-      for (int index = 0; index < values.size(); index++) {
-        canonical.add(canonicalize(values.get(index), types.get(index)));
-      }
-      return new GroupKey(canonical);
     }
 
     @Override
