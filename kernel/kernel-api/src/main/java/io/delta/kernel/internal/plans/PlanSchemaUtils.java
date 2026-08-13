@@ -18,6 +18,7 @@ package io.delta.kernel.internal.plans;
 import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.expressions.Column;
+import io.delta.kernel.expressions.Expression;
 import io.delta.kernel.types.ArrayType;
 import io.delta.kernel.types.DataType;
 import io.delta.kernel.types.MapType;
@@ -82,6 +83,17 @@ final class PlanSchemaUtils {
   private static StructField stripFieldMetadata(StructField field) {
     return new StructField(
         field.getName(), stripFieldMetadata(field.getDataType()), field.isNullable());
+  }
+
+  static void validateExpressionReferences(
+      StructType schema, Expression expression, String context) {
+    requireNonNull(expression, "expression is null");
+    if (expression instanceof Column) {
+      resolveField(schema, (Column) expression, context);
+    }
+    for (Expression child : expression.getChildren()) {
+      validateExpressionReferences(schema, child, context);
+    }
   }
 
   private static IllegalArgumentException unresolved(Column column, String context) {
