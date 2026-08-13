@@ -209,8 +209,10 @@ final class FileScanExecutor {
     List<CloseableIterator<T>> readers = new ArrayList<>(files.size());
     try {
       for (ScanFile file : files) {
-        CloseableIterator<T> reader = opener.apply(file);
-        readers.add(ioExecutor == null ? reader : PrimedIterator.submit(reader, ioExecutor));
+        readers.add(
+            ioExecutor == null
+                ? opener.apply(file)
+                : PreparedIterator.submit(() -> opener.apply(file), ioExecutor));
       }
       return combine(readers);
     } catch (RuntimeException | Error failure) {
@@ -295,24 +297,33 @@ final class FileScanExecutor {
     CloseableIterator<T> open(CloseableIterator<FileStatus> statuses) throws IOException;
   }
 
-  /** Keeps one asynchronously read batch buffered ahead of the consumer. */
-  private static final class PrimedIterator<T> implements CloseableIterator<T> {
-    private final CloseableIterator<T> delegate;
+  @FunctionalInterface
+  private interface ReaderPreparer<T> {
+    CloseableIterator<T> prepare();
+  }
+
+  /** Opens a reader asynchronously and keeps one read buffered ahead of the consumer. */
+  private static final class PreparedIterator<T> implements CloseableIterator<T> {
+    private final Object lock = new Object();
+    private final ReaderPreparer<T> preparer;
     private final ExecutorService executor;
+    private CloseableIterator<T> delegate;
     private TrackedFutureTask<ReadResult<T>> readAhead;
     private ReadResult<T> buffered;
+    private Throwable asynchronousCloseFailure;
     private boolean exhausted;
-    private boolean closed;
+    private volatile boolean closed;
 
-    private PrimedIterator(CloseableIterator<T> delegate, ExecutorService executor) {
-      this.delegate = delegate;
+    private PreparedIterator(ReaderPreparer<T> preparer, ExecutorService executor) {
+      this.preparer = preparer;
       this.executor = executor;
     }
 
-    static <T> PrimedIterator<T> submit(CloseableIterator<T> delegate, ExecutorService executor) {
-      requireNonNull(delegate, "file reader is null");
+    static <T> PreparedIterator<T> submit(
+        ReaderPreparer<T> preparer, ExecutorService executor) {
+      requireNonNull(preparer, "reader preparer is null");
       requireNonNull(executor, "ioExecutor is null");
-      PrimedIterator<T> iterator = new PrimedIterator<>(delegate, executor);
+      PreparedIterator<T> iterator = new PreparedIterator<>(preparer, executor);
       try {
         iterator.submitRead();
         return iterator;
@@ -356,24 +367,98 @@ final class FileScanExecutor {
 
     @Override
     public void close() throws IOException {
-      if (!closed) {
+      TrackedFutureTask<ReadResult<T>> task;
+      CloseableIterator<T> reader;
+      synchronized (lock) {
+        if (closed) {
+          return;
+        }
         closed = true;
-        cancelAndAwaitRead();
-        delegate.close();
+        task = readAhead;
+        reader = delegate;
       }
+
+      if (task != null) {
+        task.cancelTracked();
+      }
+
+      Throwable failure = null;
+      if (reader != null) {
+        try {
+          reader.close();
+        } catch (Throwable closeFailure) {
+          failure = closeFailure;
+        }
+      }
+
+      if (task != null) {
+        task.awaitExit();
+      }
+
+      synchronized (lock) {
+        readAhead = null;
+        delegate = null;
+        if (asynchronousCloseFailure != null) {
+          if (failure == null) {
+            failure = asynchronousCloseFailure;
+          } else if (failure != asynchronousCloseFailure) {
+            failure.addSuppressed(asynchronousCloseFailure);
+          }
+          asynchronousCloseFailure = null;
+        }
+      }
+      throwCloseFailure(failure);
     }
 
     private void submitRead() {
-      readAhead =
+      TrackedFutureTask<ReadResult<T>> task =
           new TrackedFutureTask<>(
               () -> {
-                if (!delegate.hasNext()) {
+                CloseableIterator<T> reader = openReader();
+                if (!reader.hasNext()) {
                   return ReadResult.empty();
                 }
                 return ReadResult.available(
-                    requireNonNull(delegate.next(), "reader batch is null"));
+                    requireNonNull(reader.next(), "reader batch is null"));
               });
-      executor.execute(readAhead);
+      synchronized (lock) {
+        ensureOpen();
+        readAhead = task;
+        try {
+          executor.execute(task);
+        } catch (RuntimeException | Error failure) {
+          readAhead = null;
+          throw failure;
+        }
+      }
+    }
+
+    private CloseableIterator<T> openReader() throws IOException {
+      CloseableIterator<T> existing;
+      synchronized (lock) {
+        existing = delegate;
+      }
+      if (existing != null) {
+        return existing;
+      }
+
+      CloseableIterator<T> opened =
+          requireNonNull(preparer.prepare(), "file reader is null");
+      synchronized (lock) {
+        if (!closed) {
+          delegate = opened;
+          return opened;
+        }
+      }
+
+      try {
+        opened.close();
+      } catch (Throwable closeFailure) {
+        synchronized (lock) {
+          asynchronousCloseFailure = closeFailure;
+        }
+      }
+      throw new CancellationException("Plan file reader was closed while opening");
     }
 
     private ReadResult<T> awaitRead() {
@@ -396,14 +481,6 @@ final class FileScanExecutor {
       }
     }
 
-    private void cancelAndAwaitRead() {
-      if (readAhead != null) {
-        readAhead.cancelTracked();
-        readAhead.awaitExit();
-        readAhead = null;
-      }
-    }
-
     private void closeAfterFailure(Throwable failure) {
       Utils.closeCloseablesAndAddSuppressed(failure, this);
     }
@@ -411,6 +488,21 @@ final class FileScanExecutor {
     private void ensureOpen() {
       if (closed) {
         throw new IllegalStateException("Plan file reader is closed");
+      }
+    }
+
+    private static void throwCloseFailure(Throwable failure) throws IOException {
+      if (failure instanceof IOException) {
+        throw (IOException) failure;
+      }
+      if (failure instanceof RuntimeException) {
+        throw (RuntimeException) failure;
+      }
+      if (failure instanceof Error) {
+        throw (Error) failure;
+      }
+      if (failure != null) {
+        throw new IOException("Failed to close plan file reader", failure);
       }
     }
   }

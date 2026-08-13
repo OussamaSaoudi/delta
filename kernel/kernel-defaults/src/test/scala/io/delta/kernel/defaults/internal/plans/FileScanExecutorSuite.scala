@@ -355,11 +355,76 @@ class FileScanExecutorSuite extends AnyFunSuite with MockEngineUtils {
       iterator.close()
       assert(interrupted.await(5, TimeUnit.SECONDS))
       assert(handler.readers.map(_.closeCalls) === Seq(1, 1))
-      val blockingReaders = handler.readers.collect { case reader: BlockingIterator[_] => reader }
-      assert(blockingReaders.forall(reader => !reader.closedWhileReading.get()))
       assert(!executor.isShutdown)
     } finally {
       block.countDown()
+      iterator.close()
+      shutdown(executor)
+    }
+  }
+
+  test("closing a parallel scan closes its reader before awaiting a blocked read") {
+    val file = plainFile("file:///table/blocked")
+    val started = new CountDownLatch(1)
+    val handler = new FactoryParquetHandler(
+      Map(file.getFileStatus.getPath -> Seq(batch(1))),
+      (_, values) => new CloseUnblocksIterator(values, started))
+    val scan = new ScanParquet(
+      Seq(file).asJava,
+      Seq.empty[String].asJava,
+      readSchema)
+    val ioExecutor = Executors.newSingleThreadExecutor()
+    val closeExecutor = Executors.newSingleThreadExecutor()
+    val iterator = FileScanExecutor.execute(
+      scan,
+      mockEngine(parquetHandler = handler),
+      ioExecutor)
+
+    try {
+      assert(started.await(5, TimeUnit.SECONDS))
+      val close = closeExecutor.submit(new Runnable {
+        override def run(): Unit = iterator.close()
+      })
+      close.get(5, TimeUnit.SECONDS)
+      assert(handler.readers.map(_.closeCalls) === Seq(1))
+    } finally {
+      iterator.close()
+      shutdown(closeExecutor)
+      shutdown(ioExecutor)
+    }
+  }
+
+  test("parallel scan opens every file reader concurrently") {
+    val first = plainFile("file:///table/first")
+    val second = plainFile("file:///table/second")
+    val bothOpening = new CountDownLatch(2)
+    val releaseOpen = new CountDownLatch(1)
+    val handler = new FactoryParquetHandler(
+      Map(
+        first.getFileStatus.getPath -> Seq(batch(1)),
+        second.getFileStatus.getPath -> Seq(batch(2))),
+      (_, values) => {
+        bothOpening.countDown()
+        assert(releaseOpen.await(5, TimeUnit.SECONDS))
+        new TrackingIterator(values)
+      })
+    val scan = new ScanParquet(
+      Seq(first, second).asJava,
+      Seq.empty[String].asJava,
+      readSchema)
+    val executor = Executors.newFixedThreadPool(2)
+    val iterator = FileScanExecutor.execute(
+      scan,
+      mockEngine(parquetHandler = handler),
+      executor)
+
+    try {
+      assert(bothOpening.await(5, TimeUnit.SECONDS))
+      releaseOpen.countDown()
+      val result = rows(iterator.toInMemoryList().asScala.toSeq)
+      assert(result.map(_.getLong(0)) === Seq(1L, 2L))
+    } finally {
+      releaseOpen.countDown()
       iterator.close()
       shutdown(executor)
     }
@@ -397,12 +462,17 @@ class FileScanExecutorSuite extends AnyFunSuite with MockEngineUtils {
         physicalSchema: StructType,
         predicate: Optional[Predicate]): CloseableIterator[ColumnarBatch] = {
       val files = fileIter.toInMemoryList().asScala.toSeq
-      calls += ReadCall(files, physicalSchema)
-      if (calls.size == failOnCall) {
+      val callNumber = this.synchronized {
+        calls += ReadCall(files, physicalSchema)
+        calls.size
+      }
+      if (callNumber == failOnCall) {
         throw new IOException("open failed")
       }
       val reader = new TrackingIterator(files.flatMap(file => outputs(file.getPath)))
-      readers += reader
+      this.synchronized {
+        readers += reader
+      }
       reader
     }
   }
@@ -421,7 +491,9 @@ class FileScanExecutorSuite extends AnyFunSuite with MockEngineUtils {
       val results = files.flatMap(file =>
         outputs(file.getPath).map(batch => new FileReadResult(batch, file.getPath)))
       val reader = new TrackingIterator(results)
-      readers += reader
+      this.synchronized {
+        readers += reader
+      }
       reader
     }
   }
@@ -438,13 +510,17 @@ class FileScanExecutorSuite extends AnyFunSuite with MockEngineUtils {
         physicalSchema: StructType,
         predicate: Optional[Predicate]): CloseableIterator[FileReadResult] = {
       val files = fileIter.toInMemoryList().asScala.toSeq
-      calls += ReadCall(files, physicalSchema)
+      this.synchronized {
+        calls += ReadCall(files, physicalSchema)
+      }
       assert(files.size === 1)
       val path = files.head.getPath
       val reader = factory(
         path,
         outputs(path).map(batch => new FileReadResult(batch, path)))
-      readers += reader
+      this.synchronized {
+        readers += reader
+      }
       reader
     }
   }
@@ -458,13 +534,10 @@ class FileScanExecutorSuite extends AnyFunSuite with MockEngineUtils {
       readAheadStarted: CountDownLatch = new CountDownLatch(0))
       extends TrackingIterator[T](values) {
     private val first = new AtomicBoolean(true)
-    private val reading = new AtomicBoolean(false)
-    val closedWhileReading = new AtomicBoolean(false)
 
     override def next(): T = {
       if (first.compareAndSet(true, false)) {
         started.countDown()
-        reading.set(true)
         try {
           release.await()
           super.next()
@@ -474,20 +547,12 @@ class FileScanExecutorSuite extends AnyFunSuite with MockEngineUtils {
             Thread.currentThread().interrupt()
             throw new RuntimeException("file read interrupted", failure)
         } finally {
-          reading.set(false)
           finished.countDown()
         }
       } else {
         readAheadStarted.countDown()
         super.next()
       }
-    }
-
-    override def close(): Unit = {
-      if (reading.get()) {
-        closedWhileReading.set(true)
-      }
-      super.close()
     }
   }
 
@@ -504,6 +569,30 @@ class FileScanExecutorSuite extends AnyFunSuite with MockEngineUtils {
         throw failure
       }
       super.next()
+    }
+  }
+
+  private class CloseUnblocksIterator[T](values: Seq[T], started: CountDownLatch)
+      extends TrackingIterator[T](values) {
+    private val closed = new CountDownLatch(1)
+
+    override def next(): T = {
+      started.countDown()
+      var waiting = true
+      while (waiting) {
+        try {
+          closed.await()
+          waiting = false
+        } catch {
+          case _: InterruptedException => // Closing the reader is the only unblock mechanism.
+        }
+      }
+      super.next()
+    }
+
+    override def close(): Unit = {
+      closed.countDown()
+      super.close()
     }
   }
 }
