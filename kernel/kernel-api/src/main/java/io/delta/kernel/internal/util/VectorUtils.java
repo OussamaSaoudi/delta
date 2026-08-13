@@ -154,6 +154,8 @@ public final class VectorUtils {
   public static Object getValueAsObject(ColumnVector columnVector, DataType dataType, int rowId) {
     if (columnVector.isNullAt(rowId)) {
       return null;
+    } else if (dataType instanceof VoidType) {
+      throw new IllegalArgumentException("Void value at rowId " + rowId + " must be null");
     } else if (dataType instanceof BooleanType) {
       return columnVector.getBoolean(rowId);
     } else if (dataType instanceof ByteType) {

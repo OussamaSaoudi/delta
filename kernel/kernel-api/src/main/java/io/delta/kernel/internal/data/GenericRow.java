@@ -43,6 +43,7 @@ public class GenericRow implements Row {
     this.schema = requireNonNull(schema, "schema is null");
     this.ordinalToValue = requireNonNull(ordinalToValue, "ordinalToValue is null");
     this.ordinalValues = null;
+    validateVoidValues();
   }
 
   /**
@@ -69,6 +70,7 @@ public class GenericRow implements Row {
     }
     this.ordinalToValue = null;
     this.ordinalValues = Collections.unmodifiableList(new ArrayList<Object>(ordinalValues));
+    validateVoidValues();
   }
 
   @Override
@@ -166,6 +168,15 @@ public class GenericRow implements Row {
 
   private Object getValue(int ordinal) {
     return ordinalValues != null ? ordinalValues.get(ordinal) : ordinalToValue.get(ordinal);
+  }
+
+  private void validateVoidValues() {
+    for (int ordinal = 0; ordinal < schema.length(); ordinal++) {
+      if (schema.at(ordinal).getDataType() instanceof VoidType && getValue(ordinal) != null) {
+        throw new IllegalArgumentException(
+            String.format("Void value at ordinal %s must be null", ordinal));
+      }
+    }
   }
 
   private void throwIfUnsafeAccess(int ordinal, String accessType, Class<?>... expectedDataTypes) {

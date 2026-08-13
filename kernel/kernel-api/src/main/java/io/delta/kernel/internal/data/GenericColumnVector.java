@@ -31,6 +31,11 @@ public class GenericColumnVector implements ColumnVector {
   public GenericColumnVector(List<?> values, DataType dataType) {
     this.values = values;
     this.dataType = dataType;
+    if (dataType instanceof VoidType) {
+      for (int rowId = 0; rowId < values.size(); rowId++) {
+        checkArgument(values.get(rowId) == null, "Void value at rowId %s must be null", rowId);
+      }
+    }
   }
 
   @Override
@@ -177,6 +182,10 @@ public class GenericColumnVector implements ColumnVector {
   }
 
   private Object extractTypedValue(Row row, int ordinal, DataType childDatatype) {
+    if (childDatatype instanceof VoidType) {
+      throw new IllegalArgumentException("Void values must be null");
+    }
+
     // Primitive Types
     if (childDatatype instanceof BooleanType) {
       return row.getBoolean(ordinal);

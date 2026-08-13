@@ -311,12 +311,18 @@ public final class Literal implements Expression {
     return new Literal(null, dataType);
   }
 
+  /** Create the only valid {@link VoidType} literal. */
+  public static Literal ofVoid() {
+    return new Literal(null, VoidType.VOID);
+  }
+
   private final Object value;
   private final DataType dataType;
 
   private Literal(Object value, DataType dataType) {
     this.value = value;
     this.dataType = Objects.requireNonNull(dataType, "dataType is null");
+    checkArgument(value == null || !(dataType instanceof VoidType), "Void value must be null");
   }
 
   /**

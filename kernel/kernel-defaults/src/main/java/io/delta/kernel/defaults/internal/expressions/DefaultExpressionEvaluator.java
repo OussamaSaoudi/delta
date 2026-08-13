@@ -978,7 +978,8 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
           || dataType instanceof GeographyType
           || dataType instanceof ArrayType
           || dataType instanceof MapType
-          || dataType instanceof StructType) {
+          || dataType instanceof StructType
+          || dataType instanceof VoidType) {
         return new DefaultConstantVector(dataType, input.getSize(), literal.getValue());
       }
 

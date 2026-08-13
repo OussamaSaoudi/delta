@@ -40,6 +40,14 @@ public class DefaultGenericVector implements ColumnVector {
 
   protected DefaultGenericVector(
       int size, DataType dataType, Function<Integer, Object> rowIdToValueAccessor) {
+    if (dataType instanceof VoidType) {
+      for (int rowId = 0; rowId < size; rowId++) {
+        checkArgument(
+            rowIdToValueAccessor.apply(rowId) == null,
+            "Void value at rowId %s must be null",
+            rowId);
+      }
+    }
     this.size = size;
     this.dataType = dataType;
     this.rowIdToValueAccessor = rowIdToValueAccessor;

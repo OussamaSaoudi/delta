@@ -465,7 +465,10 @@ public class DataTypeJsonSerDe {
 
   /** Parses primitive string type names to a {@link DataType} */
   private static DataType nameToType(String name) {
-    if (BasePrimitiveType.isPrimitiveType(name)) {
+    if ("void".equalsIgnoreCase(name)) {
+      // Void is an executor-only type and is not valid in a persisted Delta schema.
+      throw DeltaErrors.voidTypeEncountered();
+    } else if (BasePrimitiveType.isPrimitiveType(name)) {
       return BasePrimitiveType.createPrimitive(name);
     } else if (name.equals("decimal")) {
       return DecimalType.USER_DEFAULT;
@@ -473,10 +476,6 @@ public class DataTypeJsonSerDe {
       return GeometryType.ofDefault();
     } else if (name.equals("geography")) {
       return GeographyType.ofDefault();
-    } else if ("void".equalsIgnoreCase(name)) {
-      // Earlier versions of Delta had VOID type which is not specified in Delta Protocol.
-      // It is not readable or writable. Throw a user-friendly error message.
-      throw DeltaErrors.voidTypeEncountered();
     } else {
       // decimal has a special pattern with a precision and scale
       Matcher decimalMatcher = FIXED_DECIMAL_PATTERN.matcher(name);

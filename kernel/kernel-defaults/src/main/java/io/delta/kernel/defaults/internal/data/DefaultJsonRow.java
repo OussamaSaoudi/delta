@@ -192,6 +192,10 @@ public class DefaultJsonRow implements Row {
   private static Object decodeElementUnchecked(
       JsonNode jsonValue, DataType dataType, boolean nullFailureProneLeaves) {
 
+    if (dataType instanceof VoidType) {
+      throw new RuntimeException(String.format("Couldn't decode %s, expected null", jsonValue));
+    }
+
     if (dataType instanceof BooleanType) {
       throwIfTypeMismatch("boolean", jsonValue.isBoolean(), jsonValue);
       return jsonValue.booleanValue();
@@ -342,7 +346,9 @@ public class DefaultJsonRow implements Row {
       for (int i = 0; i < jsonArray.size(); i++) {
         final JsonNode element = jsonArray.get(i);
         final Object parsedElement = decodeElement(element, arrayType.getElementType(), false);
-        if (parsedElement == null && !arrayType.containsNull()) {
+        if (parsedElement == null
+            && !arrayType.containsNull()
+            && !(arrayType.getElementType() instanceof VoidType)) {
           throw new RuntimeException(
               "Array type expects no nulls as elements, but " + "received `null` as array element");
         }
@@ -391,7 +397,9 @@ public class DefaultJsonRow implements Row {
         } else {
           valueParsed = decodeElement(entry.getValue(), mapType.getValueType(), false);
         }
-        if (valueParsed == null && !mapType.isValueContainsNull()) {
+        if (valueParsed == null
+            && !mapType.isValueContainsNull()
+            && !(mapType.getValueType() instanceof VoidType)) {
           throw new RuntimeException(
               "Map type expects no nulls in values, but " + "received `null` as value");
         }
@@ -435,7 +443,7 @@ public class DefaultJsonRow implements Row {
   private static Object decodeField(
       ObjectNode rootNode, StructField field, boolean nullFailureProneLeaves) {
     if (rootNode.get(field.getName()) == null || rootNode.get(field.getName()).isNull()) {
-      if (field.isNullable()) {
+      if (field.isNullable() || field.getDataType() instanceof VoidType) {
         return null;
       }
 
@@ -447,7 +455,7 @@ public class DefaultJsonRow implements Row {
 
     Object value =
         decodeElement(rootNode.get(field.getName()), field.getDataType(), nullFailureProneLeaves);
-    if (value == null && !field.isNullable()) {
+    if (value == null && !field.isNullable() && !(field.getDataType() instanceof VoidType)) {
       throw new RuntimeException(
           String.format(
               "Decoded value at key %s is null but field isn't nullable", field.getName()));
