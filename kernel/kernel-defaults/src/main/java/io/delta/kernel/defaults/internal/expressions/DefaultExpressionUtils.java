@@ -22,6 +22,7 @@ import static java.lang.String.format;
 import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.MapValue;
+import io.delta.kernel.data.VariantValue;
 import io.delta.kernel.expressions.Expression;
 import io.delta.kernel.expressions.Literal;
 import io.delta.kernel.expressions.Predicate;
@@ -404,6 +405,11 @@ class DefaultExpressionUtils {
       @Override
       public BigDecimal getDecimal(int rowId) {
         return getVector(rowId).getDecimal(rowId);
+      }
+
+      @Override
+      public VariantValue getVariant(int rowId) {
+        return getVector(rowId).getVariant(rowId);
       }
 
       @Override

@@ -19,7 +19,7 @@ import java.lang.{Integer => IntegerJ}
 
 import scala.collection.JavaConverters._
 
-import io.delta.kernel.data.{ArrayValue, ColumnVector, MapValue}
+import io.delta.kernel.data.{ArrayValue, ColumnVector, MapValue, VariantValue}
 import io.delta.kernel.defaults.internal.data.DefaultColumnarBatch
 import io.delta.kernel.defaults.internal.data.vector.DefaultGenericVector
 import io.delta.kernel.expressions.{Column, Expression, Literal, ScalarExpression, StructExpression}
@@ -89,6 +89,26 @@ class ArrayExpressionEvaluatorSuite extends AnyFunSuite with ExpressionSuiteBase
     val nestedElements = nested.getArray(0).getElements
     assertInts(nestedElements.getArray(0), Seq(IntegerJ.valueOf(7), IntegerJ.valueOf(8)))
     assertInts(nestedElements.getArray(1), Seq(IntegerJ.valueOf(9)))
+  }
+
+  test("ARRAY and COALESCE preserve Variant values without conversion") {
+    val first = new VariantValue(Array[Byte](1), Array[Byte](10))
+    val fallback = new VariantValue(Array[Byte](2), Array[Byte](20))
+    val input = batch(
+      ("left", VariantType.VARIANT, Seq(first, null)),
+      ("right", VariantType.VARIANT, Seq(fallback, fallback)))
+
+    val result = evaluate(
+      input,
+      array(coalesce(new Column("left"), new Column("right")), new Column("right")),
+      new ArrayType(VariantType.VARIANT, false))
+
+    val firstRow = result.getArray(0).getElements
+    assert(firstRow.getVariant(0) === first)
+    assert(firstRow.getVariant(1) === fallback)
+    val secondRow = result.getArray(1).getElements
+    assert(secondRow.getVariant(0) === fallback)
+    assert(secondRow.getVariant(1) === fallback)
   }
 
   test("ARRAY supports zero rows and validates type, arity, and nullability") {

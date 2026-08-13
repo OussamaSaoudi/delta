@@ -170,6 +170,13 @@ public interface ColumnVector extends AutoCloseable {
   }
 
   /**
+   * Returns the Variant value for {@code rowId}. The return value is undefined if the slot is null.
+   */
+  default VariantValue getVariant(int rowId) {
+    throw new UnsupportedOperationException("Invalid value request for data type");
+  }
+
+  /**
    * Return the map value located at {@code rowId}. Returns null if the slot for {@code rowId} is
    * null
    */

@@ -21,6 +21,7 @@ import static java.util.Objects.requireNonNull;
 import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.MapValue;
 import io.delta.kernel.data.Row;
+import io.delta.kernel.data.VariantValue;
 import io.delta.kernel.types.*;
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -150,6 +151,12 @@ public class GenericRow implements Row {
   public BigDecimal getDecimal(int ordinal) {
     throwIfUnsafeAccess(ordinal, "decimal", DecimalType.class);
     return (BigDecimal) getValue(ordinal);
+  }
+
+  @Override
+  public VariantValue getVariant(int ordinal) {
+    throwIfUnsafeAccess(ordinal, "variant", VariantType.class);
+    return (VariantValue) getValue(ordinal);
   }
 
   @Override

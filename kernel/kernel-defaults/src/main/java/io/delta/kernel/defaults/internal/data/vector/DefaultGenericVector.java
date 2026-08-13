@@ -156,6 +156,13 @@ public class DefaultGenericVector implements ColumnVector {
   }
 
   @Override
+  public VariantValue getVariant(int rowId) {
+    assertValidRowId(rowId);
+    throwIfUnsafeAccess(VariantType.class, "variant");
+    return (VariantValue) rowIdToValueAccessor.apply(rowId);
+  }
+
+  @Override
   public byte[] getBinary(int rowId) {
     assertValidRowId(rowId);
     throwIfUnsafeAccess(BinaryType.class, "binary");

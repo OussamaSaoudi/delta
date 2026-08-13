@@ -123,6 +123,12 @@ public class GenericColumnVector implements ColumnVector {
   }
 
   @Override
+  public VariantValue getVariant(int rowId) {
+    checkArgument(dataType instanceof VariantType);
+    return (VariantValue) getValidatedValue(rowId, VariantValue.class);
+  }
+
+  @Override
   public String getString(int rowId) {
     checkArgument(
         dataType instanceof StringType
@@ -240,6 +246,9 @@ public class GenericColumnVector implements ColumnVector {
     }
     if (childDatatype instanceof DecimalType) {
       return row.getDecimal(ordinal);
+    }
+    if (childDatatype instanceof VariantType) {
+      return row.getVariant(ordinal);
     }
 
     // Nested Types

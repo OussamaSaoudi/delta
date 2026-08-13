@@ -186,6 +186,8 @@ public final class VectorUtils {
       return StructRow.fromStructVector(columnVector, rowId);
     } else if (dataType instanceof DecimalType) {
       return columnVector.getDecimal(rowId);
+    } else if (dataType instanceof VariantType) {
+      return columnVector.getVariant(rowId);
     } else if (dataType instanceof ArrayType) {
       return toJavaList(columnVector.getArray(rowId));
     } else if (dataType instanceof MapType) {

@@ -102,6 +102,14 @@ public interface Row {
   BigDecimal getDecimal(int ordinal);
 
   /**
+   * Return Variant value of the column located at the given ordinal. Throws error if the column at
+   * the given ordinal is not of Variant type.
+   */
+  default VariantValue getVariant(int ordinal) {
+    throw new UnsupportedOperationException("Invalid value request for data type");
+  }
+
+  /**
    * Return binary value of the column located at the given ordinal. Throws error if the column at
    * given ordinal is not of varchar type,
    */

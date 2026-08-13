@@ -45,6 +45,7 @@ import io.delta.kernel.types.StructField;
 import io.delta.kernel.types.StructType;
 import io.delta.kernel.types.TimestampNTZType;
 import io.delta.kernel.types.TimestampType;
+import io.delta.kernel.types.VariantType;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -90,6 +91,8 @@ final class PlanValueUtils {
       return vector.getString(rowId);
     } else if (type instanceof BinaryType) {
       return vector.getBinary(rowId);
+    } else if (type instanceof VariantType) {
+      return vector.getVariant(rowId);
     } else if (type instanceof StructType) {
       return StructRow.fromStructVector(vector, rowId);
     } else if (type instanceof ArrayType) {
@@ -134,6 +137,8 @@ final class PlanValueUtils {
       return row.getString(ordinal);
     } else if (type instanceof BinaryType) {
       return row.getBinary(ordinal).clone();
+    } else if (type instanceof VariantType) {
+      return row.getVariant(ordinal);
     } else if (type instanceof StructType) {
       return row.getStruct(ordinal);
     } else if (type instanceof ArrayType) {
@@ -196,7 +201,7 @@ final class PlanValueUtils {
   private static void validate(DataType type, String context, boolean allowMaps) {
     requireNonNull(type, "type is null");
     requireNonNull(context, "context is null");
-    if (supports(type)) {
+    if (supports(type) || type instanceof VariantType) {
       return;
     }
     if (type instanceof StructType) {

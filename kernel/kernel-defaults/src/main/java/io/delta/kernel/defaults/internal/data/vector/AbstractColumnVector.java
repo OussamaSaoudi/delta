@@ -21,6 +21,7 @@ import static java.util.Objects.requireNonNull;
 import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.MapValue;
+import io.delta.kernel.data.VariantValue;
 import io.delta.kernel.types.DataType;
 import java.math.BigDecimal;
 import java.util.Optional;
@@ -127,6 +128,11 @@ public abstract class AbstractColumnVector implements ColumnVector {
   @Override
   public BigDecimal getDecimal(int rowId) {
     throw unsupportedDataAccessException("decimal");
+  }
+
+  @Override
+  public VariantValue getVariant(int rowId) {
+    throw unsupportedDataAccessException("variant");
   }
 
   @Override

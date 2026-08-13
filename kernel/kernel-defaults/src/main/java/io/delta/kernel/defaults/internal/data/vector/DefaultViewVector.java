@@ -20,6 +20,7 @@ import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.MapValue;
+import io.delta.kernel.data.VariantValue;
 import io.delta.kernel.types.DataType;
 import java.math.BigDecimal;
 import java.util.Arrays;
@@ -146,6 +147,12 @@ public class DefaultViewVector implements ColumnVector {
   public BigDecimal getDecimal(int rowId) {
     checkValidRowId(rowId);
     return underlyingVector.getDecimal(offset + rowId);
+  }
+
+  @Override
+  public VariantValue getVariant(int rowId) {
+    checkValidRowId(rowId);
+    return underlyingVector.getVariant(offset + rowId);
   }
 
   @Override

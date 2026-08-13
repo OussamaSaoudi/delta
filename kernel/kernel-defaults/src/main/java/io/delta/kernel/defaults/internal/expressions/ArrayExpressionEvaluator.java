@@ -21,6 +21,7 @@ import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.MapValue;
+import io.delta.kernel.data.VariantValue;
 import io.delta.kernel.expressions.ScalarExpression;
 import io.delta.kernel.internal.util.Utils;
 import io.delta.kernel.types.ArrayType;
@@ -219,6 +220,11 @@ final class ArrayExpressionEvaluator {
     @Override
     public BigDecimal getDecimal(int elementIndex) {
       return element(elementIndex).getDecimal(rowId);
+    }
+
+    @Override
+    public VariantValue getVariant(int elementIndex) {
+      return element(elementIndex).getVariant(rowId);
     }
 
     @Override

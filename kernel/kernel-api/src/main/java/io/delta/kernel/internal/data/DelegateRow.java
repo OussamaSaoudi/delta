@@ -20,6 +20,7 @@ import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.MapValue;
 import io.delta.kernel.data.Row;
+import io.delta.kernel.data.VariantValue;
 import io.delta.kernel.types.*;
 import java.math.BigDecimal;
 import java.util.HashMap;
@@ -168,6 +169,15 @@ public class DelegateRow implements Row {
       return (BigDecimal) overrides.get(ordinal);
     }
     return row.getDecimal(ordinal);
+  }
+
+  @Override
+  public VariantValue getVariant(int ordinal) {
+    if (overrides.containsKey(ordinal)) {
+      throwIfUnsafeAccess(ordinal, VariantType.class, "variant");
+      return (VariantValue) overrides.get(ordinal);
+    }
+    return row.getVariant(ordinal);
   }
 
   @Override

@@ -20,10 +20,10 @@ import java.util.Optional
 
 import scala.jdk.CollectionConverters._
 
-import io.delta.kernel.data.{FilteredColumnarBatch, Row}
+import io.delta.kernel.data.{FilteredColumnarBatch, Row, VariantValue}
 import io.delta.kernel.expressions.Column
 import io.delta.kernel.internal.plans.SemiJoin
-import io.delta.kernel.types.{BinaryType, IntervalDayTimeType, IntervalYearMonthType, LongType, StringType, StructType}
+import io.delta.kernel.types.{BinaryType, IntervalDayTimeType, IntervalYearMonthType, LongType, StringType, StructType, VariantType}
 import io.delta.kernel.utils.CloseableIterator
 
 import PlanTestUtils._
@@ -159,6 +159,30 @@ class SemiJoinExecutorSuite extends AnyFunSuite {
       try assert(rows.asScala.map(_.getBinary(0).toSeq).toSeq === Seq(Seq[Byte](1, 2)))
       finally rows.close()
     } finally output.close()
+  }
+
+  test("SemiJoin compares Variant keys by encoded value and metadata") {
+    val variantProbeSchema = new StructType().add("key", VariantType.VARIANT)
+    val variantBuildSchema = new StructType().add("other", VariantType.VARIANT)
+    val matched = new VariantValue(Array[Byte](1), Array[Byte](10))
+    val unmatched = new VariantValue(Array[Byte](2), Array[Byte](20))
+    val operator = new SemiJoin(
+      false,
+      Seq(new Column("key")).asJava,
+      Seq(new Column("other")).asJava)
+    val output = SemiJoinExecutor.execute(
+      operator,
+      variantProbeSchema,
+      variantBuildSchema,
+      new TrackingIterator(Seq(batch(
+        variantProbeSchema,
+        Seq(row(variantProbeSchema, matched), row(variantProbeSchema, unmatched))))),
+      new TrackingIterator(Seq(batch(
+        variantBuildSchema,
+        Seq(row(variantBuildSchema, new VariantValue(Array[Byte](1), Array[Byte](10))))))))
+
+    try assert(rows(output.next()).map(_.getVariant(0)) === Seq(matched))
+    finally output.close()
   }
 
   test("SemiJoin canonicalizes both interval families without physical type erasure") {

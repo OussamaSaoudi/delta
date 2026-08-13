@@ -19,7 +19,7 @@ import java.lang.{Float => FloatJ, Integer => IntegerJ}
 
 import scala.jdk.CollectionConverters._
 
-import io.delta.kernel.data.{FilteredColumnarBatch, Row}
+import io.delta.kernel.data.{FilteredColumnarBatch, Row, VariantValue}
 import io.delta.kernel.defaults.internal.expressions.DefaultValueComparator
 import io.delta.kernel.expressions.Column
 import io.delta.kernel.internal.plans.{Agg, Aggregate}
@@ -142,6 +142,30 @@ class AggregateExecutorSuite extends AnyFunSuite {
     val results = execute(aggregate, schema, Seq(input))
     assert(results.size === 2)
     assert(results.map(_.getInt(2)) === Seq(2, 4))
+  }
+
+  test("Variant group keys use encoded value and metadata equality") {
+    val schema = new StructType()
+      .add("key", VariantType.VARIANT)
+      .add("value", IntegerType.INTEGER)
+    val aggregate = Aggregate.groupBy(schema, Seq(column("key")).asJava)
+      .max(column("value"))
+      .build()
+    val first = new VariantValue(Array[Byte](1), Array[Byte](10))
+    val equal = new VariantValue(Array[Byte](1), Array[Byte](10))
+    val other = new VariantValue(Array[Byte](2), Array[Byte](10))
+    val input = batch(
+      schema,
+      Seq(
+        row(schema, first, IntegerJ.valueOf(1)),
+        row(schema, equal, IntegerJ.valueOf(2)),
+        row(schema, other, IntegerJ.valueOf(3))))
+
+    val results = execute(aggregate, schema, Seq(input))
+    assert(results.map(_.getVariant(0)) === Seq(first, other))
+    assert(results.map(_.getInt(1)) === Seq(2, 3))
+    val ordering = Aggregate.ungrouped(schema).min(column("key")).build()
+    assertThrows[UnsupportedOperationException](execute(ordering, schema, Seq.empty))
   }
 
   private def binaryParts(values: Byte*): io.delta.kernel.data.ArrayValue =
