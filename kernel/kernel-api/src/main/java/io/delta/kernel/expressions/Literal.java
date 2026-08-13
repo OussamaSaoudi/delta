@@ -175,6 +175,16 @@ public final class Literal implements Expression {
     return new Literal(microSecondsEpoch, TimestampNTZType.TIMESTAMP_NTZ);
   }
 
+  /** Create an interval year-month literal from a signed number of months. */
+  public static Literal ofIntervalYearMonth(int months) {
+    return new Literal(months, IntervalYearMonthType.INTERVAL_YEAR_MONTH);
+  }
+
+  /** Create an interval day-time literal from a signed number of microseconds. */
+  public static Literal ofIntervalDayTime(long microseconds) {
+    return new Literal(microseconds, IntervalDayTimeType.INTERVAL_DAY_TIME);
+  }
+
   /**
    * Create a {@code decimal} type literal expression.
    *
@@ -340,6 +350,8 @@ public final class Literal implements Expression {
    *   <li>DATE: {@link Integer} represents the number of days since epoch in UTC
    *   <li>TIMESTAMP: {@link Long} represents the microseconds since epoch in UTC
    *   <li>TIMESTAMP_NTZ: {@link Long} represents the microseconds since epoch with no timezone
+   *   <li>INTERVAL YEAR TO MONTH: {@link Integer} represents a signed number of months
+   *   <li>INTERVAL DAY TO SECOND: {@link Long} represents a signed number of microseconds
    *   <li>DECIMAL: {@link BigDecimal}.Use {@link #getDataType()} to find the precision and scale
    *   <li>STRING: {@link String}
    *   <li>BINARY: {@code byte[]}

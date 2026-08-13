@@ -40,7 +40,7 @@ public abstract class BasePrimitiveType extends DataType {
 
   /** For testing only */
   public static List<DataType> getAllPrimitiveTypes() {
-    return nameToPrimitiveTypeMap.get().values().stream().collect(Collectors.toList());
+    return nameToPrimitiveTypeMap.get().values().stream().distinct().collect(Collectors.toList());
   }
 
   private static final Supplier<Map<String, DataType>> nameToPrimitiveTypeMap =
@@ -58,6 +58,19 @@ public abstract class BasePrimitiveType extends DataType {
                   put("date", DateType.DATE);
                   put("timestamp", TimestampType.TIMESTAMP);
                   put("timestamp_ntz", TimestampNTZType.TIMESTAMP_NTZ);
+                  put("interval year", IntervalYearMonthType.INTERVAL_YEAR_MONTH);
+                  put("interval month", IntervalYearMonthType.INTERVAL_YEAR_MONTH);
+                  put("interval year to month", IntervalYearMonthType.INTERVAL_YEAR_MONTH);
+                  put("interval day", IntervalDayTimeType.INTERVAL_DAY_TIME);
+                  put("interval hour", IntervalDayTimeType.INTERVAL_DAY_TIME);
+                  put("interval minute", IntervalDayTimeType.INTERVAL_DAY_TIME);
+                  put("interval second", IntervalDayTimeType.INTERVAL_DAY_TIME);
+                  put("interval day to hour", IntervalDayTimeType.INTERVAL_DAY_TIME);
+                  put("interval day to minute", IntervalDayTimeType.INTERVAL_DAY_TIME);
+                  put("interval day to second", IntervalDayTimeType.INTERVAL_DAY_TIME);
+                  put("interval hour to minute", IntervalDayTimeType.INTERVAL_DAY_TIME);
+                  put("interval hour to second", IntervalDayTimeType.INTERVAL_DAY_TIME);
+                  put("interval minute to second", IntervalDayTimeType.INTERVAL_DAY_TIME);
                   put("binary", BinaryType.BINARY);
                   put("string", StringType.STRING);
                   put("variant", VariantType.VARIANT);

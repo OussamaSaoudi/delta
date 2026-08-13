@@ -21,9 +21,10 @@ import static java.util.Objects.requireNonNull;
 import io.delta.kernel.types.DataType;
 import io.delta.kernel.types.DateType;
 import io.delta.kernel.types.IntegerType;
+import io.delta.kernel.types.IntervalYearMonthType;
 import java.util.Optional;
 
-/** {@link io.delta.kernel.data.ColumnVector} implementation for integer type data. */
+/** Column vector implementation for integer, date, and interval year-month physical data. */
 public class DefaultIntVector extends AbstractColumnVector {
   private final int[] values;
 
@@ -38,7 +39,10 @@ public class DefaultIntVector extends AbstractColumnVector {
   public DefaultIntVector(
       DataType dataType, int size, Optional<boolean[]> nullability, int[] values) {
     super(size, dataType, nullability);
-    checkArgument(dataType instanceof IntegerType || dataType instanceof DateType);
+    checkArgument(
+        dataType instanceof IntegerType
+            || dataType instanceof DateType
+            || dataType instanceof IntervalYearMonthType);
     this.values = requireNonNull(values, "values is null");
     checkArgument(
         values.length >= size,
@@ -56,6 +60,14 @@ public class DefaultIntVector extends AbstractColumnVector {
    */
   @Override
   public int getInt(int rowId) {
+    checkArgument(getDataType() instanceof IntegerType || getDataType() instanceof DateType);
+    checkValidRowId(rowId);
+    return values[rowId];
+  }
+
+  @Override
+  public int getIntervalYearMonth(int rowId) {
+    checkArgument(getDataType() instanceof IntervalYearMonthType);
     checkValidRowId(rowId);
     return values[rowId];
   }

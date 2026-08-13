@@ -110,6 +110,18 @@ public class DefaultSubFieldVector implements ColumnVector {
   }
 
   @Override
+  public int getIntervalYearMonth(int rowId) {
+    assertValidRowId(rowId);
+    return rowIdToRowAccessor.apply(rowId).getIntervalYearMonth(columnOrdinal);
+  }
+
+  @Override
+  public long getIntervalDayTime(int rowId) {
+    assertValidRowId(rowId);
+    return rowIdToRowAccessor.apply(rowId).getIntervalDayTime(columnOrdinal);
+  }
+
+  @Override
   public float getFloat(int rowId) {
     assertValidRowId(rowId);
     return rowIdToRowAccessor.apply(rowId).getFloat(columnOrdinal);

@@ -69,6 +69,16 @@ public abstract class ChildVectorBasedRow implements Row {
   }
 
   @Override
+  public int getIntervalYearMonth(int ordinal) {
+    return getChild(ordinal).getIntervalYearMonth(rowId);
+  }
+
+  @Override
+  public long getIntervalDayTime(int ordinal) {
+    return getChild(ordinal).getIntervalDayTime(rowId);
+  }
+
+  @Override
   public float getFloat(int ordinal) {
     return getChild(ordinal).getFloat(rowId);
   }

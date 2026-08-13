@@ -117,6 +117,24 @@ public class DelegateRow implements Row {
   }
 
   @Override
+  public int getIntervalYearMonth(int ordinal) {
+    if (overrides.containsKey(ordinal)) {
+      throwIfUnsafeAccess(ordinal, IntervalYearMonthType.class, "interval year to month");
+      return (int) overrides.get(ordinal);
+    }
+    return row.getIntervalYearMonth(ordinal);
+  }
+
+  @Override
+  public long getIntervalDayTime(int ordinal) {
+    if (overrides.containsKey(ordinal)) {
+      throwIfUnsafeAccess(ordinal, IntervalDayTimeType.class, "interval day to second");
+      return (long) overrides.get(ordinal);
+    }
+    return row.getIntervalDayTime(ordinal);
+  }
+
+  @Override
   public float getFloat(int ordinal) {
     if (overrides.containsKey(ordinal)) {
       throwIfUnsafeAccess(ordinal, FloatType.class, "float");

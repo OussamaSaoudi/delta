@@ -93,6 +93,18 @@ public class GenericColumnVector implements ColumnVector {
   }
 
   @Override
+  public int getIntervalYearMonth(int rowId) {
+    checkArgument(IntervalYearMonthType.INTERVAL_YEAR_MONTH.equals(dataType));
+    return (Integer) getValidatedValue(rowId, Integer.class);
+  }
+
+  @Override
+  public long getIntervalDayTime(int rowId) {
+    checkArgument(IntervalDayTimeType.INTERVAL_DAY_TIME.equals(dataType));
+    return (Long) getValidatedValue(rowId, Long.class);
+  }
+
+  @Override
   public float getFloat(int rowId) {
     checkArgument(FloatType.FLOAT.equals(dataType));
     return (Float) getValidatedValue(rowId, Float.class);
@@ -199,10 +211,16 @@ public class GenericColumnVector implements ColumnVector {
     if (childDatatype instanceof IntegerType || childDatatype instanceof DateType) {
       return row.getInt(ordinal);
     }
+    if (childDatatype instanceof IntervalYearMonthType) {
+      return row.getIntervalYearMonth(ordinal);
+    }
     if (childDatatype instanceof LongType
         || childDatatype instanceof TimestampType
         || childDatatype instanceof TimestampNTZType) {
       return row.getLong(ordinal);
+    }
+    if (childDatatype instanceof IntervalDayTimeType) {
+      return row.getIntervalDayTime(ordinal);
     }
     if (childDatatype instanceof FloatType) {
       return row.getFloat(ordinal);

@@ -99,6 +99,22 @@ public interface ColumnVector extends AutoCloseable {
   }
 
   /**
+   * Returns the interval year-month value for {@code rowId} as a signed count of months. The return
+   * value is undefined if the slot for {@code rowId} is null.
+   */
+  default int getIntervalYearMonth(int rowId) {
+    throw new UnsupportedOperationException("Invalid value request for data type");
+  }
+
+  /**
+   * Returns the interval day-time value for {@code rowId} as a signed count of microseconds. The
+   * return value is undefined if the slot for {@code rowId} is null.
+   */
+  default long getIntervalDayTime(int rowId) {
+    throw new UnsupportedOperationException("Invalid value request for data type");
+  }
+
+  /**
    * Returns the float type value for {@code rowId}. The return value is undefined and can be
    * anything, if the slot for {@code rowId} is null.
    *

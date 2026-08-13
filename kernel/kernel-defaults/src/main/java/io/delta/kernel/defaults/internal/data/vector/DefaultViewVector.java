@@ -107,6 +107,18 @@ public class DefaultViewVector implements ColumnVector {
   }
 
   @Override
+  public int getIntervalYearMonth(int rowId) {
+    checkValidRowId(rowId);
+    return underlyingVector.getIntervalYearMonth(offset + rowId);
+  }
+
+  @Override
+  public long getIntervalDayTime(int rowId) {
+    checkValidRowId(rowId);
+    return underlyingVector.getIntervalDayTime(offset + rowId);
+  }
+
+  @Override
   public float getFloat(int rowId) {
     checkValidRowId(rowId);
     return underlyingVector.getFloat(offset + rowId);

@@ -116,6 +116,18 @@ public class GenericRow implements Row {
   }
 
   @Override
+  public int getIntervalYearMonth(int ordinal) {
+    throwIfUnsafeAccess(ordinal, "interval year to month", IntervalYearMonthType.class);
+    return (int) getValue(ordinal);
+  }
+
+  @Override
+  public long getIntervalDayTime(int ordinal) {
+    throwIfUnsafeAccess(ordinal, "interval day to second", IntervalDayTimeType.class);
+    return (long) getValue(ordinal);
+  }
+
+  @Override
   public float getFloat(int ordinal) {
     throwIfUnsafeAccess(ordinal, "float", FloatType.class);
     return (float) getValue(ordinal);

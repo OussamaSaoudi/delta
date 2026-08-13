@@ -67,6 +67,16 @@ public interface Row {
    */
   long getLong(int ordinal);
 
+  /** Return an interval year-month value as a signed count of months. */
+  default int getIntervalYearMonth(int ordinal) {
+    throw new UnsupportedOperationException("Invalid value request for data type");
+  }
+
+  /** Return an interval day-time value as a signed count of microseconds. */
+  default long getIntervalDayTime(int ordinal) {
+    throw new UnsupportedOperationException("Invalid value request for data type");
+  }
+
   /**
    * Return float value of the column located at the given ordinal. Throws error if the column at
    * given ordinal is not of long type,

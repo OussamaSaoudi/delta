@@ -22,7 +22,7 @@ import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.types.*;
 import java.util.Optional;
 
-/** {@link ColumnVector} implementation for long, timestamp or timestamp_ntz type data. */
+/** Column vector implementation for long, timestamp, and interval day-time physical data. */
 public class DefaultLongVector extends AbstractColumnVector {
   private final long[] values;
 
@@ -40,7 +40,8 @@ public class DefaultLongVector extends AbstractColumnVector {
     checkArgument(
         dataType instanceof LongType
             || dataType instanceof TimestampType
-            || dataType instanceof TimestampNTZType);
+            || dataType instanceof TimestampNTZType
+            || dataType instanceof IntervalDayTimeType);
     this.values = requireNonNull(values, "values is null");
     checkArgument(
         values.length >= size,
@@ -58,6 +59,14 @@ public class DefaultLongVector extends AbstractColumnVector {
    */
   @Override
   public long getLong(int rowId) {
+    checkArgument(!(getDataType() instanceof IntervalDayTimeType));
+    checkValidRowId(rowId);
+    return values[rowId];
+  }
+
+  @Override
+  public long getIntervalDayTime(int rowId) {
+    checkArgument(getDataType() instanceof IntervalDayTimeType);
     checkValidRowId(rowId);
     return values[rowId];
   }

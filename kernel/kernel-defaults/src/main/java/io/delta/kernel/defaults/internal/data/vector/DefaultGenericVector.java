@@ -109,6 +109,20 @@ public class DefaultGenericVector implements ColumnVector {
   }
 
   @Override
+  public int getIntervalYearMonth(int rowId) {
+    assertValidRowId(rowId);
+    throwIfUnsafeAccess(IntervalYearMonthType.class, "interval year to month");
+    return (int) rowIdToValueAccessor.apply(rowId);
+  }
+
+  @Override
+  public long getIntervalDayTime(int rowId) {
+    assertValidRowId(rowId);
+    throwIfUnsafeAccess(IntervalDayTimeType.class, "interval day to second");
+    return (long) rowIdToValueAccessor.apply(rowId);
+  }
+
+  @Override
   public float getFloat(int rowId) {
     assertValidRowId(rowId);
     throwIfUnsafeAccess(FloatType.class, "float");
