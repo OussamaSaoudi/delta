@@ -19,6 +19,7 @@ import static io.delta.kernel.defaults.internal.DefaultEngineErrors.unsupportedE
 import static io.delta.kernel.defaults.internal.expressions.DefaultExpressionUtils.*;
 import static io.delta.kernel.defaults.internal.expressions.ImplicitCastExpression.canCastTo;
 import static io.delta.kernel.internal.util.ExpressionUtils.*;
+import static io.delta.kernel.internal.util.PartitionUtils.isSupportedPartitionValueType;
 import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -122,7 +123,65 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       if (expression instanceof ParseJson) {
         return transformParseJson((ParseJson) expression, expectedType);
       }
+      if (expression instanceof MapToStruct) {
+        return transformMapToStruct((MapToStruct) expression, expectedType);
+      }
+      if (expression instanceof ScalarExpression
+          && ((ScalarExpression) expression).getName().equalsIgnoreCase("COALESCE")) {
+        return transformCoalesce((ScalarExpression) expression, expectedType);
+      }
       return visit(expression);
+    }
+
+    private ExpressionTransformResult transformMapToStruct(
+        MapToStruct mapToStruct, DataType expectedType) {
+      if (!(expectedType instanceof StructType)) {
+        throw unsupportedExpressionException(
+            mapToStruct,
+            String.format("MapToStruct expects a StructType output, but got %s", expectedType));
+      }
+      StructType outputType = (StructType) expectedType;
+      for (StructField field : outputType.fields()) {
+        if (!isSupportedPartitionValueType(field.getDataType())) {
+          throw unsupportedExpressionException(
+              mapToStruct,
+              String.format(
+                  "MapToStruct only supports primitive partition types, but field %s has type %s",
+                  field.getName(), field.getDataType()));
+        }
+      }
+
+      ExpressionTransformResult map = visit(mapToStruct.getMapExpression());
+      if (!(map.outputType instanceof MapType)
+          || !((MapType) map.outputType).getKeyType().equivalent(StringType.STRING)
+          || !((MapType) map.outputType).getValueType().equivalent(StringType.STRING)) {
+        throw unsupportedExpressionException(
+            mapToStruct,
+            String.format(
+                "MapToStruct expects map(string, string) input, but got %s", map.outputType));
+      }
+      return new ExpressionTransformResult(
+          new ResolvedMapToStruct(map.expression, outputType), outputType);
+    }
+
+    private ExpressionTransformResult transformCoalesce(
+        ScalarExpression coalesce, DataType expectedType) {
+      if (coalesce.getChildren().isEmpty()) {
+        throw unsupportedExpressionException(coalesce, "Coalesce requires at least one expression");
+      }
+      List<ExpressionTransformResult> children =
+          coalesce.getChildren().stream()
+              .map(child -> transform(child, expectedType))
+              .collect(Collectors.toList());
+      long numDistinctTypes = children.stream().map(e -> e.outputType).distinct().count();
+      if (numDistinctTypes > 1) {
+        throw unsupportedExpressionException(
+            coalesce, "Coalesce is only supported for arguments of the same type");
+      }
+      return new ExpressionTransformResult(
+          new ScalarExpression(
+              "COALESCE", children.stream().map(e -> e.expression).collect(Collectors.toList())),
+          children.get(0).outputType);
     }
 
     private ExpressionTransformResult transformParseJson(
@@ -339,6 +398,17 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     @Override
     ExpressionTransformResult visitParseJson(ParseJson parseJson) {
       return transformParseJson(parseJson, parseJson.getOutputSchema());
+    }
+
+    @Override
+    ExpressionTransformResult visitMapToStruct(MapToStruct mapToStruct) {
+      throw unsupportedExpressionException(
+          mapToStruct, "A caller-supplied StructType is required to evaluate MapToStruct");
+    }
+
+    @Override
+    ExpressionTransformResult visitResolvedMapToStruct(ResolvedMapToStruct mapToStruct) {
+      throw new IllegalStateException("ResolvedMapToStruct is not valid evaluator input");
     }
 
     @Override
@@ -642,6 +712,14 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
             expectedType);
         return visitParseJson((ParseJson) expression);
       }
+      if (expression instanceof ResolvedMapToStruct) {
+        checkArgument(
+            ((ResolvedMapToStruct) expression).getOutputType().equals(expectedType),
+            "MapToStruct output schema %s does not match expected output type %s",
+            ((ResolvedMapToStruct) expression).getOutputType(),
+            expectedType);
+        return visitResolvedMapToStruct((ResolvedMapToStruct) expression);
+      }
       if (expression instanceof StructExpression) {
         checkArgument(
             expectedType instanceof StructType,
@@ -858,6 +936,21 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
         return new DefaultConstantVector(parseJson.getOutputSchema(), jsonVector.getSize(), null);
       } finally {
         jsonVector.close();
+      }
+    }
+
+    @Override
+    ColumnVector visitMapToStruct(MapToStruct mapToStruct) {
+      throw new IllegalStateException("MapToStruct must be resolved before expression evaluation");
+    }
+
+    @Override
+    ColumnVector visitResolvedMapToStruct(ResolvedMapToStruct mapToStruct) {
+      ColumnVector maps = visit(mapToStruct.getMapExpression());
+      try {
+        return MapToStructEvaluator.eval(maps, mapToStruct.getOutputType());
+      } finally {
+        maps.close();
       }
     }
 
