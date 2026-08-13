@@ -28,10 +28,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 /** Schema operations shared by plan IR validation. */
-final class PlanSchemaUtils {
+public final class PlanSchemaUtils {
   private PlanSchemaUtils() {}
 
-  static StructField resolveField(StructType schema, Column column, String context) {
+  public static StructField resolveField(StructType schema, Column column, String context) {
     requireNonNull(schema, "schema is null");
     requireNonNull(column, "column is null");
     String[] names = requireNonNull(column.getNames(), "column path is null");
