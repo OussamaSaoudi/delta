@@ -18,7 +18,6 @@ package io.delta.kernel.internal.plans;
 import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.data.Row;
-import io.delta.kernel.types.StructField;
 import io.delta.kernel.types.StructType;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -36,28 +35,10 @@ public final class Values implements Operator {
     List<Row> copiedRows = new ArrayList<>(rows.size());
     for (int rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
       Row row = requireNonNull(rows.get(rowIndex), "row is null");
-      validateRow(row, rowIndex);
+      RowValidator.validate(row, schema, String.format("Values row %s", rowIndex));
       copiedRows.add(row);
     }
     this.rows = Collections.unmodifiableList(copiedRows);
-  }
-
-  private void validateRow(Row row, int rowIndex) {
-    StructType rowSchema = requireNonNull(row.getSchema(), "row schema is null");
-    if (!schema.equals(rowSchema)) {
-      throw new IllegalArgumentException(
-          String.format(
-              "Values row %s schema differs from Values schema: %s vs %s",
-              rowIndex, rowSchema, schema));
-    }
-    for (int fieldIndex = 0; fieldIndex < schema.length(); fieldIndex++) {
-      StructField field = schema.at(fieldIndex);
-      if (!field.isNullable() && row.isNullAt(fieldIndex)) {
-        throw new IllegalArgumentException(
-            String.format(
-                "Values row %s has null for non-nullable field `%s`", rowIndex, field.getName()));
-      }
-    }
   }
 
   public StructType getSchema() {
