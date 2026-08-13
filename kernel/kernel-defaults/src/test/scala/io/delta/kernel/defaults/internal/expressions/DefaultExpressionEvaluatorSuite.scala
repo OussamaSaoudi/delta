@@ -192,14 +192,18 @@ class DefaultExpressionEvaluatorSuite extends AnyFunSuite with ExpressionSuiteBa
 
     val col3Ref = new Column(Array("col1", "col2", "col3"))
     val col3RefResult = evaluator(batchSchema, col3Ref, col3Type).eval(batch)
-    assertTypeAndNullability(col3RefResult, col3Type, col3Nullability);
+    val col3EffectiveNullability = Seq(false, true, true, true, false).toArray
+    assertTypeAndNullability(col3RefResult, col3Type, col3EffectiveNullability)
     Seq.range(0, numRows).foreach { rowId =>
-      assert(col3RefResult.getInt(rowId) === col3Values(rowId))
+      if (!col3RefResult.isNullAt(rowId)) {
+        assert(col3RefResult.getInt(rowId) === col3Values(rowId))
+      }
     }
 
     val col2Ref = new Column(Array("col1", "col2"))
     val col2RefResult = evaluator(batchSchema, col2Ref, col2Type).eval(batch)
-    assertTypeAndNullability(col2RefResult, col2Type, col2Nullability)
+    val col2EffectiveNullability = Seq(false, true, true, true, false).toArray
+    assertTypeAndNullability(col2RefResult, col2Type, col2EffectiveNullability)
 
     val col1Ref = new Column(Array("col1"))
     val col1RefResult = evaluator(batchSchema, col1Ref, col1Type).eval(batch)

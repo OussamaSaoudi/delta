@@ -891,13 +891,14 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
         currentType = structSchema.at(ordinal).getDataType();
 
         if (level == 0) {
-          columnVector = input.getColumnVector(ordinal);
+          ColumnVector inputVector = input.getColumnVector(ordinal);
+          columnVector = new DefaultViewVector(inputVector, 0, inputVector.getSize());
         } else {
           columnVector = columnVector.getChild(ordinal);
         }
       }
       assertColumnExists(columnVector != null, input.getSchema(), column);
-      return new DefaultViewVector(columnVector, 0, columnVector.getSize());
+      return columnVector;
     }
 
     @Override
