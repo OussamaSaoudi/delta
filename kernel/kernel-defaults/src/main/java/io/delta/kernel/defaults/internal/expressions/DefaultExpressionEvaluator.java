@@ -601,7 +601,10 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
           || dataType instanceof TimestampType
           || dataType instanceof TimestampNTZType
           || dataType instanceof GeometryType
-          || dataType instanceof GeographyType) {
+          || dataType instanceof GeographyType
+          || dataType instanceof ArrayType
+          || dataType instanceof MapType
+          || dataType instanceof StructType) {
         return new DefaultConstantVector(dataType, input.getSize(), literal.getValue());
       }
 

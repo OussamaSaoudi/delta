@@ -83,22 +83,10 @@ public final class VectorUtils {
       keys.add(entry.getKey());
       values.add(entry.getValue());
     }
-    return new MapValue() {
-      @Override
-      public int getSize() {
-        return values.size();
-      }
-
-      @Override
-      public ColumnVector getKeys() {
-        return buildColumnVector(keys, StringType.STRING);
-      }
-
-      @Override
-      public ColumnVector getValues() {
-        return buildColumnVector(values, StringType.STRING);
-      }
-    };
+    return buildMapValue(
+        keys,
+        values,
+        new MapType(StringType.STRING, StringType.STRING, true /* valueContainsNull */));
   }
 
   /** Creates an {@link ArrayValue} from list of objects. */
@@ -115,6 +103,34 @@ public final class VectorUtils {
       @Override
       public ColumnVector getElements() {
         return buildColumnVector(values, dataType);
+      }
+    };
+  }
+
+  /** Creates a {@link MapValue} from key and value lists in entry order. */
+  public static MapValue buildMapValue(List<?> keys, List<?> values, MapType dataType) {
+    if (keys == null || values == null) {
+      return null;
+    }
+    if (keys.size() != values.size()) {
+      throw new IllegalArgumentException(
+          String.format(
+              "Map keys and values have different sizes: %s != %s", keys.size(), values.size()));
+    }
+    return new MapValue() {
+      @Override
+      public int getSize() {
+        return keys.size();
+      }
+
+      @Override
+      public ColumnVector getKeys() {
+        return buildColumnVector(keys, dataType.getKeyType());
+      }
+
+      @Override
+      public ColumnVector getValues() {
+        return buildColumnVector(values, dataType.getValueType());
       }
     };
   }
