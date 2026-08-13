@@ -15,7 +15,10 @@
  */
 package io.delta.kernel.defaults.internal.data;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.delta.kernel.data.ArrayValue;
@@ -27,7 +30,9 @@ import io.delta.kernel.defaults.internal.data.vector.DefaultGenericVector;
 import io.delta.kernel.internal.util.InternalUtils;
 import io.delta.kernel.internal.util.TimestampUtils;
 import io.delta.kernel.types.*;
+import java.io.IOException;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.sql.Date;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -37,18 +42,52 @@ import java.util.List;
 import java.util.Map;
 
 public class DefaultJsonRow implements Row {
+  private static final ObjectReader JSON_READER =
+      new ObjectMapper().reader(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
+  private static final ObjectReader SINGLE_OBJECT_JSON_READER =
+      JSON_READER.with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+
   private final Object[] parsedValues;
   private final StructType readSchema;
 
   public DefaultJsonRow(ObjectNode rootNode, StructType readSchema) {
+    this(rootNode, readSchema, false);
+  }
+
+  private DefaultJsonRow(
+      ObjectNode rootNode, StructType readSchema, boolean nullFailureProneLeaves) {
     this.readSchema = readSchema;
     this.parsedValues = new Object[readSchema.length()];
 
     for (int i = 0; i < readSchema.length(); i++) {
       final StructField field = readSchema.at(i);
-      final Object parsedValue = decodeField(rootNode, field);
+      final Object parsedValue = decodeField(rootNode, field, nullFailureProneLeaves);
       parsedValues[i] = parsedValue;
     }
+  }
+
+  /** Decodes one JSON object using the strict semantics used by {@code JsonHandler}. */
+  public static DefaultJsonRow fromJson(String json, StructType readSchema) throws IOException {
+    return fromJson(JSON_READER, json, readSchema, false);
+  }
+
+  /**
+   * Decodes one JSON object while turning invalid date, timestamp, and decimal struct leaves into
+   * null. This is the permissive leaf behavior required by the ParseJson expression.
+   */
+  public static DefaultJsonRow fromJsonPermissively(String json, StructType readSchema)
+      throws IOException {
+    return fromJson(SINGLE_OBJECT_JSON_READER, json, readSchema, true);
+  }
+
+  private static DefaultJsonRow fromJson(
+      ObjectReader reader, String json, StructType readSchema, boolean nullFailureProneLeaves)
+      throws IOException {
+    JsonNode rootNode = reader.readTree(json);
+    if (rootNode == null || !rootNode.isObject()) {
+      throw new IllegalArgumentException("Expected one JSON object");
+    }
+    return new DefaultJsonRow((ObjectNode) rootNode, readSchema, nullFailureProneLeaves);
   }
 
   @Override
@@ -133,10 +172,25 @@ public class DefaultJsonRow implements Row {
     }
   }
 
-  private static Object decodeElement(JsonNode jsonValue, DataType dataType) {
+  private static Object decodeElement(
+      JsonNode jsonValue, DataType dataType, boolean nullFailureProneLeaves) {
     if (jsonValue.isNull()) {
       return null;
     }
+
+    if (nullFailureProneLeaves && isFailureProneLeaf(dataType)) {
+      try {
+        return decodeElementUnchecked(jsonValue, dataType, true);
+      } catch (RuntimeException ignored) {
+        return null;
+      }
+    }
+
+    return decodeElementUnchecked(jsonValue, dataType, nullFailureProneLeaves);
+  }
+
+  private static Object decodeElementUnchecked(
+      JsonNode jsonValue, DataType dataType, boolean nullFailureProneLeaves) {
 
     if (dataType instanceof BooleanType) {
       throwIfTypeMismatch("boolean", jsonValue.isBoolean(), jsonValue);
@@ -243,8 +297,19 @@ public class DefaultJsonRow implements Row {
     }
 
     if (dataType instanceof DecimalType) {
-      throwIfTypeMismatch("decimal", jsonValue.isNumber(), jsonValue);
-      return jsonValue.decimalValue();
+      if (!nullFailureProneLeaves) {
+        throwIfTypeMismatch("decimal", jsonValue.isNumber(), jsonValue);
+        return jsonValue.decimalValue();
+      }
+      throwIfTypeMismatch("decimal", jsonValue.isNumber() || jsonValue.isTextual(), jsonValue);
+      BigDecimal decimal =
+          jsonValue.isTextual() ? new BigDecimal(jsonValue.textValue()) : jsonValue.decimalValue();
+      DecimalType decimalType = (DecimalType) dataType;
+      BigDecimal scaled = decimal.setScale(decimalType.getScale(), RoundingMode.HALF_UP);
+      if (scaled.precision() > decimalType.getPrecision()) {
+        throw new ArithmeticException("Decimal exceeds precision " + decimalType.getPrecision());
+      }
+      return scaled;
     }
 
     if (dataType instanceof DateType) {
@@ -265,7 +330,8 @@ public class DefaultJsonRow implements Row {
 
     if (dataType instanceof StructType) {
       throwIfTypeMismatch("object", jsonValue.isObject(), jsonValue);
-      return new DefaultJsonRow((ObjectNode) jsonValue, (StructType) dataType);
+      return new DefaultJsonRow(
+          (ObjectNode) jsonValue, (StructType) dataType, nullFailureProneLeaves);
     }
 
     if (dataType instanceof ArrayType) {
@@ -275,7 +341,7 @@ public class DefaultJsonRow implements Row {
       final Object[] elements = new Object[jsonArray.size()];
       for (int i = 0; i < jsonArray.size(); i++) {
         final JsonNode element = jsonArray.get(i);
-        final Object parsedElement = decodeElement(element, arrayType.getElementType());
+        final Object parsedElement = decodeElement(element, arrayType.getElementType(), false);
         if (parsedElement == null && !arrayType.containsNull()) {
           throw new RuntimeException(
               "Array type expects no nulls as elements, but " + "received `null` as array element");
@@ -323,7 +389,7 @@ public class DefaultJsonRow implements Row {
             valueParsed = entry.getValue().asText();
           }
         } else {
-          valueParsed = decodeElement(entry.getValue(), mapType.getValueType());
+          valueParsed = decodeElement(entry.getValue(), mapType.getValueType(), false);
         }
         if (valueParsed == null && !mapType.isValueContainsNull()) {
           throw new RuntimeException(
@@ -359,7 +425,15 @@ public class DefaultJsonRow implements Row {
         String.format("Unsupported DataType %s for RootNode %s", dataType, jsonValue));
   }
 
-  private static Object decodeField(ObjectNode rootNode, StructField field) {
+  private static boolean isFailureProneLeaf(DataType dataType) {
+    return dataType instanceof DecimalType
+        || dataType instanceof DateType
+        || dataType instanceof TimestampType
+        || dataType instanceof TimestampNTZType;
+  }
+
+  private static Object decodeField(
+      ObjectNode rootNode, StructField field, boolean nullFailureProneLeaves) {
     if (rootNode.get(field.getName()) == null || rootNode.get(field.getName()).isNull()) {
       if (field.isNullable()) {
         return null;
@@ -371,6 +445,13 @@ public class DefaultJsonRow implements Row {
               field.getName(), rootNode));
     }
 
-    return decodeElement(rootNode.get(field.getName()), field.getDataType());
+    Object value =
+        decodeElement(rootNode.get(field.getName()), field.getDataType(), nullFailureProneLeaves);
+    if (value == null && !field.isNullable()) {
+      throw new RuntimeException(
+          String.format(
+              "Decoded value at key %s is null but field isn't nullable", field.getName()));
+    }
+    return value;
   }
 }

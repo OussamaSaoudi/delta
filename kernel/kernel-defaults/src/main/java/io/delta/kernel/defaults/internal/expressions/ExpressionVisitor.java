@@ -52,6 +52,8 @@ abstract class ExpressionVisitor<R> {
 
   abstract R visitStructPatch(StructPatch structPatch);
 
+  abstract R visitParseJson(ParseJson parseJson);
+
   abstract R visitCast(ImplicitCastExpression cast);
 
   abstract R visitPartitionValue(PartitionValueExpression partitionValue);
@@ -93,6 +95,8 @@ abstract class ExpressionVisitor<R> {
       return visitStruct((StructExpression) expression);
     } else if (expression instanceof StructPatch) {
       return visitStructPatch((StructPatch) expression);
+    } else if (expression instanceof ParseJson) {
+      return visitParseJson((ParseJson) expression);
     } else if (expression instanceof ImplicitCastExpression) {
       return visitCast((ImplicitCastExpression) expression);
     }

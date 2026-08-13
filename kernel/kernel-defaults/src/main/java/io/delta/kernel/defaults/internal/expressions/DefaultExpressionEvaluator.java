@@ -26,14 +26,17 @@ import static java.util.stream.Collectors.toList;
 
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.ColumnarBatch;
+import io.delta.kernel.defaults.internal.data.DefaultJsonRow;
 import io.delta.kernel.defaults.internal.data.vector.DefaultBooleanVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultConstantVector;
+import io.delta.kernel.defaults.internal.data.vector.DefaultGenericVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultViewVector;
 import io.delta.kernel.engine.ExpressionHandler;
 import io.delta.kernel.expressions.*;
 import io.delta.kernel.internal.util.GeometryUtils;
 import io.delta.kernel.internal.util.Utils;
 import io.delta.kernel.types.*;
+import java.io.IOException;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -116,7 +119,30 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       if (expression instanceof StructPatch) {
         return transformStructPatch((StructPatch) expression, expectedType);
       }
+      if (expression instanceof ParseJson) {
+        return transformParseJson((ParseJson) expression, expectedType);
+      }
       return visit(expression);
+    }
+
+    private ExpressionTransformResult transformParseJson(
+        ParseJson parseJson, DataType expectedType) {
+      if (!(expectedType instanceof StructType)
+          || !parseJson.getOutputSchema().equals(expectedType)) {
+        throw unsupportedExpressionException(
+            parseJson,
+            String.format(
+                "ParseJson output schema %s does not match expected output type %s",
+                parseJson.getOutputSchema(), expectedType));
+      }
+      ExpressionTransformResult json = visit(parseJson.getJsonExpression());
+      if (!(json.outputType instanceof StringType)) {
+        throw unsupportedExpressionException(
+            parseJson,
+            String.format("ParseJson expects string input, but got %s", json.outputType));
+      }
+      return new ExpressionTransformResult(
+          new ParseJson(json.expression, parseJson.getOutputSchema()), parseJson.getOutputSchema());
     }
 
     private ExpressionTransformResult transformStruct(
@@ -308,6 +334,11 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     ExpressionTransformResult visitStructPatch(StructPatch structPatch) {
       throw unsupportedExpressionException(
           structPatch, "A caller-supplied StructType is required to evaluate a struct patch");
+    }
+
+    @Override
+    ExpressionTransformResult visitParseJson(ParseJson parseJson) {
+      return transformParseJson(parseJson, parseJson.getOutputSchema());
     }
 
     @Override
@@ -603,15 +634,23 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     }
 
     ColumnVector eval(Expression expression, DataType expectedType) {
-      if (!(expression instanceof StructExpression)) {
-        return visit(expression);
+      if (expression instanceof ParseJson) {
+        checkArgument(
+            ((ParseJson) expression).getOutputSchema().equals(expectedType),
+            "ParseJson output schema %s does not match expected output type %s",
+            ((ParseJson) expression).getOutputSchema(),
+            expectedType);
+        return visitParseJson((ParseJson) expression);
       }
-      checkArgument(
-          expectedType instanceof StructType,
-          "Struct expression expects a StructType output, but got %s",
-          expectedType);
-      return StructExpressionEvaluator.eval(
-          (StructExpression) expression, (StructType) expectedType, input.getSize(), this::eval);
+      if (expression instanceof StructExpression) {
+        checkArgument(
+            expectedType instanceof StructType,
+            "Struct expression expects a StructType output, but got %s",
+            expectedType);
+        return StructExpressionEvaluator.eval(
+            (StructExpression) expression, (StructType) expectedType, input.getSize(), this::eval);
+      }
+      return visit(expression);
     }
 
     /*
@@ -793,6 +832,33 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     ColumnVector visitStructPatch(StructPatch structPatch) {
       throw new IllegalArgumentException(
           "Struct patches must be lowered before expression evaluation");
+    }
+
+    @Override
+    ColumnVector visitParseJson(ParseJson parseJson) {
+      ColumnVector jsonVector = visit(parseJson.getJsonExpression());
+      checkArgument(
+          jsonVector.getDataType() instanceof StringType,
+          "ParseJson expects string input, but got %s",
+          jsonVector.getDataType());
+      checkArgument(
+          jsonVector.getSize() == input.getSize(),
+          "ParseJson input size mismatch: expected %s but got %s",
+          input.getSize(),
+          jsonVector.getSize());
+
+      try {
+        List<Object> rows = new ArrayList<>(jsonVector.getSize());
+        for (int rowId = 0; rowId < jsonVector.getSize(); rowId++) {
+          String json = jsonVector.isNullAt(rowId) ? "{}" : jsonVector.getString(rowId);
+          rows.add(DefaultJsonRow.fromJsonPermissively(json, parseJson.getOutputSchema()));
+        }
+        return DefaultGenericVector.fromList(parseJson.getOutputSchema(), rows);
+      } catch (IOException | RuntimeException ignored) {
+        return new DefaultConstantVector(parseJson.getOutputSchema(), jsonVector.getSize(), null);
+      } finally {
+        jsonVector.close();
+      }
     }
 
     @Override

@@ -18,9 +18,6 @@ package io.delta.kernel.defaults.engine;
 import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 import static java.lang.String.format;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.*;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.delta.kernel.data.*;
 import io.delta.kernel.defaults.engine.fileio.FileIO;
 import io.delta.kernel.defaults.engine.fileio.SeekableInputStream;
@@ -41,11 +38,6 @@ import java.util.*;
 
 /** Default implementation of {@link JsonHandler} based on Hadoop APIs. */
 public class DefaultJsonHandler implements JsonHandler {
-  private static final ObjectMapper mapper = new ObjectMapper();
-  // by default BigDecimals are truncated and read as floats
-  private static final ObjectReader objectReaderReadBigDecimals =
-      new ObjectMapper().reader(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
-
   private final FileIO fileIO;
   private final int maxBatchSize;
 
@@ -173,9 +165,8 @@ public class DefaultJsonHandler implements JsonHandler {
 
   private Row parseJson(String json, StructType readSchema) {
     try {
-      final JsonNode jsonNode = objectReaderReadBigDecimals.readTree(json);
-      return new DefaultJsonRow((ObjectNode) jsonNode, readSchema);
-    } catch (JsonProcessingException ex) {
+      return DefaultJsonRow.fromJson(json, readSchema);
+    } catch (IOException ex) {
       throw new KernelEngineException(format("Could not parse JSON: %s", json), ex);
     }
   }
