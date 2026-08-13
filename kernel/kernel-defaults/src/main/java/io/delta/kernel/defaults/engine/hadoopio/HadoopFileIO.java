@@ -23,22 +23,33 @@ import io.delta.kernel.internal.util.Utils;
 import io.delta.kernel.utils.CloseableIterator;
 import io.delta.kernel.utils.FileStatus;
 import io.delta.storage.LogStore;
+import io.delta.storage.internal.PathLock;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CreateFlag;
+import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileContext;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocatedFileStatus;
+import org.apache.hadoop.fs.Options;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
 
 /** Implementation of {@link FileIO} based on Hadoop APIs. */
 public class HadoopFileIO implements FileIO {
+  private static final int COPY_BUFFER_SIZE = 8192;
+  private static final PathLock COPY_PATH_LOCK = new PathLock();
+
   private final Configuration hadoopConf;
 
   public HadoopFileIO(Configuration hadoopConf) {
@@ -150,14 +161,140 @@ public class HadoopFileIO implements FileIO {
   @Override
   public void copyFileAtomically(String srcPath, String destPath, boolean overwrite)
       throws IOException {
+    Objects.requireNonNull(srcPath, "srcPath is null");
+    Objects.requireNonNull(destPath, "destPath is null");
     Path parsedSrcPath = new Path(srcPath);
     Path parsedDestPath = new Path(destPath);
-    LogStore logStore = LogStoreProvider.getLogStore(hadoopConf, parsedSrcPath.toUri().getScheme());
+    FileSystem srcFs = parsedSrcPath.getFileSystem(hadoopConf);
+    Path resolvedSrcPath = srcFs.resolvePath(parsedSrcPath);
+    LogStore destLogStore =
+        LogStoreProvider.getLogStore(hadoopConf, parsedDestPath.toUri().getScheme());
+    Path resolvedDestPath = destLogStore.resolvePathOnPhysicalStorage(parsedDestPath, hadoopConf);
 
-    try (io.delta.storage.CloseableIterator<String> srcContents =
-        logStore.read(parsedSrcPath, hadoopConf)) {
-      logStore.write(parsedDestPath, srcContents, overwrite, hadoopConf);
+    if (resolvedSrcPath.equals(resolvedDestPath)) {
+      if (!overwrite) {
+        throw new java.nio.file.FileAlreadyExistsException(resolvedDestPath.toString());
+      }
+      return;
     }
+
+    boolean locked = false;
+    try (FSDataInputStream input = srcFs.open(resolvedSrcPath)) {
+      try {
+        COPY_PATH_LOCK.acquire(resolvedDestPath);
+        locked = true;
+      } catch (InterruptedException failure) {
+        Thread.currentThread().interrupt();
+        InterruptedIOException interrupted =
+            new InterruptedIOException("Interrupted while copying to " + destPath);
+        interrupted.initCause(failure);
+        throw interrupted;
+      }
+
+      try {
+        if (destLogStore.isPartialWriteVisible(resolvedDestPath, hadoopConf)) {
+          copyWithAtomicRename(input, resolvedDestPath, overwrite);
+        } else {
+          copyToAtomicallyVisibleStore(input, resolvedDestPath, overwrite);
+        }
+      } catch (IOException failure) {
+        throw normalizeCopyFailure(failure, resolvedDestPath, overwrite);
+      }
+    } finally {
+      if (locked) {
+        COPY_PATH_LOCK.release(resolvedDestPath);
+      }
+    }
+  }
+
+  private void copyWithAtomicRename(FSDataInputStream input, Path destPath, boolean overwrite)
+      throws IOException {
+    FileContext fileContext = FileContext.getFileContext(destPath.toUri(), hadoopConf);
+    if (!overwrite && fileContext.util().exists(destPath)) {
+      throw new java.nio.file.FileAlreadyExistsException(destPath.toString());
+    }
+
+    Path parent = destPath.getParent();
+    if (parent == null) {
+      throw new IOException("Cannot determine parent directory for " + destPath);
+    }
+    Path tempPath =
+        new Path(parent, String.format(".%s.%s.tmp", destPath.getName(), UUID.randomUUID()));
+    boolean renamed = false;
+    Throwable primary = null;
+    try {
+      try (FSDataOutputStream output =
+          fileContext.create(
+              tempPath,
+              EnumSet.of(CreateFlag.CREATE),
+              Options.CreateOpts.checksumParam(Options.ChecksumOpt.createDisabled()))) {
+        copyBytes(input, output);
+      }
+      fileContext.rename(
+          tempPath, destPath, overwrite ? Options.Rename.OVERWRITE : Options.Rename.NONE);
+      renamed = true;
+    } catch (IOException | RuntimeException | Error failure) {
+      primary = failure;
+      throw failure;
+    } finally {
+      if (!renamed) {
+        try {
+          fileContext.delete(tempPath, false /* recursive */);
+        } catch (IOException | RuntimeException | Error cleanupFailure) {
+          if (primary == null) {
+            throw cleanupFailure;
+          }
+          primary.addSuppressed(cleanupFailure);
+        }
+      }
+    }
+  }
+
+  private void copyToAtomicallyVisibleStore(
+      FSDataInputStream input, Path destPath, boolean overwrite) throws IOException {
+    FileSystem destFs = destPath.getFileSystem(hadoopConf);
+    if (!overwrite && destFs.exists(destPath)) {
+      throw new java.nio.file.FileAlreadyExistsException(destPath.toString());
+    }
+    try (FSDataOutputStream output = destFs.create(destPath, overwrite)) {
+      copyBytes(input, output);
+    }
+  }
+
+  private static void copyBytes(java.io.InputStream input, java.io.OutputStream output)
+      throws IOException {
+    byte[] buffer = new byte[COPY_BUFFER_SIZE];
+    int read;
+    while ((read = input.read(buffer)) >= 0) {
+      if (read > 0) {
+        output.write(buffer, 0, read);
+      }
+    }
+  }
+
+  private static IOException normalizeCopyFailure(
+      IOException failure, Path destPath, boolean overwrite) {
+    if (!overwrite && isDestinationConflict(failure)) {
+      java.nio.file.FileAlreadyExistsException normalized =
+          new java.nio.file.FileAlreadyExistsException(destPath.toString());
+      normalized.initCause(failure);
+      return normalized;
+    }
+    return failure;
+  }
+
+  private static boolean isDestinationConflict(Throwable failure) {
+    for (Throwable current = failure; current != null; current = current.getCause()) {
+      if (current instanceof java.nio.file.FileAlreadyExistsException
+          || current instanceof org.apache.hadoop.fs.FileAlreadyExistsException) {
+        return true;
+      }
+      String message = current.getMessage();
+      if (message != null && message.contains("412 Precondition Failed")) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private FileSystem getFs(String path) {
