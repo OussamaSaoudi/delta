@@ -97,11 +97,9 @@ public final class DefaultPlanExecutor {
     private final Engine engine;
     private final ExecutorService ioExecutor;
     private final boolean ownsExecutor;
-    private final boolean[] reachable;
     private final int[] fanout;
-    private final boolean[] opened;
-    private final List<CloseableIterator<FilteredColumnarBatch>> prefetched;
-    private final List<List<FilteredColumnarBatch>> materialized;
+    private final List<ExecutionNode> compiled;
+    private final List<SourceExecution> sources = new ArrayList<>();
 
     private Execution(Plan plan, Engine engine, ExecutorService ioExecutor, boolean ownsExecutor) {
       this.plan = plan;
@@ -109,21 +107,19 @@ public final class DefaultPlanExecutor {
       this.ioExecutor = ioExecutor;
       this.ownsExecutor = ownsExecutor;
       int nodes = plan.getNodes().size();
-      this.reachable = reachableNodes(plan);
+      boolean[] reachable = reachableNodes(plan);
       this.fanout = countFanout(plan, reachable);
-      this.opened = new boolean[nodes];
-      this.prefetched = new ArrayList<>(Collections.nCopies(nodes, null));
-      this.materialized = new ArrayList<>(Collections.nCopies(nodes, null));
+      this.compiled = new ArrayList<>(Collections.nCopies(nodes, null));
     }
 
     private CloseableIterator<FilteredColumnarBatch> execute() {
       try {
-        validateReachableOperators();
-        prefetchLeafScans();
-        CloseableIterator<FilteredColumnarBatch> terminal = open(plan.getNodes().size() - 1);
-        return new ResultIterator(terminal, prefetched, ownsExecutor ? ioExecutor : null);
+        ExecutionNode root = compile(plan.getNodes().size() - 1);
+        root.prepareIo();
+        CloseableIterator<FilteredColumnarBatch> terminal = root.execute();
+        return new ResultIterator(terminal, sources, ownsExecutor ? ioExecutor : null);
       } catch (RuntimeException | Error failure) {
-        closeAfterFailure(failure, prefetched);
+        closeAfterFailure(failure, sources);
         if (ownsExecutor) {
           ioExecutor.shutdownNow();
         }
@@ -131,102 +127,82 @@ public final class DefaultPlanExecutor {
       }
     }
 
-    private void validateReachableOperators() {
-      for (int nodeIndex = 0; nodeIndex < plan.getNodes().size(); nodeIndex++) {
-        if (reachable[nodeIndex]) {
-          validateSupported(plan.getNodes().get(nodeIndex).getOperator());
-        }
+    private ExecutionNode compile(int nodeIndex) {
+      ExecutionNode existing = compiled.get(nodeIndex);
+      if (existing != null) {
+        return existing;
       }
-    }
-
-    private void prefetchLeafScans() {
-      for (int nodeIndex = 0; nodeIndex < plan.getNodes().size(); nodeIndex++) {
-        if (!reachable[nodeIndex]) {
-          continue;
-        }
-        Operator operator = plan.getNodes().get(nodeIndex).getOperator();
-        if (operator instanceof ScanParquet) {
-          prefetched.set(
-              nodeIndex, FileScanExecutor.execute((ScanParquet) operator, engine, ioExecutor));
-        } else if (operator instanceof ScanJson) {
-          prefetched.set(
-              nodeIndex, FileScanExecutor.execute((ScanJson) operator, engine, ioExecutor));
-        }
-      }
-    }
-
-    private CloseableIterator<FilteredColumnarBatch> open(int nodeIndex) {
-      if (fanout[nodeIndex] <= 1) {
-        return openOnce(nodeIndex);
-      }
-
-      List<FilteredColumnarBatch> batches = materialized.get(nodeIndex);
-      if (batches == null) {
-        batches = openOnce(nodeIndex).toInMemoryList();
-        materialized.set(nodeIndex, batches);
-      }
-      return toCloseableIterator(batches.iterator());
-    }
-
-    private CloseableIterator<FilteredColumnarBatch> openOnce(int nodeIndex) {
-      if (opened[nodeIndex]) {
-        throw new IllegalStateException("Plan node " + nodeIndex + " was opened more than once");
-      }
-      opened[nodeIndex] = true;
 
       PlanNode node = plan.getNodes().get(nodeIndex);
+      List<ExecutionNode> inputs = new ArrayList<>(node.getInputs().size());
+      for (int inputIndex : node.getInputs()) {
+        inputs.add(compile(inputIndex));
+      }
+
       Operator operator = node.getOperator();
-      if (operator instanceof ScanParquet || operator instanceof ScanJson) {
-        CloseableIterator<FilteredColumnarBatch> scan = prefetched.set(nodeIndex, null);
-        return requireNonNull(scan, "scan node was not prefetched");
+      ExecutionNode execution;
+      if (operator instanceof ScanParquet) {
+        ScanParquet scan = (ScanParquet) operator;
+        SourceExecution source =
+            new SourceExecution(
+                () -> FileScanExecutor.execute(scan, engine, ioExecutor));
+        sources.add(source);
+        execution = source;
+      } else if (operator instanceof ScanJson) {
+        ScanJson scan = (ScanJson) operator;
+        SourceExecution source =
+            new SourceExecution(
+                () -> FileScanExecutor.execute(scan, engine, ioExecutor));
+        sources.add(source);
+        execution = source;
+      } else {
+        execution =
+            new OperatorExecution(nodeIndex, inputs, compileOperator(node, operator));
       }
 
-      List<CloseableIterator<FilteredColumnarBatch>> inputs = new ArrayList<>();
-      try {
-        for (int inputIndex : node.getInputs()) {
-          inputs.add(open(inputIndex));
-        }
-      } catch (RuntimeException | Error failure) {
-        closeAfterFailure(failure, inputs);
-        throw failure;
+      if (fanout[nodeIndex] > 1) {
+        execution = new MaterializedExecution(execution);
       }
-
-      try {
-        return dispatch(node, operator, inputs);
-      } catch (RuntimeException | Error failure) {
-        closeAfterFailure(failure, inputs);
-        throw failure;
-      }
+      compiled.set(nodeIndex, execution);
+      return execution;
     }
 
-    private CloseableIterator<FilteredColumnarBatch> dispatch(
-        PlanNode node, Operator operator, List<CloseableIterator<FilteredColumnarBatch>> inputs) {
+    private BatchOperator compileOperator(PlanNode node, Operator operator) {
       if (operator instanceof Values) {
-        return ValuesExecutor.execute((Values) operator);
+        Values values = (Values) operator;
+        return ignored -> ValuesExecutor.execute(values);
       }
       if (operator instanceof Project) {
-        return ProjectExecutor.execute((Project) operator, inputSchema(node, 0), inputs.get(0));
+        Project project = (Project) operator;
+        StructType inputSchema = inputSchema(node, 0);
+        return inputs -> ProjectExecutor.execute(project, inputSchema, inputs.get(0));
       }
       if (operator instanceof Filter) {
-        return FilterExecutor.execute((Filter) operator, inputSchema(node, 0), inputs.get(0));
+        Filter filter = (Filter) operator;
+        StructType inputSchema = inputSchema(node, 0);
+        return inputs -> FilterExecutor.execute(filter, inputSchema, inputs.get(0));
       }
       if (operator instanceof Load) {
-        return LoadExecutor.execute(
-            (Load) operator, inputSchema(node, 0), inputs.get(0), engine, ioExecutor);
+        Load load = (Load) operator;
+        StructType inputSchema = inputSchema(node, 0);
+        return inputs ->
+            LoadExecutor.execute(load, inputSchema, inputs.get(0), engine, ioExecutor);
       }
       if (operator instanceof Aggregate) {
-        return AggregateExecutor.execute((Aggregate) operator, inputSchema(node, 0), inputs.get(0));
+        Aggregate aggregate = (Aggregate) operator;
+        StructType inputSchema = inputSchema(node, 0);
+        return inputs -> AggregateExecutor.execute(aggregate, inputSchema, inputs.get(0));
       }
       if (operator instanceof SemiJoin) {
-        return SemiJoinExecutor.execute(
-            (SemiJoin) operator,
-            inputSchema(node, 0),
-            inputSchema(node, 1),
-            inputs.get(0),
-            inputs.get(1));
+        SemiJoin join = (SemiJoin) operator;
+        StructType probeSchema = inputSchema(node, 0);
+        StructType buildSchema = inputSchema(node, 1);
+        return inputs ->
+            SemiJoinExecutor.execute(
+                join, probeSchema, buildSchema, inputs.get(0), inputs.get(1));
       }
       if (operator instanceof UnionAll) {
-        return UnionAllExecutor.execute(inputs);
+        return UnionAllExecutor::execute;
       }
       throw new UnsupportedOperationException(
           "Unsupported plan operator: " + operator.getClass().getName());
@@ -237,20 +213,131 @@ public final class DefaultPlanExecutor {
     }
   }
 
-  private static void validateSupported(Operator operator) {
-    if (operator instanceof Values
-        || operator instanceof Project
-        || operator instanceof Filter
-        || operator instanceof Load
-        || operator instanceof Aggregate
-        || operator instanceof SemiJoin
-        || operator instanceof UnionAll
-        || operator instanceof ScanParquet
-        || operator instanceof ScanJson) {
-      return;
+  /** Runtime graph node with an explicit prepare-I/O then execute lifecycle. */
+  private abstract static class ExecutionNode {
+    protected final List<ExecutionNode> inputs;
+    private boolean prepared;
+
+    private ExecutionNode(List<ExecutionNode> inputs) {
+      this.inputs =
+          Collections.unmodifiableList(new ArrayList<>(requireNonNull(inputs, "inputs is null")));
     }
-    throw new UnsupportedOperationException(
-        "Unsupported plan operator: " + operator.getClass().getName());
+
+    final void prepareIo() {
+      if (prepared) {
+        return;
+      }
+      for (ExecutionNode input : inputs) {
+        input.prepareIo();
+      }
+      prepareOwnIo();
+      prepared = true;
+    }
+
+    protected void prepareOwnIo() {}
+
+    abstract CloseableIterator<FilteredColumnarBatch> execute();
+  }
+
+  /** Static I/O source whose asynchronous iterator is created during the preparation pass. */
+  private static final class SourceExecution extends ExecutionNode implements AutoCloseable {
+    private final SourcePreparer preparer;
+    private CloseableIterator<FilteredColumnarBatch> stream;
+    private boolean executed;
+
+    private SourceExecution(SourcePreparer preparer) {
+      super(Collections.emptyList());
+      this.preparer = requireNonNull(preparer, "source preparer is null");
+    }
+
+    @Override
+    protected void prepareOwnIo() {
+      stream = requireNonNull(preparer.prepare(), "prepared source stream is null");
+    }
+
+    @Override
+    CloseableIterator<FilteredColumnarBatch> execute() {
+      if (executed) {
+        throw new IllegalStateException("Plan source was executed more than once");
+      }
+      executed = true;
+      CloseableIterator<FilteredColumnarBatch> result =
+          requireNonNull(stream, "Plan source I/O was not prepared");
+      stream = null;
+      return result;
+    }
+
+    @Override
+    public void close() throws IOException {
+      if (stream != null) {
+        CloseableIterator<FilteredColumnarBatch> toClose = stream;
+        stream = null;
+        toClose.close();
+      }
+    }
+  }
+
+  /** Ordinary operator with input traversal separated from its bound batch transformation. */
+  private static final class OperatorExecution extends ExecutionNode {
+    private final int nodeIndex;
+    private final BatchOperator operator;
+    private boolean executed;
+
+    private OperatorExecution(
+        int nodeIndex, List<ExecutionNode> inputs, BatchOperator operator) {
+      super(inputs);
+      this.nodeIndex = nodeIndex;
+      this.operator = requireNonNull(operator, "batch operator is null");
+    }
+
+    @Override
+    CloseableIterator<FilteredColumnarBatch> execute() {
+      if (executed) {
+        throw new IllegalStateException("Plan node " + nodeIndex + " was executed more than once");
+      }
+      executed = true;
+
+      List<CloseableIterator<FilteredColumnarBatch>> streams = new ArrayList<>(inputs.size());
+      try {
+        for (ExecutionNode input : inputs) {
+          streams.add(input.execute());
+        }
+        return operator.execute(streams);
+      } catch (RuntimeException | Error failure) {
+        closeAfterFailure(failure, streams);
+        throw failure;
+      }
+    }
+  }
+
+  /** Transparent replay boundary inserted only for a runtime node with multiple consumers. */
+  private static final class MaterializedExecution extends ExecutionNode {
+    private final ExecutionNode child;
+    private List<FilteredColumnarBatch> batches;
+
+    private MaterializedExecution(ExecutionNode child) {
+      super(Collections.singletonList(requireNonNull(child, "materialized child is null")));
+      this.child = child;
+    }
+
+    @Override
+    CloseableIterator<FilteredColumnarBatch> execute() {
+      if (batches == null) {
+        batches = child.execute().toInMemoryList();
+      }
+      return toCloseableIterator(batches.iterator());
+    }
+  }
+
+  @FunctionalInterface
+  private interface SourcePreparer {
+    CloseableIterator<FilteredColumnarBatch> prepare();
+  }
+
+  @FunctionalInterface
+  private interface BatchOperator {
+    CloseableIterator<FilteredColumnarBatch> execute(
+        List<CloseableIterator<FilteredColumnarBatch>> inputs);
   }
 
   private static boolean[] reachableNodes(Plan plan) {
@@ -297,16 +384,16 @@ public final class DefaultPlanExecutor {
 
   private static final class ResultIterator implements CloseableIterator<FilteredColumnarBatch> {
     private final CloseableIterator<FilteredColumnarBatch> delegate;
-    private final List<CloseableIterator<FilteredColumnarBatch>> prefetched;
+    private final List<SourceExecution> sources;
     private final ExecutorService ownedExecutor;
     private boolean closed;
 
     private ResultIterator(
         CloseableIterator<FilteredColumnarBatch> delegate,
-        List<CloseableIterator<FilteredColumnarBatch>> prefetched,
+        List<SourceExecution> sources,
         ExecutorService ownedExecutor) {
       this.delegate = requireNonNull(delegate, "terminal iterator is null");
-      this.prefetched = prefetched;
+      this.sources = sources;
       this.ownedExecutor = ownedExecutor;
     }
 
@@ -352,11 +439,7 @@ public final class DefaultPlanExecutor {
       closed = true;
       List<AutoCloseable> closeables = new ArrayList<>();
       closeables.add(delegate);
-      for (CloseableIterator<FilteredColumnarBatch> scan : prefetched) {
-        if (scan != null) {
-          closeables.add(scan);
-        }
-      }
+      closeables.addAll(sources);
       try {
         closeAll(closeables);
       } finally {
