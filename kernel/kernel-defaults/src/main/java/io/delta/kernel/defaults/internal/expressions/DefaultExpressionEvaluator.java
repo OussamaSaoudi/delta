@@ -44,6 +44,7 @@ import java.util.stream.Collectors;
  */
 public class DefaultExpressionEvaluator implements ExpressionEvaluator {
   private final Expression expression;
+  private final DataType outputType;
 
   /**
    * Create a {@link DefaultExpressionEvaluator} instance bound to the given expression and
@@ -56,7 +57,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
   public DefaultExpressionEvaluator(
       StructType inputSchema, Expression expression, DataType outputType) {
     ExpressionTransformResult transformResult =
-        new ExpressionTransformer(inputSchema).visit(expression);
+        new ExpressionTransformer(inputSchema).transform(expression, outputType);
     if (!transformResult.outputType.equivalent(outputType)) {
       String reason =
           String.format(
@@ -64,11 +65,12 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       throw unsupportedExpressionException(expression, reason);
     }
     this.expression = transformResult.expression;
+    this.outputType = outputType;
   }
 
   @Override
   public ColumnVector eval(ColumnarBatch input) {
-    return new ExpressionEvalVisitor(input).visit(expression);
+    return new ExpressionEvalVisitor(input).eval(expression, outputType);
   }
 
   @Override
@@ -105,6 +107,62 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     ExpressionTransformer(StructType inputDataSchema) {
       this.inputDataSchema = requireNonNull(inputDataSchema, "inputDataSchema is null");
+    }
+
+    ExpressionTransformResult transform(Expression expression, DataType expectedType) {
+      if (!(expression instanceof StructExpression)) {
+        return visit(expression);
+      }
+      if (!(expectedType instanceof StructType)) {
+        throw unsupportedExpressionException(
+            expression,
+            String.format(
+                "Struct expression expects a StructType output, but got %s", expectedType));
+      }
+
+      StructExpression struct = (StructExpression) expression;
+      StructType structType = (StructType) expectedType;
+      if (struct.getFieldExpressions().size() != structType.length()) {
+        throw unsupportedExpressionException(
+            struct,
+            String.format(
+                "Struct expression field count mismatch: %s fields in expression but %s in schema",
+                struct.getFieldExpressions().size(), structType.length()));
+      }
+
+      List<Expression> fields = new ArrayList<>(structType.length());
+      for (int ordinal = 0; ordinal < structType.length(); ordinal++) {
+        StructField field = structType.at(ordinal);
+        ExpressionTransformResult result =
+            transform(struct.getFieldExpressions().get(ordinal), field.getDataType());
+        if (!result.outputType.equals(field.getDataType())) {
+          throw unsupportedExpressionException(
+              struct,
+              String.format(
+                  "Struct field %s type mismatch: expected %s but got %s",
+                  field.getName(), field.getDataType(), result.outputType));
+        }
+        fields.add(result.expression);
+      }
+
+      Optional<Expression> predicate = Optional.empty();
+      if (struct.getNullabilityPredicate().isPresent()) {
+        ExpressionTransformResult result =
+            transform(struct.getNullabilityPredicate().get(), BooleanType.BOOLEAN);
+        if (!BooleanType.BOOLEAN.equals(result.outputType)) {
+          throw unsupportedExpressionException(
+              struct,
+              String.format(
+                  "Struct nullability predicate must be boolean, but got %s", result.outputType));
+        }
+        predicate = Optional.of(result.expression);
+      }
+
+      StructExpression transformed =
+          predicate
+              .map(value -> new StructExpression(fields, value))
+              .orElseGet(() -> new StructExpression(fields));
+      return new ExpressionTransformResult(transformed, structType);
     }
 
     @Override
@@ -170,6 +228,12 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       }
       assertColumnExists(currentType != null, inputDataSchema, column);
       return new ExpressionTransformResult(column, currentType);
+    }
+
+    @Override
+    ExpressionTransformResult visitStruct(StructExpression struct) {
+      throw unsupportedExpressionException(
+          struct, "A caller-supplied StructType is required to evaluate a struct expression");
     }
 
     @Override
@@ -464,6 +528,18 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       this.input = input;
     }
 
+    ColumnVector eval(Expression expression, DataType expectedType) {
+      if (!(expression instanceof StructExpression)) {
+        return visit(expression);
+      }
+      checkArgument(
+          expectedType instanceof StructType,
+          "Struct expression expects a StructType output, but got %s",
+          expectedType);
+      return StructExpressionEvaluator.eval(
+          (StructExpression) expression, (StructType) expectedType, input.getSize(), this::eval);
+    }
+
     /*
     | Operand 1 | Operand 2 | `AND`      | `OR`       |
     |-----------|-----------|------------|------------|
@@ -631,6 +707,12 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       }
       assertColumnExists(columnVector != null, input.getSchema(), column);
       return new DefaultViewVector(columnVector, 0, columnVector.getSize());
+    }
+
+    @Override
+    ColumnVector visitStruct(StructExpression struct) {
+      throw new IllegalArgumentException(
+          "A caller-supplied StructType is required to evaluate a struct expression");
     }
 
     @Override
