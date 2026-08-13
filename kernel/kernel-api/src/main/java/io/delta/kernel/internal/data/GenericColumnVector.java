@@ -107,7 +107,10 @@ public class GenericColumnVector implements ColumnVector {
 
   @Override
   public String getString(int rowId) {
-    checkArgument(StringType.STRING.equals(dataType));
+    checkArgument(
+        dataType instanceof StringType
+            || dataType instanceof GeometryType
+            || dataType instanceof GeographyType);
     return (String) getValidatedValue(rowId, String.class);
   }
 
@@ -159,6 +162,10 @@ public class GenericColumnVector implements ColumnVector {
   }
 
   private Object extractChildValue(Object element, int ordinal, DataType childDatatype) {
+    // A null struct has null children at every ordinal.
+    if (element == null) {
+      return null;
+    }
     checkArgument(element instanceof Row);
     Row row = (Row) element;
 
@@ -196,7 +203,9 @@ public class GenericColumnVector implements ColumnVector {
     }
 
     // Complex Types
-    if (childDatatype instanceof StringType) {
+    if (childDatatype instanceof StringType
+        || childDatatype instanceof GeometryType
+        || childDatatype instanceof GeographyType) {
       return row.getString(ordinal);
     }
     if (childDatatype instanceof BinaryType) {

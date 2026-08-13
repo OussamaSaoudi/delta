@@ -14,13 +14,14 @@
  * limitations under the License.
  */
 
+import java.lang.{Boolean => BooleanJ}
 import java.util.Optional
 
 import io.delta.kernel.TransactionSuite.columnarBatch
-import io.delta.kernel.data.{ColumnarBatch, ColumnVector}
+import io.delta.kernel.data.ColumnVector
 import io.delta.kernel.data.FilteredColumnarBatch
 import io.delta.kernel.test.VectorTestUtils
-import io.delta.kernel.types.{LongType, StructField, StructType}
+import io.delta.kernel.types.{LongType, StructType}
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -76,5 +77,69 @@ class FilteredColumnarBatchSuite extends AnyFunSuite with VectorTestUtils with M
 
     assert(exMsg.contains("Invalid precomputedNumSelectedRows"))
     assert(exMsg.contains("no larger than batch size"))
+  }
+
+  test("withSelectionVector intersects selections and treats null as unselected") {
+    val data = columnarBatch(testSchema, Seq(longVector(Seq(0L, 1L, 2L, 3L))))
+    val existing = booleanVector(Seq[BooleanJ](true, null, true, false))
+    val additional = booleanVector(Seq[BooleanJ](true, true, false, true))
+    val batch = new FilteredColumnarBatch(data, Optional.of(existing), "/test/path", 2)
+
+    val selected = batch.withSelectionVector(additional)
+    val selection = selected.getSelectionVector.get()
+
+    assert(selected.getData eq data)
+    assert(selected.getFilePath === Optional.of("/test/path"))
+    assert(selected.getPreComputedNumSelectedRows === Optional.empty())
+    assert((0 until 4).map(selection.getBoolean) === Seq(true, false, false, false))
+    assert((0 until 4).forall(!selection.isNullAt(_)))
+  }
+
+  test("withSelectionVector returns a borrowed non-null view without an existing selection") {
+    val data = columnarBatch(testSchema, Seq(longVector(Seq(0L, 1L))))
+    val additional = booleanVector(Seq[BooleanJ](null, true))
+
+    val selected = new FilteredColumnarBatch(data, Optional.empty()).withSelectionVector(additional)
+    val selection = selected.getSelectionVector.get()
+
+    assert(!(selection eq additional))
+    assert((0 until 2).forall(!selection.isNullAt(_)))
+    assert((0 until 2).map(selection.getBoolean) === Seq(false, true))
+    selection.close()
+    assert(additional.getBoolean(1))
+  }
+
+  test("withData preserves selection metadata for a same-size projection") {
+    val data = columnarBatch(testSchema, Seq(longVector(Seq(0L, 1L, 2L))))
+    val selection = booleanVector(Seq[BooleanJ](true, false, true))
+    val batch = new FilteredColumnarBatch(data, Optional.of(selection), "/test/path", 2)
+    val projectedSchema = new StructType().add("renamed", LongType.LONG)
+    val projected = columnarBatch(projectedSchema, Seq(longVector(Seq(0L, 1L, 2L))))
+
+    val result = batch.withData(projected)
+
+    assert(result.getData eq projected)
+    assert(result.getSelectionVector === Optional.of(selection))
+    assert(result.getFilePath === Optional.of("/test/path"))
+    assert(result.getPreComputedNumSelectedRows === Optional.of(2))
+  }
+
+  test("selection and replacement data must match the batch row count") {
+    val data = columnarBatch(testSchema, Seq(longVector(Seq(0L, 1L))))
+
+    intercept[IllegalArgumentException] {
+      new FilteredColumnarBatch(data, Optional.of(booleanVector(Seq[BooleanJ](true))))
+    }
+    intercept[IllegalArgumentException] {
+      new FilteredColumnarBatch(data, Optional.of(longVector(Seq(0L, 1L))))
+    }
+    intercept[IllegalArgumentException] {
+      new FilteredColumnarBatch(data, Optional.empty()).withSelectionVector(
+        booleanVector(Seq[BooleanJ](true)))
+    }
+    intercept[IllegalArgumentException] {
+      new FilteredColumnarBatch(data, Optional.empty()).withData(
+        columnarBatch(testSchema, Seq(longVector(Seq(0L)))))
+    }
   }
 }
