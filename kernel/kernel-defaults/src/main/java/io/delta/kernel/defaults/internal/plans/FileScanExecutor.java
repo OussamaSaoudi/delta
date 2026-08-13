@@ -26,10 +26,16 @@ import io.delta.kernel.defaults.internal.data.vector.DefaultSubFieldVector;
 import io.delta.kernel.engine.Engine;
 import io.delta.kernel.engine.FileReadResult;
 import io.delta.kernel.exceptions.KernelEngineException;
+import io.delta.kernel.internal.actions.DeletionVectorDescriptor;
+import io.delta.kernel.internal.data.SelectionColumnVector;
+import io.delta.kernel.internal.deletionvectors.DeletionVectorUtils;
+import io.delta.kernel.internal.deletionvectors.RoaringBitmapArray;
 import io.delta.kernel.internal.plans.FileScan;
+import io.delta.kernel.internal.plans.FileType;
 import io.delta.kernel.internal.plans.ScanFile;
 import io.delta.kernel.internal.plans.ScanJson;
 import io.delta.kernel.internal.plans.ScanParquet;
+import io.delta.kernel.internal.util.Tuple2;
 import io.delta.kernel.internal.util.Utils;
 import io.delta.kernel.types.LongType;
 import io.delta.kernel.types.MetadataColumnSpec;
@@ -39,6 +45,7 @@ import io.delta.kernel.utils.CloseableIterator;
 import io.delta.kernel.utils.FileStatus;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -52,11 +59,13 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
 import java.util.function.Function;
 
 /** Executes Parquet and JSON scan sources through the Kernel Java handlers. */
 final class FileScanExecutor {
+  private static final String PRIVATE_ROW_INDEX = "__delta_kernel_scan_row_index";
   private static final int READ_COLUMN = -1;
   private static final int JSON_ROW_INDEX = -2;
 
@@ -90,10 +99,13 @@ final class FileScanExecutor {
     requireNonNull(scan, "scan is null");
     requireNonNull(engine, "engine is null");
     requireNonNull(ioExecutor, "ioExecutor is null");
-    ScanLayout layout = ScanLayout.forParquet(scan);
-    return openPerFile(
+    return execute(
+        FileType.PARQUET,
+        scan.getSchema(),
+        scan.getFileConstantColumns(),
+        Optional.empty(),
         scan.getFiles(),
-        file -> openParquet(scan, layout, Collections.singletonList(file), engine),
+        engine,
         ioExecutor);
   }
 
@@ -119,11 +131,76 @@ final class FileScanExecutor {
     requireNonNull(scan, "scan is null");
     requireNonNull(engine, "engine is null");
     requireNonNull(ioExecutor, "ioExecutor is null");
-    ScanLayout layout = ScanLayout.forJson(scan);
-    return openPerFile(
+    return execute(
+        FileType.JSON,
+        scan.getSchema(),
+        scan.getFileConstantColumns(),
+        Optional.empty(),
         scan.getFiles(),
-        file -> openJson(scan, layout, Collections.singletonList(file), file, engine),
+        engine,
         ioExecutor);
+  }
+
+  /** Executes scan files through one shared status, deletion-vector, and prepared-I/O path. */
+  static CloseableIterator<FilteredColumnarBatch> execute(
+      FileType fileType,
+      StructType outputSchema,
+      List<String> fileConstantColumns,
+      Optional<URI> deletionVectorRoot,
+      List<ScanFile> files,
+      Engine engine,
+      ExecutorService ioExecutor) {
+    requireNonNull(fileType, "fileType is null");
+    requireNonNull(outputSchema, "outputSchema is null");
+    requireNonNull(fileConstantColumns, "fileConstantColumns is null");
+    requireNonNull(deletionVectorRoot, "deletionVectorRoot is null");
+    requireNonNull(files, "files is null");
+    requireNonNull(engine, "engine is null");
+    requireNonNull(ioExecutor, "ioExecutor is null");
+
+    boolean hasDeletionVector =
+        files.stream().anyMatch(file -> file.getDeletionVector().isPresent());
+    ScanSchema scanSchema = scanSchema(outputSchema, hasDeletionVector);
+    validate(fileType, scanSchema.schema, fileConstantColumns);
+    validateDeletionVectors(files, deletionVectorRoot);
+
+    List<CloseableIterator<FilteredColumnarBatch>> readers = new ArrayList<>(files.size());
+    List<Future<RoaringBitmapArray>> deletionVectors = new ArrayList<>(files.size());
+    try {
+      for (ScanFile file : files) {
+        Future<RoaringBitmapArray> deletionVector =
+            submitDeletionVector(file, deletionVectorRoot, engine, ioExecutor);
+        deletionVectors.add(deletionVector);
+        readers.add(
+            PreparedIterator.submit(
+                () ->
+                    openFile(
+                        fileType, scanSchema, fileConstantColumns, file, deletionVector, engine),
+                ioExecutor));
+      }
+      return combine(readers);
+    } catch (RuntimeException | Error failure) {
+      deletionVectors.forEach(FileScanExecutor::cancel);
+      Utils.closeCloseablesSilently(readers.toArray(new AutoCloseable[0]));
+      throw failure;
+    }
+  }
+
+  static void validate(FileType fileType, StructType schema, List<String> fileConstantColumns) {
+    FileScan scan = newScan(fileType, Collections.emptyList(), fileConstantColumns, schema);
+    if (scan instanceof ScanParquet) {
+      validate((ScanParquet) scan);
+    } else {
+      validate((ScanJson) scan);
+    }
+  }
+
+  static void validate(
+      FileType fileType,
+      StructType outputSchema,
+      List<String> fileConstantColumns,
+      boolean deletionVectors) {
+    validate(fileType, scanSchema(outputSchema, deletionVectors).schema, fileConstantColumns);
   }
 
   static void validate(ScanParquet scan) {
@@ -132,6 +209,143 @@ final class FileScanExecutor {
 
   static void validate(ScanJson scan) {
     ScanLayout.forJson(requireNonNull(scan, "scan is null"));
+  }
+
+  private static CloseableIterator<FilteredColumnarBatch> openFile(
+      FileType fileType,
+      ScanSchema scanSchema,
+      List<String> fileConstantColumns,
+      ScanFile file,
+      Future<RoaringBitmapArray> deletionVector,
+      Engine engine) {
+    try {
+      Optional<FileStatus> knownStatus = file.getKnownFileStatus();
+      FileStatus status =
+          knownStatus.isPresent() ? knownStatus.get() : readFileStatus(file.getPath(), engine);
+      ScanFile scanFile = new ScanFile(status, file.getFileConstants());
+      FileScan scan =
+          newScan(
+              fileType,
+              Collections.singletonList(scanFile),
+              fileConstantColumns,
+              scanSchema.schema);
+      CloseableIterator<FilteredColumnarBatch> reader;
+      if (scan instanceof ScanParquet) {
+        reader = execute((ScanParquet) scan, engine);
+      } else {
+        reader = execute((ScanJson) scan, engine);
+      }
+      return applyDeletionVector(reader, scanSchema, deletionVector);
+    } catch (RuntimeException | Error failure) {
+      cancel(deletionVector);
+      throw failure;
+    }
+  }
+
+  private static FileStatus readFileStatus(String location, Engine engine) {
+    try {
+      FileStatus actual = engine.getFileSystemClient().getFileStatus(location);
+      return FileStatus.of(location, actual.getSize(), actual.getModificationTime());
+    } catch (IOException failure) {
+      throw new UncheckedIOException("Failed to get scan file status for " + location, failure);
+    }
+  }
+
+  private static Future<RoaringBitmapArray> submitDeletionVector(
+      ScanFile file, Optional<URI> deletionVectorRoot, Engine engine, ExecutorService ioExecutor) {
+    Optional<DeletionVectorDescriptor> descriptor = file.getDeletionVector();
+    if (!descriptor.isPresent()) {
+      return null;
+    }
+    String tableRoot = deletionVectorRoot.map(URI::toString).orElse("");
+    return ioExecutor.submit(
+        () -> {
+          Tuple2<DeletionVectorDescriptor, RoaringBitmapArray> loaded =
+              DeletionVectorUtils.loadNewDvAndBitmap(engine, tableRoot, descriptor.get());
+          return loaded._2;
+        });
+  }
+
+  private static CloseableIterator<FilteredColumnarBatch> applyDeletionVector(
+      CloseableIterator<FilteredColumnarBatch> reader,
+      ScanSchema scanSchema,
+      Future<RoaringBitmapArray> deletionVector) {
+    if (deletionVector == null && !scanSchema.dropRowIndex) {
+      return reader;
+    }
+    return new DeletionVectorIterator(reader, scanSchema, deletionVector);
+  }
+
+  private static void validateDeletionVectors(
+      List<ScanFile> files, Optional<URI> deletionVectorRoot) {
+    if (deletionVectorRoot.isPresent()) {
+      return;
+    }
+    for (ScanFile file : files) {
+      Optional<DeletionVectorDescriptor> descriptor = file.getDeletionVector();
+      if (descriptor.isPresent()
+          && DeletionVectorDescriptor.UUID_DV_MARKER.equals(descriptor.get().getStorageType())) {
+        throw new IllegalArgumentException(
+            "A deletion-vector root is required for a persisted-relative deletion vector");
+      }
+    }
+  }
+
+  private static ScanSchema scanSchema(StructType outputSchema, boolean needsRowIndex) {
+    if (!needsRowIndex) {
+      return new ScanSchema(outputSchema, -1, false);
+    }
+    int existing = outputSchema.indexOf(MetadataColumnSpec.ROW_INDEX);
+    if (existing >= 0) {
+      return new ScanSchema(outputSchema, existing, false);
+    }
+    String name = PRIVATE_ROW_INDEX;
+    while (outputSchema.indexOf(name) >= 0) {
+      name += "_";
+    }
+    StructType augmented =
+        outputSchema.add(StructField.createMetadataColumn(name, MetadataColumnSpec.ROW_INDEX));
+    return new ScanSchema(augmented, outputSchema.length(), true);
+  }
+
+  private static FileScan newScan(
+      FileType fileType,
+      List<ScanFile> files,
+      List<String> fileConstantColumns,
+      StructType schema) {
+    if (fileType == FileType.PARQUET) {
+      return new ScanParquet(files, fileConstantColumns, schema);
+    }
+    if (fileType == FileType.JSON) {
+      return new ScanJson(files, fileConstantColumns, schema);
+    }
+    throw new IllegalArgumentException("Unsupported scan file type: " + fileType);
+  }
+
+  private static <T> T await(Future<T> future, String action) {
+    try {
+      return future.get();
+    } catch (InterruptedException failure) {
+      Thread.currentThread().interrupt();
+      throw new KernelEngineException("await " + action, failure);
+    } catch (ExecutionException failure) {
+      Throwable cause = failure.getCause();
+      if (cause instanceof RuntimeException) {
+        throw (RuntimeException) cause;
+      }
+      if (cause instanceof Error) {
+        throw (Error) cause;
+      }
+      throw new KernelEngineException(action, cause);
+    } catch (CancellationException failure) {
+      throw new KernelEngineException("await cancelled " + action, failure);
+    }
+  }
+
+  private static void cancel(Future<?> future) {
+    if (future != null) {
+      future.cancel(true);
+    }
   }
 
   private static CloseableIterator<FilteredColumnarBatch> openParquet(
@@ -319,8 +533,7 @@ final class FileScanExecutor {
       this.executor = executor;
     }
 
-    static <T> PreparedIterator<T> submit(
-        ReaderPreparer<T> preparer, ExecutorService executor) {
+    static <T> PreparedIterator<T> submit(ReaderPreparer<T> preparer, ExecutorService executor) {
       requireNonNull(preparer, "reader preparer is null");
       requireNonNull(executor, "ioExecutor is null");
       PreparedIterator<T> iterator = new PreparedIterator<>(preparer, executor);
@@ -418,8 +631,7 @@ final class FileScanExecutor {
                 if (!reader.hasNext()) {
                   return ReadResult.empty();
                 }
-                return ReadResult.available(
-                    requireNonNull(reader.next(), "reader batch is null"));
+                return ReadResult.available(requireNonNull(reader.next(), "reader batch is null"));
               });
       synchronized (lock) {
         ensureOpen();
@@ -442,8 +654,7 @@ final class FileScanExecutor {
         return existing;
       }
 
-      CloseableIterator<T> opened =
-          requireNonNull(preparer.prepare(), "file reader is null");
+      CloseableIterator<T> opened = requireNonNull(preparer.prepare(), "file reader is null");
       synchronized (lock) {
         if (!closed) {
           delegate = opened;
@@ -583,6 +794,103 @@ final class FileScanExecutor {
       if (interrupted) {
         Thread.currentThread().interrupt();
       }
+    }
+  }
+
+  private static final class DeletionVectorIterator
+      implements CloseableIterator<FilteredColumnarBatch> {
+    private final CloseableIterator<FilteredColumnarBatch> delegate;
+    private final ScanSchema scanSchema;
+    private final Future<RoaringBitmapArray> deletionVector;
+    private RoaringBitmapArray bitmap;
+    private boolean loaded;
+    private boolean closed;
+
+    private DeletionVectorIterator(
+        CloseableIterator<FilteredColumnarBatch> delegate,
+        ScanSchema scanSchema,
+        Future<RoaringBitmapArray> deletionVector) {
+      this.delegate = requireNonNull(delegate, "scan file reader is null");
+      this.scanSchema = scanSchema;
+      this.deletionVector = deletionVector;
+    }
+
+    @Override
+    public boolean hasNext() {
+      try {
+        boolean available = delegate.hasNext();
+        if (!available) {
+          cancel(deletionVector);
+        }
+        return available;
+      } catch (RuntimeException | Error failure) {
+        closeAfterFailure(failure);
+        throw failure;
+      }
+    }
+
+    @Override
+    public FilteredColumnarBatch next() {
+      try {
+        FilteredColumnarBatch batch = requireNonNull(delegate.next(), "scan reader batch is null");
+        if (!loaded && deletionVector != null) {
+          bitmap = await(deletionVector, "scan deletion vector");
+          loaded = true;
+        }
+        if (bitmap == null) {
+          if (!scanSchema.dropRowIndex) {
+            return batch;
+          }
+          return new FilteredColumnarBatch(
+              batch.getData().withDeletedColumnAt(scanSchema.rowIndexOrdinal),
+              batch.getSelectionVector());
+        }
+        if (batch.getSelectionVector().isPresent()) {
+          throw new IllegalStateException("A file scan unexpectedly returned selected rows");
+        }
+
+        ColumnarBatch data = batch.getData();
+        ColumnVector rowIndices = data.getColumnVector(scanSchema.rowIndexOrdinal);
+        SelectionColumnVector selection =
+            scanSchema.dropRowIndex
+                ? new SelectionColumnVector(bitmap, rowIndices)
+                : SelectionColumnVector.borrowing(bitmap, rowIndices);
+        ColumnarBatch output =
+            scanSchema.dropRowIndex ? data.withDeletedColumnAt(scanSchema.rowIndexOrdinal) : data;
+        return new FilteredColumnarBatch(output, Optional.of(selection));
+      } catch (RuntimeException | Error failure) {
+        closeAfterFailure(failure);
+        throw failure;
+      }
+    }
+
+    @Override
+    public void close() throws IOException {
+      if (!closed) {
+        closed = true;
+        cancel(deletionVector);
+        delegate.close();
+      }
+    }
+
+    private void closeAfterFailure(Throwable failure) {
+      if (!closed) {
+        closed = true;
+        cancel(deletionVector);
+        Utils.closeCloseablesAndAddSuppressed(failure, delegate);
+      }
+    }
+  }
+
+  private static final class ScanSchema {
+    private final StructType schema;
+    private final int rowIndexOrdinal;
+    private final boolean dropRowIndex;
+
+    private ScanSchema(StructType schema, int rowIndexOrdinal, boolean dropRowIndex) {
+      this.schema = schema;
+      this.rowIndexOrdinal = rowIndexOrdinal;
+      this.dropRowIndex = dropRowIndex;
     }
   }
 

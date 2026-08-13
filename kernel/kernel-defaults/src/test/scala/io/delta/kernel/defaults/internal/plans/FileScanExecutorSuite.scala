@@ -28,8 +28,10 @@ import scala.jdk.CollectionConverters._
 import io.delta.kernel.data.{ColumnarBatch, FilteredColumnarBatch}
 import io.delta.kernel.engine.{FileReadResult, JsonHandler, ParquetHandler}
 import io.delta.kernel.expressions.Predicate
+import io.delta.kernel.internal.actions.DeletionVectorDescriptor
 import io.delta.kernel.internal.plans.{FileScan, ScanFile, ScanJson, ScanParquet}
-import io.delta.kernel.test.{BaseMockJsonHandler, BaseMockParquetHandler, MockEngineUtils}
+import io.delta.kernel.internal.util.Utils
+import io.delta.kernel.test.{BaseMockFileSystemClient, BaseMockJsonHandler, BaseMockParquetHandler, MockEngineUtils}
 import io.delta.kernel.types._
 import io.delta.kernel.utils.{CloseableIterator, FileStatus}
 
@@ -274,6 +276,57 @@ class FileScanExecutorSuite extends AnyFunSuite with MockEngineUtils {
         12L -> 2L,
         20L -> 0L))
       assert(handler.calls.size === 2)
+    } finally {
+      shutdown(executor)
+    }
+  }
+
+  test("parallel scan applies deletion vectors through the shared file path") {
+    val descriptor = new DeletionVectorDescriptor(
+      DeletionVectorDescriptor.INLINE_DV_MARKER,
+      "unused-for-empty-dv",
+      Optional.empty(),
+      0,
+      0)
+    val file = new ScanFile(
+      FileStatus.of("file:///table/data", 10, 20),
+      row(new StructType()),
+      Optional.of(descriptor))
+    val handler = new BaseMockParquetHandler {
+      override def readParquetFiles(
+          files: CloseableIterator[FileStatus],
+          physicalSchema: StructType,
+          predicate: Optional[Predicate]): CloseableIterator[FileReadResult] = {
+        val status = files.toInMemoryList().get(0)
+        val data = columnarBatch(
+          physicalSchema,
+          Seq(
+            row(physicalSchema, LongJ.valueOf(1), LongJ.valueOf(0)),
+            row(physicalSchema, LongJ.valueOf(2), LongJ.valueOf(1))))
+        Utils.singletonCloseableIterator(new FileReadResult(data, status.getPath))
+      }
+    }
+    val scan = new ScanParquet(
+      Seq(file).asJava,
+      Seq.empty[String].asJava,
+      readSchema)
+    val executor = Executors.newFixedThreadPool(2)
+
+    try {
+      val result = FileScanExecutor
+        .execute(
+          scan,
+          mockEngine(
+            fileSystemClient = new BaseMockFileSystemClient {},
+            parquetHandler = handler),
+          executor)
+        .toInMemoryList()
+        .asScala
+        .toSeq
+
+      assert(result.map(_.getData.getSchema) === Seq(readSchema))
+      assert(rows(result).map(_.getLong(0)) === Seq(1L, 2L))
+      assert(result.forall(_.getSelectionVector.isPresent))
     } finally {
       shutdown(executor)
     }

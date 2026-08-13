@@ -108,11 +108,11 @@ class LoadExecutorSuite extends AnyFunSuite with MockEngineUtils with BeforeAndA
       ioExecutor)
 
     assert(input.closeCalls === 1)
-    assert(handler.calls.map(_.files.map(_.getPath)) === Seq(Seq(relative), Seq(absolute)))
-    assert(handler.calls.map(_.files.head.getSize) === Seq(20L, 20L))
+    val rows = collect(result)(row => row.getLong(0) -> row.getString(1))
+    assert(handler.calls.map(_.files.head.getPath).toSet === Set(relative, absolute))
+    assert(handler.calls.map(_.files.head.getSize).toSet === Set(20L))
     assert(statusPaths.asScala.toSet === Set(relative, absolute))
-    assert(collect(result)(row => row.getLong(0) -> row.getString(1)) ===
-      Seq(1L -> "a", 2L -> "b"))
+    assert(rows === Seq(1L -> "a", 2L -> "b"))
   }
 
   test("JSON resolves nested metadata and preserves a requested row index") {
@@ -263,7 +263,7 @@ class LoadExecutorSuite extends AnyFunSuite with MockEngineUtils with BeforeAndA
       mockEngine(fileSystemClient = fileSystem, parquetHandler = handler),
       ioExecutor)
 
-    assert(readsStarted.getCount === 0)
+    assert(readsStarted.await(10, TimeUnit.SECONDS))
     result.close()
   }
 
@@ -413,8 +413,8 @@ class LoadExecutorSuite extends AnyFunSuite with MockEngineUtils with BeforeAndA
       input,
       mockEngine(parquetHandler = handler),
       ioExecutor)
-    assert(handler.readers.size === 2)
     assert(readsStarted.await(10, TimeUnit.SECONDS))
+    assert(handler.readers.size === 2)
     assert(handler.readers.forall(_.hasNextCalls === 1))
 
     releaseReads.countDown()
@@ -491,12 +491,16 @@ class LoadExecutorSuite extends AnyFunSuite with MockEngineUtils with BeforeAndA
         schema: StructType,
         predicate: Optional[Predicate]): CloseableIterator[FileReadResult] = {
       val requested = files.toInMemoryList().asScala.toSeq
-      calls += ReadCall(requested, schema)
+      this.synchronized {
+        calls += ReadCall(requested, schema)
+      }
       val reader = new TrackingIterator(
         requested.flatMap(file =>
           output(file.getPath, schema).map(batch => new FileReadResult(batch, file.getPath))),
         onHasNext)
-      readers += reader
+      this.synchronized {
+        readers += reader
+      }
       reader
     }
   }
@@ -511,7 +515,9 @@ class LoadExecutorSuite extends AnyFunSuite with MockEngineUtils with BeforeAndA
         schema: StructType,
         predicate: Optional[Predicate]): CloseableIterator[ColumnarBatch] = {
       val requested = files.toInMemoryList().asScala.toSeq
-      calls += ReadCall(requested, schema)
+      this.synchronized {
+        calls += ReadCall(requested, schema)
+      }
       new TrackingIterator(requested.flatMap(file => output(file.getPath, schema)))
     }
   }

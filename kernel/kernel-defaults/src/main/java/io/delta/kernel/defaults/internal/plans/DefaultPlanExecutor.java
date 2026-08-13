@@ -144,20 +144,17 @@ public final class DefaultPlanExecutor {
       if (operator instanceof ScanParquet) {
         ScanParquet scan = (ScanParquet) operator;
         SourceExecution source =
-            new SourceExecution(
-                () -> FileScanExecutor.execute(scan, engine, ioExecutor));
+            new SourceExecution(() -> FileScanExecutor.execute(scan, engine, ioExecutor));
         sources.add(source);
         execution = source;
       } else if (operator instanceof ScanJson) {
         ScanJson scan = (ScanJson) operator;
         SourceExecution source =
-            new SourceExecution(
-                () -> FileScanExecutor.execute(scan, engine, ioExecutor));
+            new SourceExecution(() -> FileScanExecutor.execute(scan, engine, ioExecutor));
         sources.add(source);
         execution = source;
       } else {
-        execution =
-            new OperatorExecution(nodeIndex, inputs, compileOperator(node, operator));
+        execution = new OperatorExecution(nodeIndex, inputs, compileOperator(node, operator));
       }
 
       if (fanout[nodeIndex] > 1) {
@@ -185,8 +182,7 @@ public final class DefaultPlanExecutor {
       if (operator instanceof Load) {
         Load load = (Load) operator;
         StructType inputSchema = inputSchema(node, 0);
-        return inputs ->
-            LoadExecutor.execute(load, inputSchema, inputs.get(0), engine, ioExecutor);
+        return inputs -> LoadExecutor.execute(load, inputSchema, inputs.get(0), engine, ioExecutor);
       }
       if (operator instanceof Aggregate) {
         Aggregate aggregate = (Aggregate) operator;
@@ -198,8 +194,7 @@ public final class DefaultPlanExecutor {
         StructType probeSchema = inputSchema(node, 0);
         StructType buildSchema = inputSchema(node, 1);
         return inputs ->
-            SemiJoinExecutor.execute(
-                join, probeSchema, buildSchema, inputs.get(0), inputs.get(1));
+            SemiJoinExecutor.execute(join, probeSchema, buildSchema, inputs.get(0), inputs.get(1));
       }
       if (operator instanceof UnionAll) {
         return UnionAllExecutor::execute;
@@ -283,8 +278,7 @@ public final class DefaultPlanExecutor {
     private final BatchOperator operator;
     private boolean executed;
 
-    private OperatorExecution(
-        int nodeIndex, List<ExecutionNode> inputs, BatchOperator operator) {
+    private OperatorExecution(int nodeIndex, List<ExecutionNode> inputs, BatchOperator operator) {
       super(inputs);
       this.nodeIndex = nodeIndex;
       this.operator = requireNonNull(operator, "batch operator is null");

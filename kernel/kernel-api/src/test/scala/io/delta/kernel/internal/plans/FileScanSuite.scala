@@ -21,6 +21,7 @@ import java.util
 import scala.jdk.CollectionConverters._
 
 import io.delta.kernel.data.Row
+import io.delta.kernel.internal.actions.DeletionVectorDescriptor
 import io.delta.kernel.internal.data.GenericRow
 import io.delta.kernel.types._
 import io.delta.kernel.utils.FileStatus
@@ -159,5 +160,28 @@ class FileScanSuite extends AnyFunSuite {
       }
       assert(error.getMessage.contains(message))
     }
+  }
+
+  test("ScanFile represents known and unresolved status with an optional deletion vector") {
+    val deletionVector = new DeletionVectorDescriptor(
+      DeletionVectorDescriptor.INLINE_DV_MARKER,
+      "inline",
+      util.Optional.empty(),
+      1,
+      1)
+    val unresolved = new ScanFile(
+      "file:///table/data",
+      constants("a"),
+      util.Optional.of(deletionVector))
+
+    assert(unresolved.getPath === "file:///table/data")
+    assert(unresolved.getKnownFileStatus.isEmpty)
+    assert(unresolved.getDeletionVector.get() eq deletionVector)
+    assertThrows[IllegalStateException](unresolved.getFileStatus)
+
+    val status = FileStatus.of("file:///table/data", 10, 20)
+    val known = new ScanFile(status, constants("a"), util.Optional.of(deletionVector))
+    assert(known.getKnownFileStatus.get() === status)
+    assert(known.getFileStatus === status)
   }
 }
