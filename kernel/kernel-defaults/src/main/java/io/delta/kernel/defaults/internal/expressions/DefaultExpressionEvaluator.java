@@ -695,13 +695,13 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       try {
         right = visit(childAt(arithmetic, 1));
       } catch (RuntimeException e) {
-        closeAfterFailure(e, left);
+        Utils.closeCloseablesAndAddSuppressed(e, left);
         throw e;
       }
       try {
         return arithmeticVector(left, right, arithmetic.getName());
       } catch (RuntimeException e) {
-        closeAfterFailure(e, left, right);
+        Utils.closeCloseablesAndAddSuppressed(e, left, right);
         throw e;
       }
     }
@@ -817,14 +817,6 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
           left.getSize(),
           right.getSize());
       return new PredicateChildrenEvalResult(left.getSize(), left, right);
-    }
-
-    private static void closeAfterFailure(RuntimeException failure, AutoCloseable... closeables) {
-      try {
-        Utils.closeCloseables(closeables);
-      } catch (RuntimeException closeFailure) {
-        failure.addSuppressed(closeFailure);
-      }
     }
   }
 

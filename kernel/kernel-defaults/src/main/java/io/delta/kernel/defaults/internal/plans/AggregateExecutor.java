@@ -72,7 +72,7 @@ final class AggregateExecutor {
         }
         try (EvaluatedBatch values = bound.evaluate(batch)) {
           for (int rowId = 0; rowId < batch.getData().getSize(); rowId++) {
-            if (!isSelected(batch, rowId)) {
+            if (!batch.isSelected(rowId)) {
               continue;
             }
             GroupKey key = values.groupKey(rowId);
@@ -97,12 +97,6 @@ final class AggregateExecutor {
         new FilteredColumnarBatch(
             new DefaultRowBasedColumnarBatch(outputSchema, rows), Optional.empty());
     return singletonCloseableIterator(output);
-  }
-
-  private static boolean isSelected(FilteredColumnarBatch batch, int rowId) {
-    Optional<ColumnVector> selection = batch.getSelectionVector();
-    return !selection.isPresent()
-        || (!selection.get().isNullAt(rowId) && selection.get().getBoolean(rowId));
   }
 
   private static final class BoundAggregate implements AutoCloseable {
@@ -149,11 +143,7 @@ final class AggregateExecutor {
       } catch (RuntimeException failure) {
         List<AutoCloseable> closeables = new ArrayList<>(groupValues);
         closeables.addAll(aggValues);
-        try {
-          Utils.closeCloseables(closeables.toArray(new AutoCloseable[0]));
-        } catch (RuntimeException closeFailure) {
-          failure.addSuppressed(closeFailure);
-        }
+        Utils.closeCloseablesAndAddSuppressed(failure, closeables.toArray(new AutoCloseable[0]));
         throw failure;
       }
     }

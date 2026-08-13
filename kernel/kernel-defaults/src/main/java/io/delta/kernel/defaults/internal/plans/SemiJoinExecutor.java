@@ -76,21 +76,21 @@ final class SemiJoinExecutor {
         validateSchema("build", schema, batch.getData());
         try (EvaluatedKeys values = projection.evaluate(batch.getData())) {
           for (int rowId = 0; rowId < batch.getData().getSize(); rowId++) {
-            if (isSelected(batch, rowId)) {
+            if (batch.isSelected(rowId)) {
               keys.add(values.keyAt(rowId));
             }
           }
         }
       }
     } catch (RuntimeException | Error failure) {
-      closeAfterFailure(failure, build, probe);
+      Utils.closeCloseablesAndAddSuppressed(failure, build, probe);
       throw failure;
     }
 
     try {
       Utils.closeCloseables(build);
     } catch (RuntimeException | Error failure) {
-      closeAfterFailure(failure, probe);
+      Utils.closeCloseablesAndAddSuppressed(failure, probe);
       throw failure;
     }
     return keys;
@@ -108,7 +108,7 @@ final class SemiJoinExecutor {
     boolean[] selected = new boolean[data.getSize()];
     try (EvaluatedKeys values = projection.evaluate(data)) {
       for (int rowId = 0; rowId < data.getSize(); rowId++) {
-        if (isSelected(batch, rowId)) {
+        if (batch.isSelected(rowId)) {
           selected[rowId] = inverted != buildKeys.contains(values.keyAt(rowId));
         }
       }
@@ -127,20 +127,6 @@ final class SemiJoinExecutor {
               + data.getSchema()
               + " does not match expected schema "
               + expected);
-    }
-  }
-
-  private static boolean isSelected(FilteredColumnarBatch batch, int rowId) {
-    Optional<ColumnVector> selection = batch.getSelectionVector();
-    return !selection.isPresent()
-        || (!selection.get().isNullAt(rowId) && selection.get().getBoolean(rowId));
-  }
-
-  private static void closeAfterFailure(Throwable failure, AutoCloseable... closeables) {
-    try {
-      Utils.closeCloseables(closeables);
-    } catch (RuntimeException | Error closeFailure) {
-      failure.addSuppressed(closeFailure);
     }
   }
 
@@ -175,7 +161,7 @@ final class SemiJoinExecutor {
         }
         return new EvaluatedKeys(vectors, types);
       } catch (RuntimeException | Error failure) {
-        closeAfterFailure(failure, vectors.toArray(new AutoCloseable[0]));
+        Utils.closeCloseablesAndAddSuppressed(failure, vectors.toArray(new AutoCloseable[0]));
         throw failure;
       }
     }

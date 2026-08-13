@@ -53,6 +53,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.FutureTask;
+import java.util.function.Function;
 
 /** Executes Parquet and JSON scan sources through the Kernel Java handlers. */
 final class FileScanExecutor {
@@ -72,16 +73,9 @@ final class FileScanExecutor {
       return openParquet(scan, layout, scan.getFiles(), engine);
     }
 
-    List<CloseableIterator<FilteredColumnarBatch>> readers = new ArrayList<>();
-    try {
-      for (ScanFile file : scan.getFiles()) {
-        readers.add(openParquet(scan, layout, Collections.singletonList(file), engine));
-      }
-      return combine(readers);
-    } catch (RuntimeException failure) {
-      closeSilently(readers);
-      throw failure;
-    }
+    return openPerFile(
+        scan.getFiles(),
+        file -> openParquet(scan, layout, Collections.singletonList(file), engine));
   }
 
   /**
@@ -97,18 +91,10 @@ final class FileScanExecutor {
     requireNonNull(engine, "engine is null");
     requireNonNull(ioExecutor, "ioExecutor is null");
     ScanLayout layout = ScanLayout.forParquet(scan);
-    List<CloseableIterator<FilteredColumnarBatch>> readers = new ArrayList<>();
-    try {
-      for (ScanFile file : scan.getFiles()) {
-        CloseableIterator<FilteredColumnarBatch> reader =
-            openParquet(scan, layout, Collections.singletonList(file), engine);
-        readers.add(PrimedIterator.submit(reader, ioExecutor));
-      }
-      return closeOnFailure(combine(readers));
-    } catch (RuntimeException | Error failure) {
-      closeAfterFailure(failure, readers);
-      throw failure;
-    }
+    return openPerFile(
+        scan.getFiles(),
+        file -> openParquet(scan, layout, Collections.singletonList(file), engine),
+        ioExecutor);
   }
 
   static CloseableIterator<FilteredColumnarBatch> execute(ScanJson scan, Engine engine) {
@@ -122,16 +108,9 @@ final class FileScanExecutor {
       return openJson(scan, layout, scan.getFiles(), null, engine);
     }
 
-    List<CloseableIterator<FilteredColumnarBatch>> readers = new ArrayList<>();
-    try {
-      for (ScanFile file : scan.getFiles()) {
-        readers.add(openJson(scan, layout, Collections.singletonList(file), file, engine));
-      }
-      return combine(readers);
-    } catch (RuntimeException failure) {
-      closeSilently(readers);
-      throw failure;
-    }
+    return openPerFile(
+        scan.getFiles(),
+        file -> openJson(scan, layout, Collections.singletonList(file), file, engine));
   }
 
   /** JSON counterpart of {@link #execute(ScanParquet, Engine, ExecutorService)}. */
@@ -141,38 +120,22 @@ final class FileScanExecutor {
     requireNonNull(engine, "engine is null");
     requireNonNull(ioExecutor, "ioExecutor is null");
     ScanLayout layout = ScanLayout.forJson(scan);
-    List<CloseableIterator<FilteredColumnarBatch>> readers = new ArrayList<>();
-    try {
-      for (ScanFile file : scan.getFiles()) {
-        CloseableIterator<FilteredColumnarBatch> reader =
-            openJson(scan, layout, Collections.singletonList(file), file, engine);
-        readers.add(PrimedIterator.submit(reader, ioExecutor));
-      }
-      return closeOnFailure(combine(readers));
-    } catch (RuntimeException | Error failure) {
-      closeAfterFailure(failure, readers);
-      throw failure;
-    }
+    return openPerFile(
+        scan.getFiles(),
+        file -> openJson(scan, layout, Collections.singletonList(file), file, engine),
+        ioExecutor);
   }
 
   private static CloseableIterator<FilteredColumnarBatch> openParquet(
       ScanParquet scan, ScanLayout layout, List<ScanFile> files, Engine engine) {
-    CloseableIterator<FileStatus> statuses = fileStatuses(files);
-    final CloseableIterator<FileReadResult> reader;
-    try {
-      reader =
-          requireNonNull(
-              engine
-                  .getParquetHandler()
-                  .readParquetFiles(statuses, layout.readSchema(), Optional.empty()),
-              "Parquet reader is null");
-    } catch (IOException failure) {
-      Utils.closeCloseablesSilently(statuses);
-      throw new UncheckedIOException("Failed to open Parquet scan", failure);
-    } catch (RuntimeException failure) {
-      Utils.closeCloseablesSilently(statuses);
-      throw failure;
-    }
+    CloseableIterator<FileReadResult> reader =
+        openReader(
+            files,
+            "Parquet",
+            statuses ->
+                engine
+                    .getParquetHandler()
+                    .readParquetFiles(statuses, layout.readSchema(), Optional.empty()));
 
     Map<String, ScanFile> filesByPath = new HashMap<>();
     files.forEach(file -> filesByPath.put(file.getFileStatus().getPath(), file));
@@ -194,22 +157,14 @@ final class FileScanExecutor {
       List<ScanFile> files,
       ScanFile constantFile,
       Engine engine) {
-    CloseableIterator<FileStatus> statuses = fileStatuses(files);
-    final CloseableIterator<ColumnarBatch> reader;
-    try {
-      reader =
-          requireNonNull(
-              engine
-                  .getJsonHandler()
-                  .readJsonFiles(statuses, layout.readSchema(), Optional.empty()),
-              "JSON reader is null");
-    } catch (IOException failure) {
-      Utils.closeCloseablesSilently(statuses);
-      throw new UncheckedIOException("Failed to open JSON scan", failure);
-    } catch (RuntimeException failure) {
-      Utils.closeCloseablesSilently(statuses);
-      throw failure;
-    }
+    CloseableIterator<ColumnarBatch> reader =
+        openReader(
+            files,
+            "JSON",
+            statuses ->
+                engine
+                    .getJsonHandler()
+                    .readJsonFiles(statuses, layout.readSchema(), Optional.empty()));
 
     long[] nextRowIndex = {0};
     return reader.map(
@@ -218,6 +173,42 @@ final class FileScanExecutor {
           nextRowIndex[0] = Math.addExact(rowIndex, batch.getSize());
           return filtered(splice(scan, layout, constantFile, batch, rowIndex));
         });
+  }
+
+  private static <T> CloseableIterator<T> openReader(
+      List<ScanFile> files, String format, ReaderOpener<T> opener) {
+    CloseableIterator<FileStatus> statuses = fileStatuses(files);
+    try {
+      return requireNonNull(opener.open(statuses), format + " reader is null");
+    } catch (IOException failure) {
+      Utils.closeCloseablesSilently(statuses);
+      throw new UncheckedIOException("Failed to open " + format + " scan", failure);
+    } catch (RuntimeException | Error failure) {
+      Utils.closeCloseablesSilently(statuses);
+      throw failure;
+    }
+  }
+
+  private static <T> CloseableIterator<T> openPerFile(
+      List<ScanFile> files, Function<ScanFile, CloseableIterator<T>> opener) {
+    return openPerFile(files, opener, null);
+  }
+
+  private static <T> CloseableIterator<T> openPerFile(
+      List<ScanFile> files,
+      Function<ScanFile, CloseableIterator<T>> opener,
+      ExecutorService ioExecutor) {
+    List<CloseableIterator<T>> readers = new ArrayList<>(files.size());
+    try {
+      for (ScanFile file : files) {
+        CloseableIterator<T> reader = opener.apply(file);
+        readers.add(ioExecutor == null ? reader : PrimedIterator.submit(reader, ioExecutor));
+      }
+      return combine(readers);
+    } catch (RuntimeException | Error failure) {
+      Utils.closeCloseablesAndAddSuppressed(failure, readers.toArray(new AutoCloseable[0]));
+      throw failure;
+    }
   }
 
   private static ColumnarBatch splice(
@@ -271,7 +262,7 @@ final class FileScanExecutor {
     return new FilteredColumnarBatch(batch, Optional.empty());
   }
 
-  private static <T> CloseableIterator<T> combine(List<CloseableIterator<T>> iterators) {
+  static <T> CloseableIterator<T> combine(List<CloseableIterator<T>> iterators) {
     return combine(iterators, 0, iterators.size());
   }
 
@@ -287,76 +278,13 @@ final class FileScanExecutor {
     return combine(iterators, start, middle).combine(combine(iterators, middle, end));
   }
 
-  private static void closeSilently(List<? extends AutoCloseable> readers) {
-    for (AutoCloseable reader : readers) {
-      Utils.closeCloseablesSilently(reader);
-    }
-  }
-
-  private static void closeAfterFailure(Throwable failure, List<? extends AutoCloseable> readers) {
-    for (AutoCloseable reader : readers) {
-      try {
-        reader.close();
-      } catch (Throwable closeFailure) {
-        if (closeFailure != failure) {
-          failure.addSuppressed(closeFailure);
-        }
-      }
-    }
-  }
-
-  private static <T> CloseableIterator<T> closeOnFailure(CloseableIterator<T> delegate) {
-    return new CloseableIterator<T>() {
-      private boolean closed;
-
-      @Override
-      public boolean hasNext() {
-        if (closed) {
-          return false;
-        }
-        try {
-          return delegate.hasNext();
-        } catch (RuntimeException | Error failure) {
-          closeAfterFailure(failure);
-          throw failure;
-        }
-      }
-
-      @Override
-      public T next() {
-        if (closed) {
-          throw new java.util.NoSuchElementException();
-        }
-        try {
-          return delegate.next();
-        } catch (RuntimeException | Error failure) {
-          closeAfterFailure(failure);
-          throw failure;
-        }
-      }
-
-      @Override
-      public void close() throws IOException {
-        if (!closed) {
-          closed = true;
-          delegate.close();
-        }
-      }
-
-      private void closeAfterFailure(Throwable failure) {
-        try {
-          close();
-        } catch (Throwable closeFailure) {
-          if (closeFailure != failure) {
-            failure.addSuppressed(closeFailure);
-          }
-        }
-      }
-    };
-  }
-
   private static <T> CloseableIterator<T> emptyIterator() {
     return toCloseableIterator(Collections.emptyIterator());
+  }
+
+  @FunctionalInterface
+  private interface ReaderOpener<T> {
+    CloseableIterator<T> open(CloseableIterator<FileStatus> statuses) throws IOException;
   }
 
   /** Keeps one asynchronously read batch buffered ahead of the consumer. */
@@ -389,23 +317,33 @@ final class FileScanExecutor {
     @Override
     public boolean hasNext() {
       ensureOpen();
-      if (buffered == null && !exhausted) {
-        buffered = awaitRead();
-        readAhead = null;
-        exhausted = !buffered.isAvailable();
+      try {
+        if (buffered == null && !exhausted) {
+          buffered = awaitRead();
+          readAhead = null;
+          exhausted = !buffered.isAvailable();
+        }
+        return !exhausted;
+      } catch (RuntimeException | Error failure) {
+        closeAfterFailure(failure);
+        throw failure;
       }
-      return !exhausted;
     }
 
     @Override
     public T next() {
-      if (!hasNext()) {
-        throw new java.util.NoSuchElementException();
+      try {
+        if (!hasNext()) {
+          throw new java.util.NoSuchElementException();
+        }
+        T value = buffered.getValue();
+        buffered = null;
+        submitRead();
+        return value;
+      } catch (RuntimeException | Error failure) {
+        closeAfterFailure(failure);
+        throw failure;
       }
-      T value = buffered.getValue();
-      buffered = null;
-      submitRead();
-      return value;
     }
 
     @Override
@@ -459,13 +397,7 @@ final class FileScanExecutor {
     }
 
     private void closeAfterFailure(Throwable failure) {
-      try {
-        close();
-      } catch (Throwable closeFailure) {
-        if (closeFailure != failure) {
-          failure.addSuppressed(closeFailure);
-        }
-      }
+      Utils.closeCloseablesAndAddSuppressed(failure, this);
     }
 
     private void ensureOpen() {
