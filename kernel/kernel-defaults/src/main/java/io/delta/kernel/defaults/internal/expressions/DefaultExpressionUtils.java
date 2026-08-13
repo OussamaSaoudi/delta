@@ -88,6 +88,7 @@ class DefaultExpressionUtils {
       Function<Integer, Boolean> nullabilityAccessor) {
 
     return new ColumnVector() {
+      private boolean closed;
 
       @Override
       public DataType getDataType() {
@@ -101,7 +102,10 @@ class DefaultExpressionUtils {
 
       @Override
       public void close() {
-        childVector.close();
+        if (!closed) {
+          closed = true;
+          childVector.close();
+        }
       }
 
       @Override
@@ -164,7 +168,9 @@ class DefaultExpressionUtils {
           rowId ->
               booleanComparator.test(
                   BIGDECIMAL_COMPARATOR.compare(left.getDecimal(rowId), right.getDecimal(rowId)));
-    } else if (dataType instanceof StringType) {
+    } else if (dataType instanceof StringType
+        || dataType instanceof GeometryType
+        || dataType instanceof GeographyType) {
       vectorValueComparator =
           rowId ->
               booleanComparator.test(
@@ -192,6 +198,7 @@ class DefaultExpressionUtils {
     IntPredicate vectorValueComparator = getComparator(left, right, booleanComparator);
 
     return new ColumnVector() {
+      private boolean closed;
 
       @Override
       public DataType getDataType() {
@@ -200,7 +207,10 @@ class DefaultExpressionUtils {
 
       @Override
       public void close() {
-        Utils.closeCloseables(left, right);
+        if (!closed) {
+          closed = true;
+          Utils.closeCloseables(left, right);
+        }
       }
 
       @Override
@@ -233,6 +243,8 @@ class DefaultExpressionUtils {
       ColumnVector left, ColumnVector right, IntPredicate booleanComparator) {
     IntPredicate vectorValueComparator = getComparator(left, right, booleanComparator);
     return new ColumnVector() {
+      private boolean closed;
+
       @Override
       public DataType getDataType() {
         return BooleanType.BOOLEAN;
@@ -240,7 +252,10 @@ class DefaultExpressionUtils {
 
       @Override
       public void close() {
-        Utils.closeCloseables(left, right);
+        if (!closed) {
+          closed = true;
+          Utils.closeCloseables(left, right);
+        }
       }
 
       @Override

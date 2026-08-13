@@ -417,6 +417,37 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     }
 
     @Override
+    ExpressionTransformResult visitBooleanExpression(BooleanExpression booleanExpression) {
+      ExpressionTransformResult child =
+          transform(booleanExpression.getExpression(), BooleanType.BOOLEAN);
+      requireExactType(
+          booleanExpression, child.outputType, BooleanType.BOOLEAN, "boolean expression");
+      return new ExpressionTransformResult(
+          new BooleanExpression(child.expression), BooleanType.BOOLEAN);
+    }
+
+    @Override
+    ExpressionTransformResult visitJunction(Junction junction) {
+      List<Predicate> predicates = new ArrayList<>();
+      for (Predicate predicate : junction.getPredicates()) {
+        ExpressionTransformResult child = transform(predicate, BooleanType.BOOLEAN);
+        predicates.add(validateIsPredicate(junction, child));
+      }
+      return new ExpressionTransformResult(
+          new Junction(junction.getOperator(), predicates), BooleanType.BOOLEAN);
+    }
+
+    @Override
+    ExpressionTransformResult visitBinaryPredicate(BinaryPredicate predicate) {
+      ExpressionTransformResult left = visit(predicate.getLeft());
+      ExpressionTransformResult right = visit(predicate.getRight());
+      requireExactType(predicate, left.outputType, right.outputType, "comparison operands");
+      return new ExpressionTransformResult(
+          new BinaryPredicate(predicate.getOperator(), left.expression, right.expression),
+          BooleanType.BOOLEAN);
+    }
+
+    @Override
     ExpressionTransformResult visitPartitionValue(PartitionValueExpression partitionValue) {
       ExpressionTransformResult serializedPartValueInput = visit(partitionValue.getInput());
       checkArgument(
@@ -691,6 +722,17 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       }
       return new Predicate(predicate.getName(), left, right);
     }
+
+    private void requireExactType(
+        Expression expression, DataType actual, DataType expected, String context) {
+      if (!expected.equals(actual)) {
+        throw unsupportedExpressionException(
+            expression,
+            String.format(
+                "%s requires exact type %s, but expression produced %s",
+                context, expected, actual));
+      }
+    }
   }
 
   /**
@@ -959,6 +1001,43 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     ColumnVector visitCast(ImplicitCastExpression cast) {
       ColumnVector inputResult = visit(cast.getInput());
       return cast.eval(inputResult);
+    }
+
+    @Override
+    ColumnVector visitBooleanExpression(BooleanExpression booleanExpression) {
+      return eval(booleanExpression.getExpression(), BooleanType.BOOLEAN);
+    }
+
+    @Override
+    ColumnVector visitJunction(Junction junction) {
+      List<ColumnVector> children = new ArrayList<>();
+      try {
+        for (Predicate predicate : junction.getPredicates()) {
+          children.add(eval(predicate, BooleanType.BOOLEAN));
+        }
+        return PlanPredicateEvaluator.junction(junction.getOperator(), children, input.getSize());
+      } catch (RuntimeException failure) {
+        Utils.closeCloseablesAndAddSuppressed(failure, children.toArray(new ColumnVector[0]));
+        throw failure;
+      }
+    }
+
+    @Override
+    ColumnVector visitBinaryPredicate(BinaryPredicate predicate) {
+      ColumnVector left = visit(predicate.getLeft());
+      ColumnVector right;
+      try {
+        right = visit(predicate.getRight());
+      } catch (RuntimeException failure) {
+        Utils.closeCloseablesAndAddSuppressed(failure, left);
+        throw failure;
+      }
+      try {
+        return PlanPredicateEvaluator.strictComparison(predicate.getOperator(), left, right);
+      } catch (RuntimeException failure) {
+        Utils.closeCloseablesAndAddSuppressed(failure, left, right);
+        throw failure;
+      }
     }
 
     @Override

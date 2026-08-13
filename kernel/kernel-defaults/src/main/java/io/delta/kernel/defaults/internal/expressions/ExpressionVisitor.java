@@ -60,6 +60,12 @@ abstract class ExpressionVisitor<R> {
 
   abstract R visitCast(ImplicitCastExpression cast);
 
+  abstract R visitBooleanExpression(BooleanExpression booleanExpression);
+
+  abstract R visitJunction(Junction junction);
+
+  abstract R visitBinaryPredicate(BinaryPredicate predicate);
+
   abstract R visitPartitionValue(PartitionValueExpression partitionValue);
 
   abstract R visitElementAt(ScalarExpression elementAt);
@@ -89,6 +95,12 @@ abstract class ExpressionVisitor<R> {
   final R visit(Expression expression) {
     if (expression instanceof PartitionValueExpression) {
       return visitPartitionValue((PartitionValueExpression) expression);
+    } else if (expression instanceof BooleanExpression) {
+      return visitBooleanExpression((BooleanExpression) expression);
+    } else if (expression instanceof Junction) {
+      return visitJunction((Junction) expression);
+    } else if (expression instanceof BinaryPredicate) {
+      return visitBinaryPredicate((BinaryPredicate) expression);
     } else if (expression instanceof ScalarExpression) {
       return visitScalarExpression((ScalarExpression) expression);
     } else if (expression instanceof Literal) {
