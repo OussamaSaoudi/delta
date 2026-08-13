@@ -25,6 +25,7 @@ import io.delta.kernel.defaults.internal.data.vector.DefaultLongVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultSubFieldVector;
 import io.delta.kernel.engine.Engine;
 import io.delta.kernel.engine.FileReadResult;
+import io.delta.kernel.exceptions.KernelEngineException;
 import io.delta.kernel.internal.plans.FileScan;
 import io.delta.kernel.internal.plans.ScanFile;
 import io.delta.kernel.internal.plans.ScanJson;
@@ -46,6 +47,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.FutureTask;
 
 /** Executes Parquet and JSON scan sources through the Kernel Java handlers. */
 final class FileScanExecutor {
@@ -77,6 +84,33 @@ final class FileScanExecutor {
     }
   }
 
+  /**
+   * Opens one reader per file and starts every reader's first blocking read on {@code ioExecutor}.
+   * Results remain pull-based and are emitted in the scan's declared file order.
+   *
+   * <p>The caller owns {@code ioExecutor}. Closing the result cancels its outstanding reads and
+   * closes every file reader, but does not shut down the executor.
+   */
+  static CloseableIterator<FilteredColumnarBatch> execute(
+      ScanParquet scan, Engine engine, ExecutorService ioExecutor) {
+    requireNonNull(scan, "scan is null");
+    requireNonNull(engine, "engine is null");
+    requireNonNull(ioExecutor, "ioExecutor is null");
+    ScanLayout layout = ScanLayout.forParquet(scan);
+    List<CloseableIterator<FilteredColumnarBatch>> readers = new ArrayList<>();
+    try {
+      for (ScanFile file : scan.getFiles()) {
+        CloseableIterator<FilteredColumnarBatch> reader =
+            openParquet(scan, layout, Collections.singletonList(file), engine);
+        readers.add(PrimedIterator.submit(reader, ioExecutor));
+      }
+      return closeOnFailure(combine(readers));
+    } catch (RuntimeException | Error failure) {
+      closeAfterFailure(failure, readers);
+      throw failure;
+    }
+  }
+
   static CloseableIterator<FilteredColumnarBatch> execute(ScanJson scan, Engine engine) {
     requireNonNull(scan, "scan is null");
     requireNonNull(engine, "engine is null");
@@ -96,6 +130,27 @@ final class FileScanExecutor {
       return combine(readers);
     } catch (RuntimeException failure) {
       closeSilently(readers);
+      throw failure;
+    }
+  }
+
+  /** JSON counterpart of {@link #execute(ScanParquet, Engine, ExecutorService)}. */
+  static CloseableIterator<FilteredColumnarBatch> execute(
+      ScanJson scan, Engine engine, ExecutorService ioExecutor) {
+    requireNonNull(scan, "scan is null");
+    requireNonNull(engine, "engine is null");
+    requireNonNull(ioExecutor, "ioExecutor is null");
+    ScanLayout layout = ScanLayout.forJson(scan);
+    List<CloseableIterator<FilteredColumnarBatch>> readers = new ArrayList<>();
+    try {
+      for (ScanFile file : scan.getFiles()) {
+        CloseableIterator<FilteredColumnarBatch> reader =
+            openJson(scan, layout, Collections.singletonList(file), file, engine);
+        readers.add(PrimedIterator.submit(reader, ioExecutor));
+      }
+      return closeOnFailure(combine(readers));
+    } catch (RuntimeException | Error failure) {
+      closeAfterFailure(failure, readers);
       throw failure;
     }
   }
@@ -238,8 +293,265 @@ final class FileScanExecutor {
     }
   }
 
+  private static void closeAfterFailure(Throwable failure, List<? extends AutoCloseable> readers) {
+    for (AutoCloseable reader : readers) {
+      try {
+        reader.close();
+      } catch (Throwable closeFailure) {
+        if (closeFailure != failure) {
+          failure.addSuppressed(closeFailure);
+        }
+      }
+    }
+  }
+
+  private static <T> CloseableIterator<T> closeOnFailure(CloseableIterator<T> delegate) {
+    return new CloseableIterator<T>() {
+      private boolean closed;
+
+      @Override
+      public boolean hasNext() {
+        if (closed) {
+          return false;
+        }
+        try {
+          return delegate.hasNext();
+        } catch (RuntimeException | Error failure) {
+          closeAfterFailure(failure);
+          throw failure;
+        }
+      }
+
+      @Override
+      public T next() {
+        if (closed) {
+          throw new java.util.NoSuchElementException();
+        }
+        try {
+          return delegate.next();
+        } catch (RuntimeException | Error failure) {
+          closeAfterFailure(failure);
+          throw failure;
+        }
+      }
+
+      @Override
+      public void close() throws IOException {
+        if (!closed) {
+          closed = true;
+          delegate.close();
+        }
+      }
+
+      private void closeAfterFailure(Throwable failure) {
+        try {
+          close();
+        } catch (Throwable closeFailure) {
+          if (closeFailure != failure) {
+            failure.addSuppressed(closeFailure);
+          }
+        }
+      }
+    };
+  }
+
   private static <T> CloseableIterator<T> emptyIterator() {
     return toCloseableIterator(Collections.emptyIterator());
+  }
+
+  /** Keeps one asynchronously read batch buffered ahead of the consumer. */
+  private static final class PrimedIterator<T> implements CloseableIterator<T> {
+    private final CloseableIterator<T> delegate;
+    private final ExecutorService executor;
+    private TrackedFutureTask<ReadResult<T>> readAhead;
+    private ReadResult<T> buffered;
+    private boolean exhausted;
+    private boolean closed;
+
+    private PrimedIterator(CloseableIterator<T> delegate, ExecutorService executor) {
+      this.delegate = delegate;
+      this.executor = executor;
+    }
+
+    static <T> PrimedIterator<T> submit(CloseableIterator<T> delegate, ExecutorService executor) {
+      requireNonNull(delegate, "file reader is null");
+      requireNonNull(executor, "ioExecutor is null");
+      PrimedIterator<T> iterator = new PrimedIterator<>(delegate, executor);
+      try {
+        iterator.submitRead();
+        return iterator;
+      } catch (RuntimeException | Error failure) {
+        iterator.closeAfterFailure(failure);
+        throw failure;
+      }
+    }
+
+    @Override
+    public boolean hasNext() {
+      ensureOpen();
+      if (buffered == null && !exhausted) {
+        buffered = awaitRead();
+        readAhead = null;
+        exhausted = !buffered.isAvailable();
+      }
+      return !exhausted;
+    }
+
+    @Override
+    public T next() {
+      if (!hasNext()) {
+        throw new java.util.NoSuchElementException();
+      }
+      T value = buffered.getValue();
+      buffered = null;
+      submitRead();
+      return value;
+    }
+
+    @Override
+    public void close() throws IOException {
+      if (!closed) {
+        closed = true;
+        cancelAndAwaitRead();
+        delegate.close();
+      }
+    }
+
+    private void submitRead() {
+      readAhead =
+          new TrackedFutureTask<>(
+              () -> {
+                if (!delegate.hasNext()) {
+                  return ReadResult.empty();
+                }
+                return ReadResult.available(
+                    requireNonNull(delegate.next(), "reader batch is null"));
+              });
+      executor.execute(readAhead);
+    }
+
+    private ReadResult<T> awaitRead() {
+      try {
+        return readAhead.get();
+      } catch (InterruptedException failure) {
+        Thread.currentThread().interrupt();
+        throw new KernelEngineException("await a plan file read", failure);
+      } catch (ExecutionException failure) {
+        Throwable cause = failure.getCause();
+        if (cause instanceof RuntimeException) {
+          throw (RuntimeException) cause;
+        }
+        if (cause instanceof Error) {
+          throw (Error) cause;
+        }
+        throw new KernelEngineException("prefetch a plan file", cause);
+      } catch (CancellationException failure) {
+        throw new KernelEngineException("await a cancelled plan file read", failure);
+      }
+    }
+
+    private void cancelAndAwaitRead() {
+      if (readAhead != null) {
+        readAhead.cancelTracked();
+        readAhead.awaitExit();
+        readAhead = null;
+      }
+    }
+
+    private void closeAfterFailure(Throwable failure) {
+      try {
+        close();
+      } catch (Throwable closeFailure) {
+        if (closeFailure != failure) {
+          failure.addSuppressed(closeFailure);
+        }
+      }
+    }
+
+    private void ensureOpen() {
+      if (closed) {
+        throw new IllegalStateException("Plan file reader is closed");
+      }
+    }
+  }
+
+  private static final class ReadResult<T> {
+    private final T value;
+
+    private ReadResult(T value) {
+      this.value = value;
+    }
+
+    private static <T> ReadResult<T> empty() {
+      return new ReadResult<>(null);
+    }
+
+    private static <T> ReadResult<T> available(T value) {
+      return new ReadResult<>(value);
+    }
+
+    private boolean isAvailable() {
+      return value != null;
+    }
+
+    private T getValue() {
+      return value;
+    }
+  }
+
+  /** Future whose exit latch distinguishes queued cancellation from a running read unwinding. */
+  private static final class TrackedFutureTask<T> extends FutureTask<T> {
+    private final CountDownLatch exited = new CountDownLatch(1);
+    private boolean entered;
+    private boolean cancelledBeforeRun;
+
+    private TrackedFutureTask(Callable<T> callable) {
+      super(callable);
+    }
+
+    @Override
+    public void run() {
+      synchronized (this) {
+        if (cancelledBeforeRun) {
+          return;
+        }
+        entered = true;
+      }
+      try {
+        super.run();
+      } finally {
+        exited.countDown();
+      }
+    }
+
+    private void cancelTracked() {
+      boolean queued;
+      synchronized (this) {
+        queued = !entered;
+        if (queued) {
+          cancelledBeforeRun = true;
+        }
+        cancel(true);
+      }
+      if (queued) {
+        exited.countDown();
+      }
+    }
+
+    private void awaitExit() {
+      boolean interrupted = false;
+      while (true) {
+        try {
+          exited.await();
+          break;
+        } catch (InterruptedException failure) {
+          interrupted = true;
+        }
+      }
+      if (interrupted) {
+        Thread.currentThread().interrupt();
+      }
+    }
   }
 
   private static final class ScanLayout {
