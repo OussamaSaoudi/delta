@@ -18,9 +18,13 @@ package io.delta.kernel.internal.plans;
 import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.expressions.Column;
+import io.delta.kernel.types.ArrayType;
 import io.delta.kernel.types.DataType;
+import io.delta.kernel.types.MapType;
 import io.delta.kernel.types.StructField;
 import io.delta.kernel.types.StructType;
+import java.util.ArrayList;
+import java.util.List;
 
 /** Schema operations shared by plan IR validation. */
 final class PlanSchemaUtils {
@@ -50,6 +54,34 @@ final class PlanSchemaUtils {
       currentType = field.getDataType();
     }
     return field;
+  }
+
+  /** Returns an equivalent type with field metadata removed at every nesting level. */
+  static DataType stripFieldMetadata(DataType dataType) {
+    requireNonNull(dataType, "dataType is null");
+    if (dataType instanceof StructType) {
+      StructType struct = (StructType) dataType;
+      List<StructField> fields = new ArrayList<>(struct.length());
+      for (StructField field : struct.fields()) {
+        fields.add(stripFieldMetadata(field));
+      }
+      return new StructType(fields);
+    }
+    if (dataType instanceof ArrayType) {
+      ArrayType array = (ArrayType) dataType;
+      return new ArrayType(stripFieldMetadata(array.getElementField()));
+    }
+    if (dataType instanceof MapType) {
+      MapType map = (MapType) dataType;
+      return new MapType(
+          stripFieldMetadata(map.getKeyField()), stripFieldMetadata(map.getValueField()));
+    }
+    return dataType;
+  }
+
+  private static StructField stripFieldMetadata(StructField field) {
+    return new StructField(
+        field.getName(), stripFieldMetadata(field.getDataType()), field.isNullable());
   }
 
   private static IllegalArgumentException unresolved(Column column, String context) {
