@@ -97,6 +97,14 @@ abstract class ExpressionVisitor<R> {
   final R visit(Expression expression) {
     if (expression instanceof PartitionValueExpression) {
       return visitPartitionValue((PartitionValueExpression) expression);
+    } else if (expression instanceof UnknownExpression) {
+      throw unsupported(expression, ((UnknownExpression) expression).getName());
+    } else if (expression instanceof UnknownPredicate) {
+      throw unsupported(expression, ((UnknownPredicate) expression).getUnknownName());
+    } else if (expression instanceof OpaqueExpression) {
+      throw unsupported(expression, ((OpaqueExpression) expression).getName());
+    } else if (expression instanceof OpaquePredicate) {
+      throw unsupported(expression, ((OpaquePredicate) expression).getOpaqueName());
     } else if (expression instanceof BooleanExpression) {
       return visitBooleanExpression((BooleanExpression) expression);
     } else if (expression instanceof Junction) {
@@ -125,6 +133,11 @@ abstract class ExpressionVisitor<R> {
 
     throw new UnsupportedOperationException(
         String.format("Expression %s is not supported.", expression));
+  }
+
+  private static UnsupportedOperationException unsupported(Expression expression, String name) {
+    return new UnsupportedOperationException(
+        String.format("Expression %s (%s) is not supported.", name, expression.getClass()));
   }
 
   private R visitScalarExpression(ScalarExpression expression) {
