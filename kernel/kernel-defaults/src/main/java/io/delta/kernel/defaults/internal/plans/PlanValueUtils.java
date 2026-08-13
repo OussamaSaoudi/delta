@@ -35,6 +35,8 @@ import io.delta.kernel.types.FloatType;
 import io.delta.kernel.types.GeographyType;
 import io.delta.kernel.types.GeometryType;
 import io.delta.kernel.types.IntegerType;
+import io.delta.kernel.types.IntervalDayTimeType;
+import io.delta.kernel.types.IntervalYearMonthType;
 import io.delta.kernel.types.LongType;
 import io.delta.kernel.types.MapType;
 import io.delta.kernel.types.ShortType;
@@ -68,10 +70,14 @@ final class PlanValueUtils {
       return vector.getShort(rowId);
     } else if (type instanceof IntegerType || type instanceof DateType) {
       return vector.getInt(rowId);
+    } else if (type instanceof IntervalYearMonthType) {
+      return vector.getIntervalYearMonth(rowId);
     } else if (type instanceof LongType
         || type instanceof TimestampType
         || type instanceof TimestampNTZType) {
       return vector.getLong(rowId);
+    } else if (type instanceof IntervalDayTimeType) {
+      return vector.getIntervalDayTime(rowId);
     } else if (type instanceof FloatType) {
       return vector.getFloat(rowId);
     } else if (type instanceof DoubleType) {
@@ -108,10 +114,14 @@ final class PlanValueUtils {
       return row.getShort(ordinal);
     } else if (type instanceof IntegerType || type instanceof DateType) {
       return row.getInt(ordinal);
+    } else if (type instanceof IntervalYearMonthType) {
+      return row.getIntervalYearMonth(ordinal);
     } else if (type instanceof LongType
         || type instanceof TimestampType
         || type instanceof TimestampNTZType) {
       return row.getLong(ordinal);
+    } else if (type instanceof IntervalDayTimeType) {
+      return row.getIntervalDayTime(ordinal);
     } else if (type instanceof FloatType) {
       return row.getFloat(ordinal);
     } else if (type instanceof DoubleType) {

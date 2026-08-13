@@ -28,6 +28,8 @@ import io.delta.kernel.types.FloatType;
 import io.delta.kernel.types.GeographyType;
 import io.delta.kernel.types.GeometryType;
 import io.delta.kernel.types.IntegerType;
+import io.delta.kernel.types.IntervalDayTimeType;
+import io.delta.kernel.types.IntervalYearMonthType;
 import io.delta.kernel.types.LongType;
 import io.delta.kernel.types.ShortType;
 import io.delta.kernel.types.StringType;
@@ -46,9 +48,11 @@ public final class DefaultValueComparator {
         || type instanceof ShortType
         || type instanceof IntegerType
         || type instanceof DateType
+        || type instanceof IntervalYearMonthType
         || type instanceof LongType
         || type instanceof TimestampType
         || type instanceof TimestampNTZType
+        || type instanceof IntervalDayTimeType
         || type instanceof FloatType
         || type instanceof DoubleType
         || type instanceof DecimalType
@@ -68,11 +72,14 @@ public final class DefaultValueComparator {
       return Byte.compare(((Number) left).byteValue(), ((Number) right).byteValue());
     } else if (type instanceof ShortType) {
       return Short.compare(((Number) left).shortValue(), ((Number) right).shortValue());
-    } else if (type instanceof IntegerType || type instanceof DateType) {
+    } else if (type instanceof IntegerType
+        || type instanceof DateType
+        || type instanceof IntervalYearMonthType) {
       return Integer.compare(((Number) left).intValue(), ((Number) right).intValue());
     } else if (type instanceof LongType
         || type instanceof TimestampType
-        || type instanceof TimestampNTZType) {
+        || type instanceof TimestampNTZType
+        || type instanceof IntervalDayTimeType) {
       return Long.compare(((Number) left).longValue(), ((Number) right).longValue());
     } else if (type instanceof FloatType) {
       return Float.compare(((Number) left).floatValue(), ((Number) right).floatValue());

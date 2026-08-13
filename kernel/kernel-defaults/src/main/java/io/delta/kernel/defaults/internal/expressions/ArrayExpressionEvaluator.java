@@ -187,6 +187,16 @@ final class ArrayExpressionEvaluator {
     }
 
     @Override
+    public int getIntervalYearMonth(int elementIndex) {
+      return element(elementIndex).getIntervalYearMonth(rowId);
+    }
+
+    @Override
+    public long getIntervalDayTime(int elementIndex) {
+      return element(elementIndex).getIntervalDayTime(rowId);
+    }
+
+    @Override
     public float getFloat(int elementIndex) {
       return element(elementIndex).getFloat(rowId);
     }

@@ -215,7 +215,15 @@ class AggregateExecutorSuite extends AnyFunSuite {
       ("type", "lower", "higher"),
       (BooleanType.BOOLEAN: DataType, false, true),
       (IntegerType.INTEGER: DataType, IntegerJ.valueOf(1), IntegerJ.valueOf(2)),
+      (
+        IntervalYearMonthType.INTERVAL_YEAR_MONTH: DataType,
+        IntegerJ.valueOf(-1),
+        IntegerJ.valueOf(1)),
       (LongType.LONG: DataType, java.lang.Long.valueOf(1), java.lang.Long.valueOf(2)),
+      (
+        IntervalDayTimeType.INTERVAL_DAY_TIME: DataType,
+        java.lang.Long.valueOf(-1),
+        java.lang.Long.valueOf(1)),
       (FloatType.FLOAT: DataType, FloatJ.valueOf(1), FloatJ.valueOf(2)),
       (DoubleType.DOUBLE: DataType, java.lang.Double.valueOf(1), java.lang.Double.valueOf(2)),
       (StringType.STRING: DataType, "a", "b"),
@@ -226,6 +234,29 @@ class AggregateExecutorSuite extends AnyFunSuite {
       assert(DefaultValueComparator.compare(dataType, higher, lower) > 0)
       assert(DefaultValueComparator.compare(dataType, lower, lower) === 0)
     }
+  }
+
+  test("Aggregate groups and orders both interval families") {
+    val yearMonth = IntervalYearMonthType.INTERVAL_YEAR_MONTH
+    val dayTime = IntervalDayTimeType.INTERVAL_DAY_TIME
+    val schema = new StructType()
+      .add("group", yearMonth)
+      .add("value", dayTime)
+    val aggregate = Aggregate.groupBy(schema, Seq(column("group")).asJava)
+      .aggregateAs(Agg.min(column("value")), "minimum")
+      .aggregateAs(Agg.max(column("value")), "maximum")
+      .build()
+    val input = batch(
+      schema,
+      Seq(
+        row(schema, Int.box(-13), Long.box(5L)),
+        row(schema, Int.box(-13), Long.box(-5L)),
+        row(schema, Int.box(30), Long.box(Long.MaxValue))))
+
+    val result = execute(aggregate, schema, Seq(input))
+    assert(result.map(_.getIntervalYearMonth(0)) === Seq(-13, 30))
+    assert(result.map(_.getIntervalDayTime(1)) === Seq(-5L, Long.MaxValue))
+    assert(result.map(_.getIntervalDayTime(2)) === Seq(5L, Long.MaxValue))
   }
 
 }

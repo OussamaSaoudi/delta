@@ -23,7 +23,7 @@ import scala.jdk.CollectionConverters._
 import io.delta.kernel.data.{FilteredColumnarBatch, Row}
 import io.delta.kernel.expressions.Column
 import io.delta.kernel.internal.plans.SemiJoin
-import io.delta.kernel.types.{BinaryType, LongType, StringType, StructType}
+import io.delta.kernel.types.{BinaryType, IntervalDayTimeType, IntervalYearMonthType, LongType, StringType, StructType}
 import io.delta.kernel.utils.CloseableIterator
 
 import PlanTestUtils._
@@ -158,6 +158,41 @@ class SemiJoinExecutorSuite extends AnyFunSuite {
       val rows = output.next().getRows
       try assert(rows.asScala.map(_.getBinary(0).toSeq).toSeq === Seq(Seq[Byte](1, 2)))
       finally rows.close()
+    } finally output.close()
+  }
+
+  test("SemiJoin canonicalizes both interval families without physical type erasure") {
+    val yearMonth = IntervalYearMonthType.INTERVAL_YEAR_MONTH
+    val dayTime = IntervalDayTimeType.INTERVAL_DAY_TIME
+    val intervalProbeSchema = new StructType()
+      .add("ym", yearMonth)
+      .add("dt", dayTime)
+    val intervalBuildSchema = new StructType()
+      .add("buildYm", yearMonth)
+      .add("buildDt", dayTime)
+    val operator = new SemiJoin(
+      false,
+      Seq(new Column("ym"), new Column("dt")).asJava,
+      Seq(new Column("buildYm"), new Column("buildDt")).asJava)
+    val probeBatch = batch(
+      intervalProbeSchema,
+      Seq(
+        row(intervalProbeSchema, Int.box(-13), Long.box(-5L)),
+        row(intervalProbeSchema, Int.box(30), Long.box(7L))))
+    val buildBatch = batch(
+      intervalBuildSchema,
+      Seq(row(intervalBuildSchema, Int.box(-13), Long.box(-5L))))
+    val output = SemiJoinExecutor.execute(
+      operator,
+      intervalProbeSchema,
+      intervalBuildSchema,
+      new TrackingIterator(Seq(probeBatch)),
+      new TrackingIterator(Seq(buildBatch)))
+
+    try {
+      val matched = rows(output.next())
+      assert(matched.map(_.getIntervalYearMonth(0)) === Seq(-13))
+      assert(matched.map(_.getIntervalDayTime(1)) === Seq(-5L))
     } finally output.close()
   }
 

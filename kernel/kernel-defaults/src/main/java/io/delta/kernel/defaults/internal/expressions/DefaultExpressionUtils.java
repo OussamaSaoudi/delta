@@ -150,11 +150,22 @@ class DefaultExpressionUtils {
     } else if (dataType instanceof IntegerType || dataType instanceof DateType) {
       vectorValueComparator =
           rowId -> booleanComparator.test(Integer.compare(left.getInt(rowId), right.getInt(rowId)));
+    } else if (dataType instanceof IntervalYearMonthType) {
+      vectorValueComparator =
+          rowId ->
+              booleanComparator.test(
+                  Integer.compare(
+                      left.getIntervalYearMonth(rowId), right.getIntervalYearMonth(rowId)));
     } else if (dataType instanceof LongType
         || dataType instanceof TimestampType
         || dataType instanceof TimestampNTZType) {
       vectorValueComparator =
           rowId -> booleanComparator.test(Long.compare(left.getLong(rowId), right.getLong(rowId)));
+    } else if (dataType instanceof IntervalDayTimeType) {
+      vectorValueComparator =
+          rowId ->
+              booleanComparator.test(
+                  Long.compare(left.getIntervalDayTime(rowId), right.getIntervalDayTime(rowId)));
     } else if (dataType instanceof FloatType) {
       vectorValueComparator =
           rowId ->
@@ -361,6 +372,16 @@ class DefaultExpressionUtils {
       }
 
       @Override
+      public int getIntervalYearMonth(int rowId) {
+        return getVector(rowId).getIntervalYearMonth(rowId);
+      }
+
+      @Override
+      public long getIntervalDayTime(int rowId) {
+        return getVector(rowId).getIntervalDayTime(rowId);
+      }
+
+      @Override
       public float getFloat(int rowId) {
         return getVector(rowId).getFloat(rowId);
       }
@@ -470,6 +491,20 @@ class DefaultExpressionUtils {
       @Override
       public long getLong(int rowId) {
         return evalLong(arithmeticOperation, left.getLong(rowId), right.getLong(rowId));
+      }
+
+      @Override
+      public int getIntervalYearMonth(int rowId) {
+        return evalInt(
+            arithmeticOperation,
+            left.getIntervalYearMonth(rowId),
+            right.getIntervalYearMonth(rowId));
+      }
+
+      @Override
+      public long getIntervalDayTime(int rowId) {
+        return evalLong(
+            arithmeticOperation, left.getIntervalDayTime(rowId), right.getIntervalDayTime(rowId));
       }
 
       @Override

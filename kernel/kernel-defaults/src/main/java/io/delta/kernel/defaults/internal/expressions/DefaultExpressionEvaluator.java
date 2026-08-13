@@ -604,11 +604,12 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
         throw unsupportedExpressionException(
             arithmetic, format("%s is only supported for arguments of the same type", operation));
       }
-      if (!isPrimitiveNumeric(outputType)) {
+      if (!isArithmeticType(outputType)) {
         throw unsupportedExpressionException(
             arithmetic,
             format(
-                "%s is only supported for numeric types: byte, short, int, long, float, double",
+                "%s is only supported for numeric types: byte, short, int, long, float, double, "
+                    + "interval year to month, interval day to second",
                 operation));
       }
 
@@ -619,13 +620,15 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
           outputType);
     }
 
-    private static boolean isPrimitiveNumeric(DataType dataType) {
+    private static boolean isArithmeticType(DataType dataType) {
       return dataType instanceof ByteType
           || dataType instanceof ShortType
           || dataType instanceof IntegerType
           || dataType instanceof LongType
           || dataType instanceof FloatType
-          || dataType instanceof DoubleType;
+          || dataType instanceof DoubleType
+          || dataType instanceof IntervalYearMonthType
+          || dataType instanceof IntervalDayTimeType;
     }
 
     @Override
@@ -974,6 +977,8 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
           || dataType instanceof DateType
           || dataType instanceof TimestampType
           || dataType instanceof TimestampNTZType
+          || dataType instanceof IntervalYearMonthType
+          || dataType instanceof IntervalDayTimeType
           || dataType instanceof GeometryType
           || dataType instanceof GeographyType
           || dataType instanceof ArrayType
