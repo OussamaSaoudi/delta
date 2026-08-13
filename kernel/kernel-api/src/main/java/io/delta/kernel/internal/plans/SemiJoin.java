@@ -18,7 +18,6 @@ package io.delta.kernel.internal.plans;
 import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.expressions.Column;
-import io.delta.kernel.types.StructField;
 import io.delta.kernel.types.StructType;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -33,9 +32,6 @@ public final class SemiJoin implements Operator {
   public SemiJoin(boolean inverted, List<Column> probeKeys, List<Column> buildKeys) {
     requireNonNull(probeKeys, "probeKeys is null");
     requireNonNull(buildKeys, "buildKeys is null");
-    if (probeKeys.isEmpty()) {
-      throw new IllegalArgumentException("SemiJoin requires at least one key");
-    }
     if (probeKeys.size() != buildKeys.size()) {
       throw new IllegalArgumentException(
           String.format(
@@ -76,17 +72,11 @@ public final class SemiJoin implements Operator {
     }
     StructType probeSchema = requireNonNull(inputSchemas.get(0), "probe schema is null");
     StructType buildSchema = requireNonNull(inputSchemas.get(1), "build schema is null");
-    for (int keyIndex = 0; keyIndex < probeKeys.size(); keyIndex++) {
-      StructField probe =
-          PlanSchemaUtils.resolveField(probeSchema, probeKeys.get(keyIndex), "SemiJoin probe key");
-      StructField build =
-          PlanSchemaUtils.resolveField(buildSchema, buildKeys.get(keyIndex), "SemiJoin build key");
-      if (!probe.getDataType().equals(build.getDataType())) {
-        throw new IllegalArgumentException(
-            String.format(
-                "SemiJoin key %s has probe type %s, but build type %s",
-                keyIndex, probe.getDataType(), build.getDataType()));
-      }
+    for (Column probeKey : probeKeys) {
+      PlanSchemaUtils.resolveField(probeSchema, probeKey, "SemiJoin probe key");
+    }
+    for (Column buildKey : buildKeys) {
+      PlanSchemaUtils.resolveField(buildSchema, buildKey, "SemiJoin build key");
     }
     return probeSchema;
   }

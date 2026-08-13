@@ -119,10 +119,15 @@ class RelationalPlanSuite extends AnyFunSuite {
     assertThrows[UnsupportedOperationException](join.getBuildKeys.clear())
   }
 
-  test("SemiJoin rejects empty, unequal, and null keys") {
+  test("SemiJoin accepts zero keys") {
+    val join = new SemiJoin(false, Seq.empty[Column].asJava, Seq.empty[Column].asJava)
+
+    assert(join.getOutputSchema(Seq(probeSchema, buildSchema).asJava) === probeSchema)
+  }
+
+  test("SemiJoin rejects unequal and null keys") {
     val invalidKeys = Table(
       ("probe", "build", "message"),
-      (Seq.empty[Column], Seq.empty[Column], "at least one key"),
       (Seq(column("id")), Seq(column("key"), column("key")), "1 probe key(s)"),
       (Seq(null.asInstanceOf[Column]), Seq(column("key")), "probe key is null"),
       (Seq(column("id")), Seq(null.asInstanceOf[Column]), "build key is null"))
@@ -153,7 +158,7 @@ class RelationalPlanSuite extends AnyFunSuite {
     }
   }
 
-  test("SemiJoin requires exact key data types") {
+  test("SemiJoin permits differing key data types") {
     val primitiveMismatch = new StructType().add("key", StringType.STRING)
     val nestedProbe = new StructType().add(
       "key",
@@ -169,10 +174,7 @@ class RelationalPlanSuite extends AnyFunSuite {
     forAll(cases) { (probe, build) =>
       val probeKey = if (probe eq probeSchema) column("id") else column("key")
       val join = new SemiJoin(false, Seq(probeKey).asJava, Seq(column("key")).asJava)
-      val error = intercept[IllegalArgumentException] {
-        join.getOutputSchema(Seq(probe, build).asJava)
-      }
-      assert(error.getMessage.contains("has probe type"))
+      assert(join.getOutputSchema(Seq(probe, build).asJava) === probe)
     }
   }
 
