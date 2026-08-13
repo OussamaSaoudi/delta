@@ -240,8 +240,8 @@ public interface Transaction {
   }
 
   /**
-   * Currently Kernel supports only metadata updates for variants (including shredded values). Block
-   * any physical data writes if variant exists in the schema
+   * Kernel supports reading physical Variant values but not writing them. Block physical data
+   * writes if Variant exists anywhere in the schema.
    */
   static void blockIfVariantDataTypeIsDefined(StructType tableSchema) {
     boolean variantFieldExists =

@@ -189,7 +189,15 @@ class ParquetSchemaUtils {
   }
 
   private static Type prunedType(Type type, DataType deltaType) {
-    if (type instanceof GroupType && deltaType instanceof StructType) {
+    if (deltaType instanceof VariantType) {
+      checkArgument(
+          type instanceof GroupType,
+          "Variant field `%s` must be a Parquet group, but found: %s",
+          type.getName(),
+          type);
+      validateUnshreddedVariant((GroupType) type, type.getName());
+      return type;
+    } else if (type instanceof GroupType && deltaType instanceof StructType) {
       GroupType groupType = (GroupType) type;
       StructType structType = (StructType) deltaType;
       return groupType.withNewFields(pruneFields(groupType, structType));
@@ -205,10 +213,53 @@ class ParquetSchemaUtils {
           listGroup.withNewFields(
               Collections.singletonList(prunedType(elementType, deltaArrayType.getElementType())));
       return arrayGroupType.withNewFields(Collections.singletonList(newListGroup));
-      // TODO: check if we need to fix map type.
+    } else if (type instanceof GroupType && deltaType instanceof MapType) {
+      GroupType mapGroup = (GroupType) type;
+      checkArgument(
+          mapGroup.getFieldCount() == 1,
+          "Expected exactly one repeated field in map `%s`, but found: %s",
+          type.getName(),
+          mapGroup);
+      GroupType keyValue = mapGroup.getType(0).asGroupType();
+      MapType mapType = (MapType) deltaType;
+      GroupType prunedKeyValue =
+          keyValue.withNewFields(
+              Arrays.asList(
+                  prunedType(keyValue.getType("key"), mapType.getKeyType()),
+                  prunedType(keyValue.getType("value"), mapType.getValueType())));
+      return mapGroup.withNewFields(Collections.singletonList(prunedKeyValue));
     } else {
       return type;
     }
+  }
+
+  static void validateUnshreddedVariant(GroupType parquetType, String fieldPath) {
+    checkArgument(
+        parquetType.getFieldCount() == 2,
+        "Variant field `%s` has an unsupported physical schema. Only unshredded Variant "
+            + "groups containing `value` and `metadata` are supported: %s",
+        fieldPath,
+        parquetType);
+    validateVariantBinaryField(parquetType, "value", fieldPath);
+    validateVariantBinaryField(parquetType, "metadata", fieldPath);
+  }
+
+  private static void validateVariantBinaryField(
+      GroupType parquetType, String childName, String fieldPath) {
+    checkArgument(
+        parquetType.containsField(childName),
+        "Variant field `%s` is missing required field `%s`",
+        fieldPath,
+        childName);
+    Type child = parquetType.getType(childName);
+    checkArgument(
+        child.isPrimitive()
+            && child.asPrimitiveType().getPrimitiveTypeName() == BINARY
+            && child.isRepetition(REQUIRED),
+        "Variant field `%s.%s` must be required binary, but found: %s",
+        fieldPath,
+        childName,
+        child);
   }
 
   /**

@@ -49,6 +49,9 @@ class ParquetColumnReaders {
       checkArgument(typeFromFile instanceof GroupType, "cannot be cast to GroupType");
       return new MapColumnReader(
           initialBatchSize, (MapType) typeFromClient, (GroupType) typeFromFile);
+    } else if (typeFromClient instanceof VariantType) {
+      checkArgument(typeFromFile instanceof GroupType, "cannot be cast to GroupType");
+      return new VariantColumnReader(initialBatchSize, (GroupType) typeFromFile);
     } else if (typeFromClient instanceof StringType
         || DataType.isTypeValueBinaryLike(typeFromClient)) {
       return new BinaryColumnReader(typeFromClient, initialBatchSize);
