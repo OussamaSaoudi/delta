@@ -310,6 +310,7 @@ class DefaultExpressionUtils {
       // some other value accessor. So the cache of one value is enough.
       private int lastLookupRowId = -1;
       private ColumnVector lastLookupVector = null;
+      private boolean closed;
 
       @Override
       public DataType getDataType() {
@@ -323,7 +324,10 @@ class DefaultExpressionUtils {
 
       @Override
       public void close() {
-        Utils.closeCloseables(vectors.toArray(new ColumnVector[0]));
+        if (!closed) {
+          closed = true;
+          Utils.closeCloseables(vectors.toArray(new ColumnVector[0]));
+        }
       }
 
       @Override

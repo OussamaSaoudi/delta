@@ -93,6 +93,20 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     }
   }
 
+  /** A coalesce whose children are transformed and evaluated only when execution reaches them. */
+  private static class DeferredCoalesceExpression extends ScalarExpression {
+    private final DataType outputType;
+
+    DeferredCoalesceExpression(List<Expression> children, DataType outputType) {
+      super("COALESCE", children);
+      this.outputType = requireNonNull(outputType, "outputType is null");
+    }
+
+    DataType getOutputType() {
+      return outputType;
+    }
+  }
+
   /**
    * Implementation of {@link ExpressionVisitor} to validate the given expression as follows.
    *
@@ -108,29 +122,40 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
    */
   private static class ExpressionTransformer extends ExpressionVisitor<ExpressionTransformResult> {
     private StructType inputDataSchema;
+    private DataType expectedType;
 
     ExpressionTransformer(StructType inputDataSchema) {
       this.inputDataSchema = requireNonNull(inputDataSchema, "inputDataSchema is null");
     }
 
     ExpressionTransformResult transform(Expression expression, DataType expectedType) {
-      if (expression instanceof StructExpression) {
-        return transformStruct((StructExpression) expression, expectedType);
+      DataType previousExpectedType = this.expectedType;
+      this.expectedType = expectedType;
+      try {
+        if (expression instanceof StructExpression) {
+          return transformStruct((StructExpression) expression, expectedType);
+        }
+        if (expression instanceof StructPatch) {
+          return transformStructPatch((StructPatch) expression, expectedType);
+        }
+        if (expression instanceof ParseJson) {
+          return transformParseJson((ParseJson) expression, expectedType);
+        }
+        if (expression instanceof MapToStruct) {
+          return transformMapToStruct((MapToStruct) expression, expectedType);
+        }
+        if (expression instanceof ScalarExpression
+            && ((ScalarExpression) expression).getName().equalsIgnoreCase("COALESCE")) {
+          return transformCoalesce((ScalarExpression) expression, expectedType);
+        }
+        return visit(expression);
+      } finally {
+        this.expectedType = previousExpectedType;
       }
-      if (expression instanceof StructPatch) {
-        return transformStructPatch((StructPatch) expression, expectedType);
-      }
-      if (expression instanceof ParseJson) {
-        return transformParseJson((ParseJson) expression, expectedType);
-      }
-      if (expression instanceof MapToStruct) {
-        return transformMapToStruct((MapToStruct) expression, expectedType);
-      }
-      if (expression instanceof ScalarExpression
-          && ((ScalarExpression) expression).getName().equalsIgnoreCase("COALESCE")) {
-        return transformCoalesce((ScalarExpression) expression, expectedType);
-      }
-      return visit(expression);
+    }
+
+    private ExpressionTransformResult transformChild(Expression expression) {
+      return transform(expression, null);
     }
 
     private ExpressionTransformResult transformMapToStruct(
@@ -151,7 +176,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
         }
       }
 
-      ExpressionTransformResult map = visit(mapToStruct.getMapExpression());
+      ExpressionTransformResult map = transformChild(mapToStruct.getMapExpression());
       if (!(map.outputType instanceof MapType)
           || !((MapType) map.outputType).getKeyType().equivalent(StringType.STRING)
           || !((MapType) map.outputType).getValueType().equivalent(StringType.STRING)) {
@@ -169,19 +194,12 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       if (coalesce.getChildren().isEmpty()) {
         throw unsupportedExpressionException(coalesce, "Coalesce requires at least one expression");
       }
-      List<ExpressionTransformResult> children =
-          coalesce.getChildren().stream()
-              .map(child -> transform(child, expectedType))
-              .collect(Collectors.toList());
-      long numDistinctTypes = children.stream().map(e -> e.outputType).distinct().count();
-      if (numDistinctTypes > 1) {
-        throw unsupportedExpressionException(
-            coalesce, "Coalesce is only supported for arguments of the same type");
-      }
+      DataType outputType =
+          expectedType == null
+              ? transformChild(coalesce.getChildren().get(0)).outputType
+              : expectedType;
       return new ExpressionTransformResult(
-          new ScalarExpression(
-              "COALESCE", children.stream().map(e -> e.expression).collect(Collectors.toList())),
-          children.get(0).outputType);
+          new DeferredCoalesceExpression(coalesce.getChildren(), outputType), outputType);
     }
 
     private ExpressionTransformResult transformParseJson(
@@ -194,7 +212,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
                 "ParseJson output schema %s does not match expected output type %s",
                 parseJson.getOutputSchema(), expectedType));
       }
-      ExpressionTransformResult json = visit(parseJson.getJsonExpression());
+      ExpressionTransformResult json = transformChild(parseJson.getJsonExpression());
       if (!(json.outputType instanceof StringType)) {
         throw unsupportedExpressionException(
             parseJson,
@@ -320,15 +338,15 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     ExpressionTransformResult visitAnd(And and) {
-      Predicate left = validateIsPredicate(and, visit(and.getLeft()));
-      Predicate right = validateIsPredicate(and, visit(and.getRight()));
+      Predicate left = validateIsPredicate(and, transformChild(and.getLeft()));
+      Predicate right = validateIsPredicate(and, transformChild(and.getRight()));
       return new ExpressionTransformResult(new And(left, right), BooleanType.BOOLEAN);
     }
 
     @Override
     ExpressionTransformResult visitOr(Or or) {
-      Predicate left = validateIsPredicate(or, visit(or.getLeft()));
-      Predicate right = validateIsPredicate(or, visit(or.getRight()));
+      Predicate left = validateIsPredicate(or, transformChild(or.getLeft()));
+      Predicate right = validateIsPredicate(or, transformChild(or.getRight()));
       return new ExpressionTransformResult(new Or(left, right), BooleanType.BOOLEAN);
     }
 
@@ -439,8 +457,8 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     ExpressionTransformResult visitBinaryPredicate(BinaryPredicate predicate) {
-      ExpressionTransformResult left = visit(predicate.getLeft());
-      ExpressionTransformResult right = visit(predicate.getRight());
+      ExpressionTransformResult left = transformChild(predicate.getLeft());
+      ExpressionTransformResult right = transformChild(predicate.getRight());
       requireExactType(predicate, left.outputType, right.outputType, "comparison operands");
       return new ExpressionTransformResult(
           new BinaryPredicate(predicate.getOperator(), left.expression, right.expression),
@@ -449,7 +467,8 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     ExpressionTransformResult visitPartitionValue(PartitionValueExpression partitionValue) {
-      ExpressionTransformResult serializedPartValueInput = visit(partitionValue.getInput());
+      ExpressionTransformResult serializedPartValueInput =
+          transformChild(partitionValue.getInput());
       checkArgument(
           serializedPartValueInput.outputType instanceof StringType,
           "%s: expected string input, but got %s",
@@ -469,8 +488,8 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     ExpressionTransformResult visitElementAt(ScalarExpression elementAt) {
-      ExpressionTransformResult transformedMapInput = visit(childAt(elementAt, 0));
-      ExpressionTransformResult transformedLookupKey = visit(childAt(elementAt, 1));
+      ExpressionTransformResult transformedMapInput = transformChild(childAt(elementAt, 0));
+      ExpressionTransformResult transformedLookupKey = transformChild(childAt(elementAt, 1));
 
       ScalarExpression transformedExpression =
           ElementAtEvaluator.validateAndTransform(
@@ -486,48 +505,35 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     ExpressionTransformResult visitNot(Predicate predicate) {
-      Predicate child = validateIsPredicate(predicate, visit(predicate.getChildren().get(0)));
+      Predicate child =
+          validateIsPredicate(predicate, transformChild(predicate.getChildren().get(0)));
       return new ExpressionTransformResult(
           new Predicate(predicate.getName(), child), BooleanType.BOOLEAN);
     }
 
     @Override
     ExpressionTransformResult visitIsNotNull(Predicate predicate) {
-      Expression child = visit(predicate.getChildren().get(0)).expression;
+      Expression child = transformChild(predicate.getChildren().get(0)).expression;
       return new ExpressionTransformResult(
           new Predicate(predicate.getName(), child), BooleanType.BOOLEAN);
     }
 
     @Override
     ExpressionTransformResult visitIsNull(Predicate predicate) {
-      Expression child = visit(getUnaryChild(predicate)).expression;
+      Expression child = transformChild(getUnaryChild(predicate)).expression;
       return new ExpressionTransformResult(
           new Predicate(predicate.getName(), child), BooleanType.BOOLEAN);
     }
 
     @Override
     ExpressionTransformResult visitCoalesce(ScalarExpression coalesce) {
-      List<ExpressionTransformResult> children =
-          coalesce.getChildren().stream().map(this::visit).collect(Collectors.toList());
-      if (children.isEmpty()) {
-        throw unsupportedExpressionException(coalesce, "Coalesce requires at least one expression");
-      }
-      // TODO support least-common-type resolution
-      long numDistinctTypes = children.stream().map(e -> e.outputType).distinct().count();
-      if (numDistinctTypes > 1) {
-        throw unsupportedExpressionException(
-            coalesce, "Coalesce is only supported for arguments of the same type");
-      }
-      return new ExpressionTransformResult(
-          new ScalarExpression(
-              "COALESCE", children.stream().map(e -> e.expression).collect(Collectors.toList())),
-          children.get(0).outputType);
+      return transformCoalesce(coalesce, expectedType);
     }
 
     @Override
     ExpressionTransformResult visitArithmetic(ScalarExpression arithmetic) {
       List<ExpressionTransformResult> children =
-          arithmetic.getChildren().stream().map(this::visit).collect(Collectors.toList());
+          arithmetic.getChildren().stream().map(this::transformChild).collect(Collectors.toList());
       String operation = arithmetic.getName();
       if (children.size() != 2) {
         throw unsupportedExpressionException(
@@ -566,7 +572,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     @Override
     ExpressionTransformResult visitTimeAdd(ScalarExpression timeAdd) {
       List<ExpressionTransformResult> children =
-          timeAdd.getChildren().stream().map(this::visit).collect(Collectors.toList());
+          timeAdd.getChildren().stream().map(this::transformChild).collect(Collectors.toList());
 
       if (children.size() != 2) {
         throw unsupportedExpressionException(
@@ -596,7 +602,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     @Override
     ExpressionTransformResult visitSubstring(ScalarExpression substring) {
       List<ExpressionTransformResult> children =
-          substring.getChildren().stream().map(this::visit).collect(toList());
+          substring.getChildren().stream().map(this::transformChild).collect(toList());
       ScalarExpression transformedExpression =
           SubstringEvaluator.validateAndTransform(
               substring,
@@ -608,7 +614,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     @Override
     ExpressionTransformResult visitLike(final Predicate like) {
       List<ExpressionTransformResult> children =
-          like.getChildren().stream().map(this::visit).collect(toList());
+          like.getChildren().stream().map(this::transformChild).collect(toList());
       Predicate transformedExpression =
           LikeExpressionEvaluator.validateAndTransform(
               like,
@@ -621,7 +627,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     @Override
     ExpressionTransformResult visitStartsWith(Predicate startsWith) {
       List<ExpressionTransformResult> children =
-          startsWith.getChildren().stream().map(this::visit).collect(toList());
+          startsWith.getChildren().stream().map(this::transformChild).collect(toList());
       Predicate transformedExpression =
           StartsWithExpressionEvaluator.validateAndTransform(
               startsWith,
@@ -632,9 +638,9 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     ExpressionTransformResult visitIn(In in) {
-      ExpressionTransformResult visitedValue = visit(in.getValueExpression());
+      ExpressionTransformResult visitedValue = transformChild(in.getValueExpression());
       List<ExpressionTransformResult> visitedInList =
-          in.getInListElements().stream().map(this::visit).collect(toList());
+          in.getInListElements().stream().map(this::transformChild).collect(toList());
       In transformedExpression =
           InExpressionEvaluator.validateAndTransform(
               in,
@@ -648,7 +654,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     @Override
     ExpressionTransformResult visitStGeometryBoxesIntersectOnStats(Predicate predicate) {
       List<ExpressionTransformResult> children =
-          predicate.getChildren().stream().map(this::visit).collect(Collectors.toList());
+          predicate.getChildren().stream().map(this::transformChild).collect(Collectors.toList());
       checkArgument(
           children.size() == 4,
           "ST_GEOMETRY_BOXES_INTERSECT_ON_STATS expects 4 children but got %d",
@@ -688,8 +694,8 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     }
 
     private Expression transformBinaryComparator(Predicate predicate) {
-      ExpressionTransformResult leftResult = visit(getLeft(predicate));
-      ExpressionTransformResult rightResult = visit(getRight(predicate));
+      ExpressionTransformResult leftResult = transformChild(getLeft(predicate));
+      ExpressionTransformResult rightResult = transformChild(getRight(predicate));
       Expression left = leftResult.expression;
       Expression right = rightResult.expression;
 
@@ -1078,18 +1084,61 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     ColumnVector visitCoalesce(ScalarExpression coalesce) {
-      List<ColumnVector> childResults =
-          coalesce.getChildren().stream().map(this::visit).collect(Collectors.toList());
-      return DefaultExpressionUtils.combinationVector(
-          childResults,
-          rowId -> {
-            for (int idx = 0; idx < childResults.size(); idx++) {
-              if (!childResults.get(idx).isNullAt(rowId)) {
-                return idx;
-              }
+      checkArgument(
+          coalesce instanceof DeferredCoalesceExpression,
+          "Coalesce must be transformed before evaluation");
+      DataType outputType = ((DeferredCoalesceExpression) coalesce).getOutputType();
+      List<ColumnVector> childResults = new ArrayList<>();
+      boolean[] unresolvedRows = new boolean[input.getSize()];
+      Arrays.fill(unresolvedRows, true);
+      try {
+        for (Expression child : coalesce.getChildren()) {
+          ExpressionTransformResult transformed =
+              new ExpressionTransformer(input.getSchema()).transform(child, outputType);
+          if (!transformed.outputType.equals(outputType)) {
+            throw unsupportedExpressionException(
+                coalesce, "Coalesce is only supported for arguments of the same type");
+          }
+          ColumnVector result = eval(transformed.expression, outputType);
+          childResults.add(result);
+          checkArgument(
+              result.getDataType().equals(outputType),
+              "Coalesce input %s has type %s, expected %s",
+              childResults.size() - 1,
+              result.getDataType(),
+              outputType);
+          checkArgument(
+              result.getSize() == input.getSize(),
+              "Coalesce input %s has size %s, expected %s",
+              childResults.size() - 1,
+              result.getSize(),
+              input.getSize());
+
+          boolean hasUnresolvedRows = false;
+          for (int rowId = 0; rowId < unresolvedRows.length; rowId++) {
+            if (unresolvedRows[rowId] && !result.isNullAt(rowId)) {
+              unresolvedRows[rowId] = false;
             }
-            return 0; // If all are null then any idx suffices
-          });
+            hasUnresolvedRows |= unresolvedRows[rowId];
+          }
+          if (!hasUnresolvedRows) {
+            break;
+          }
+        }
+        return DefaultExpressionUtils.combinationVector(
+            childResults,
+            rowId -> {
+              for (int idx = 0; idx < childResults.size(); idx++) {
+                if (!childResults.get(idx).isNullAt(rowId)) {
+                  return idx;
+                }
+              }
+              return 0;
+            });
+      } catch (RuntimeException failure) {
+        Utils.closeCloseablesAndAddSuppressed(failure, childResults.toArray(new ColumnVector[0]));
+        throw failure;
+      }
     }
 
     @Override
