@@ -20,14 +20,13 @@ import java.util.Optional
 
 import scala.jdk.CollectionConverters._
 
-import io.delta.kernel.data.{ColumnVector, FilteredColumnarBatch, Row}
-import io.delta.kernel.defaults.internal.data.vector.DefaultBooleanVector
+import io.delta.kernel.data.{FilteredColumnarBatch, Row}
 import io.delta.kernel.expressions.Column
-import io.delta.kernel.internal.data.GenericRow
-import io.delta.kernel.internal.plans.{SemiJoin, Values}
+import io.delta.kernel.internal.plans.SemiJoin
 import io.delta.kernel.types.{BinaryType, LongType, StringType, StructType}
 import io.delta.kernel.utils.CloseableIterator
 
+import PlanTestUtils._
 import org.scalatest.funsuite.AnyFunSuite
 
 class SemiJoinExecutorSuite extends AnyFunSuite {
@@ -39,16 +38,13 @@ class SemiJoinExecutorSuite extends AnyFunSuite {
     .add("build_tag", StringType.STRING)
 
   private def probeRow(id: java.lang.Long, tag: String): Row =
-    GenericRow.fromValues(probeSchema, Seq(id, tag).asJava)
+    row(probeSchema, id, tag)
 
   private def buildRow(id: java.lang.Long, tag: String): Row =
-    GenericRow.fromValues(buildSchema, Seq(id, tag).asJava)
+    row(buildSchema, id, tag)
 
-  private def batch(schema: StructType, rows: Seq[Row]): FilteredColumnarBatch = {
-    val iterator = ValuesExecutor.execute(new Values(schema, rows.asJava))
-    try iterator.next()
-    finally iterator.close()
-  }
+  private def batch(schema: StructType, rows: Seq[Row]): FilteredColumnarBatch =
+    PlanTestUtils.batch(schema, rows)
 
   private def probeBatch(rows: (java.lang.Long, String)*): FilteredColumnarBatch =
     batch(probeSchema, rows.map { case (id, tag) => probeRow(id, tag) })
@@ -100,14 +96,12 @@ class SemiJoinExecutorSuite extends AnyFunSuite {
       LongJ.valueOf(1) -> "one",
       LongJ.valueOf(2) -> "two",
       LongJ.valueOf(3) -> "three")
-    val selectedBuild = new FilteredColumnarBatch(
-      rawBuild.getData,
-      Optional.of(booleanVector(true, false, true)))
+    val selectedBuild = selectedBatch(rawBuild.getData, true, false, true)
     val first = probeBatch(LongJ.valueOf(1) -> "one", LongJ.valueOf(2) -> "two")
     val rawSecond = probeBatch(LongJ.valueOf(3) -> "three", LongJ.valueOf(1) -> "one")
-    val second = new FilteredColumnarBatch(
+    val second = selectedBatch(
       rawSecond.getData,
-      Optional.of(booleanVector(false, true)),
+      Seq(false, true).map(Boolean.box),
       "/table/probe.parquet",
       1)
     val output = join(
@@ -137,7 +131,7 @@ class SemiJoinExecutorSuite extends AnyFunSuite {
       val output = join(
         inverted,
         new TrackingIterator(Seq(probeBatch(LongJ.valueOf(1) -> "one"))),
-        new TrackingIterator(Seq.empty))
+        new TrackingIterator[FilteredColumnarBatch](Seq.empty))
       try assert(selected(output.next()) === expected)
       finally output.close()
     }
@@ -147,7 +141,7 @@ class SemiJoinExecutorSuite extends AnyFunSuite {
     val probeBinarySchema = new StructType().add("key", BinaryType.BINARY)
     val buildBinarySchema = new StructType().add("other", BinaryType.BINARY)
     def binaryBatch(schema: StructType, values: Seq[Array[Byte]]) =
-      batch(schema, values.map(value => GenericRow.fromValues(schema, Seq(value).asJava)))
+      batch(schema, values.map(value => row(schema, value)))
     val operator = new SemiJoin(
       false,
       Seq(new Column("key")).asJava,
@@ -186,7 +180,9 @@ class SemiJoinExecutorSuite extends AnyFunSuite {
   test("SemiJoin closes both inputs when build iteration fails and preserves the failure") {
     val failure = new IllegalStateException("build failed")
     val probe = new TrackingIterator(Seq(probeBatch(LongJ.valueOf(1) -> "one")))
-    val build = new TrackingIterator(Seq.empty, Some(failure))
+    val build = new TrackingIterator[FilteredColumnarBatch](
+      Seq.empty,
+      hasNextFailure = Some(failure))
 
     val thrown = intercept[IllegalStateException] {
       join(false, probe, build)
@@ -234,7 +230,7 @@ class SemiJoinExecutorSuite extends AnyFunSuite {
     val wrongSchema = new StructType().add("wrong", LongType.LONG)
     val wrongBatch = batch(
       wrongSchema,
-      Seq(GenericRow.fromValues(wrongSchema, Seq(LongJ.valueOf(1)).asJava)))
+      Seq(row(wrongSchema, LongJ.valueOf(1))))
     val probe = new TrackingIterator(Seq(wrongBatch))
     val output = join(
       false,
@@ -251,41 +247,6 @@ class SemiJoinExecutorSuite extends AnyFunSuite {
   }
 
   private def selected(batch: FilteredColumnarBatch): Seq[(Long, String)] = {
-    val rows = batch.getRows
-    try rows.asScala.map(row => row.getLong(0) -> row.getString(1)).toSeq
-    finally rows.close()
-  }
-
-  private def booleanVector(values: Boolean*): ColumnVector =
-    new DefaultBooleanVector(values.size, Optional.empty(), values.toArray)
-
-  private class TrackingIterator(
-      batches: Seq[FilteredColumnarBatch],
-      failure: Option[RuntimeException] = None,
-      closeFailure: Option[RuntimeException] = None)
-      extends CloseableIterator[FilteredColumnarBatch] {
-    private var index = 0
-    var hasNextCalls = 0
-    var nextCalls = 0
-    var closeCalls = 0
-
-    override def hasNext: Boolean = {
-      hasNextCalls += 1
-      failure.foreach(error => throw error)
-      index < batches.size
-    }
-
-    override def next(): FilteredColumnarBatch = {
-      nextCalls += 1
-      if (index >= batches.size) throw new NoSuchElementException
-      val result = batches(index)
-      index += 1
-      result
-    }
-
-    override def close(): Unit = {
-      closeCalls += 1
-      closeFailure.foreach(error => throw error)
-    }
+    rows(batch).map(row => row.getLong(0) -> row.getString(1))
   }
 }

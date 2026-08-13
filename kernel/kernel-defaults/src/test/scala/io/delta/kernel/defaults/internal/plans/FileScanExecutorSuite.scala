@@ -25,16 +25,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 import scala.collection.mutable.ArrayBuffer
 import scala.jdk.CollectionConverters._
 
-import io.delta.kernel.data.{ColumnarBatch, FilteredColumnarBatch, Row}
-import io.delta.kernel.defaults.internal.data.DefaultRowBasedColumnarBatch
+import io.delta.kernel.data.{ColumnarBatch, FilteredColumnarBatch}
 import io.delta.kernel.engine.{FileReadResult, JsonHandler, ParquetHandler}
 import io.delta.kernel.expressions.Predicate
-import io.delta.kernel.internal.data.GenericRow
 import io.delta.kernel.internal.plans.{FileScan, ScanFile, ScanJson, ScanParquet}
 import io.delta.kernel.test.{BaseMockJsonHandler, BaseMockParquetHandler, MockEngineUtils}
 import io.delta.kernel.types._
 import io.delta.kernel.utils.{CloseableIterator, FileStatus}
 
+import PlanTestUtils._
 import org.scalatest.funsuite.AnyFunSuite
 
 class FileScanExecutorSuite extends AnyFunSuite with MockEngineUtils {
@@ -45,25 +44,17 @@ class FileScanExecutorSuite extends AnyFunSuite with MockEngineUtils {
   private val constantsSchema = new StructType().add("part", StringType.STRING, false)
 
   private def batch(ids: Long*): ColumnarBatch =
-    new DefaultRowBasedColumnarBatch(
+    columnarBatch(
       readSchema,
-      ids.map[Row](id =>
-        GenericRow.fromValues(readSchema, Seq(LongJ.valueOf(id)).asJava)).asJava)
+      ids.map(id => row(readSchema, LongJ.valueOf(id))))
 
   private def scanFile(path: String, part: String = "a"): ScanFile =
     new ScanFile(
       FileStatus.of(path, 10, 20),
-      GenericRow.fromValues(constantsSchema, Seq(part).asJava))
+      row(constantsSchema, part))
 
   private def plainFile(path: String): ScanFile =
     new ScanFile(FileStatus.of(path, 10, 20))
-
-  private def rows(batches: Seq[FilteredColumnarBatch]): Seq[Row] =
-    batches.flatMap { batch =>
-      val iterator = batch.getRows
-      try iterator.asScala.toSeq
-      finally iterator.close()
-    }
 
   test("Parquet submits unique files together and preserves native batches") {
     val firstFile = plainFile("file:///table/first")
@@ -456,28 +447,6 @@ class FileScanExecutorSuite extends AnyFunSuite with MockEngineUtils {
       readers += reader
       reader
     }
-  }
-
-  private class TrackingIterator[T](values: Seq[T]) extends CloseableIterator[T] {
-    private var index = 0
-    var hasNextCalls = 0
-    var closeCalls = 0
-
-    override def hasNext: Boolean = {
-      hasNextCalls += 1
-      index < values.size
-    }
-
-    override def next(): T = {
-      if (index >= values.size) {
-        throw new NoSuchElementException
-      }
-      val value = values(index)
-      index += 1
-      value
-    }
-
-    override def close(): Unit = closeCalls += 1
   }
 
   private class BlockingIterator[T](

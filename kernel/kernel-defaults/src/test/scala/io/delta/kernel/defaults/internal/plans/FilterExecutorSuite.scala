@@ -20,14 +20,13 @@ import java.util.Optional
 
 import scala.jdk.CollectionConverters._
 
-import io.delta.kernel.data.{ColumnVector, FilteredColumnarBatch, Row}
-import io.delta.kernel.defaults.internal.data.vector.DefaultBooleanVector
+import io.delta.kernel.data.FilteredColumnarBatch
 import io.delta.kernel.expressions.{Column, Expression, Literal, Predicate, ScalarExpression}
-import io.delta.kernel.internal.data.GenericRow
-import io.delta.kernel.internal.plans.{Filter, Values}
+import io.delta.kernel.internal.plans.Filter
 import io.delta.kernel.types.{LongType, StringType, StructType}
 import io.delta.kernel.utils.CloseableIterator
 
+import PlanTestUtils._
 import org.scalatest.funsuite.AnyFunSuite
 
 class FilterExecutorSuite extends AnyFunSuite {
@@ -35,15 +34,8 @@ class FilterExecutorSuite extends AnyFunSuite {
     .add("id", LongType.LONG)
     .add("label", StringType.STRING)
 
-  private def row(id: java.lang.Long, label: String): Row =
-    GenericRow.fromValues(schema, Seq(id, label).asJava)
-
-  private def batch(rows: (java.lang.Long, String)*): FilteredColumnarBatch = {
-    val values = new Values(schema, rows.map { case (id, label) => row(id, label) }.asJava)
-    val iterator = ValuesExecutor.execute(values)
-    try iterator.next()
-    finally iterator.close()
-  }
+  private def batch(rows: (java.lang.Long, String)*): FilteredColumnarBatch =
+    PlanTestUtils.batch(schema, rows.map { case (id, label) => row(schema, id, label) })
 
   private def column(name: String): Column = new Column(name)
 
@@ -56,9 +48,7 @@ class FilterExecutorSuite extends AnyFunSuite {
     FilterExecutor.execute(new Filter(predicate), schema, input)
 
   private def selectedIds(batch: FilteredColumnarBatch): Seq[Long] = {
-    val rows = batch.getRows
-    try rows.asScala.map(_.getLong(0)).toSeq
-    finally rows.close()
+    rows(batch).map(_.getLong(0))
   }
 
   test("Filter evaluates expressions with SQL null semantics without copying batch data") {
@@ -91,8 +81,7 @@ class FilterExecutorSuite extends AnyFunSuite {
       LongJ.valueOf(3) -> "three",
       LongJ.valueOf(5) -> "five",
       LongJ.valueOf(7) -> "seven")
-    val existing = booleanVector(false, true, null, true)
-    val inputBatch = new FilteredColumnarBatch(data.getData, Optional.of(existing))
+    val inputBatch = selectedBatch(data.getData, false, true, null, true)
     val output = filter(
       greaterThan(column("id"), Literal.ofLong(4)),
       new TrackingIterator(Seq(inputBatch)))
@@ -106,9 +95,9 @@ class FilterExecutorSuite extends AnyFunSuite {
 
   test("Filter preserves file metadata and invalidates a stale selected-row count") {
     val data = batch(LongJ.valueOf(1) -> "one", LongJ.valueOf(2) -> "two")
-    val inputBatch = new FilteredColumnarBatch(
+    val inputBatch = selectedBatch(
       data.getData,
-      Optional.of(booleanVector(true, true)),
+      Seq(true, true).map(Boolean.box),
       "/table/part-000.parquet",
       2)
     val output = filter(
@@ -161,7 +150,7 @@ class FilterExecutorSuite extends AnyFunSuite {
   }
 
   test("Filter preserves an empty input stream") {
-    val input = new TrackingIterator(Seq.empty)
+    val input = new TrackingIterator[FilteredColumnarBatch](Seq.empty)
     val output = filter(new Predicate("IS_NOT_NULL", column("id")), input)
 
     try assert(!output.hasNext)
@@ -197,11 +186,9 @@ class FilterExecutorSuite extends AnyFunSuite {
 
   test("callers can close Filter input after evaluation fails") {
     val wrongSchema = new StructType().add("other", LongType.LONG)
-    val wrongRow = GenericRow.fromValues(wrongSchema, Seq(LongJ.valueOf(1)).asJava)
-    val wrongIterator = ValuesExecutor.execute(new Values(wrongSchema, Seq(wrongRow).asJava))
-    val wrongBatch =
-      try wrongIterator.next()
-      finally wrongIterator.close()
+    val wrongBatch = PlanTestUtils.batch(
+      wrongSchema,
+      Seq(row(wrongSchema, LongJ.valueOf(1))))
     val input = new TrackingIterator(Seq(wrongBatch))
     val output = filter(new Predicate("IS_NOT_NULL", column("id")), input)
 
@@ -215,7 +202,7 @@ class FilterExecutorSuite extends AnyFunSuite {
   }
 
   test("Filter rejects a null batch lazily and remains closeable") {
-    val input = new TrackingIterator(Seq(null))
+    val input = new TrackingIterator[FilteredColumnarBatch](Seq(null))
     val output = filter(new Predicate("IS_NOT_NULL", column("id")), input)
 
     val error = intercept[NullPointerException] {
@@ -227,12 +214,6 @@ class FilterExecutorSuite extends AnyFunSuite {
     assert(input.closeCalls === 1)
   }
 
-  private def booleanVector(values: java.lang.Boolean*): ColumnVector = {
-    val nulls = values.map(_ == null).toArray
-    val booleans = values.map(value => value != null && value.booleanValue()).toArray
-    new DefaultBooleanVector(values.size, Optional.of(nulls), booleans)
-  }
-
   private def selection(batch: FilteredColumnarBatch): Seq[Boolean] = {
     val vector = batch.getSelectionVector.get()
     (0 until vector.getSize).map { rowId =>
@@ -240,28 +221,4 @@ class FilterExecutorSuite extends AnyFunSuite {
     }
   }
 
-  private class TrackingIterator(batches: Seq[FilteredColumnarBatch])
-      extends CloseableIterator[FilteredColumnarBatch] {
-    private var index = 0
-    var hasNextCalls = 0
-    var nextCalls = 0
-    var closeCalls = 0
-
-    override def hasNext: Boolean = {
-      hasNextCalls += 1
-      index < batches.size
-    }
-
-    override def next(): FilteredColumnarBatch = {
-      nextCalls += 1
-      if (index >= batches.size) {
-        throw new NoSuchElementException
-      }
-      val result = batches(index)
-      index += 1
-      result
-    }
-
-    override def close(): Unit = closeCalls += 1
-  }
 }

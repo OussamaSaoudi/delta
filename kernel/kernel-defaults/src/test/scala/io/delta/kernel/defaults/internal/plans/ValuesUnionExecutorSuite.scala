@@ -20,12 +20,12 @@ import java.util
 
 import scala.jdk.CollectionConverters._
 
-import io.delta.kernel.data.{FilteredColumnarBatch, Row}
-import io.delta.kernel.internal.data.GenericRow
+import io.delta.kernel.data.FilteredColumnarBatch
 import io.delta.kernel.internal.plans.Values
 import io.delta.kernel.types.{LongType, StringType, StructType}
 import io.delta.kernel.utils.CloseableIterator
 
+import PlanTestUtils._
 import org.scalatest.funsuite.AnyFunSuite
 
 class ValuesUnionExecutorSuite extends AnyFunSuite {
@@ -35,11 +35,10 @@ class ValuesUnionExecutorSuite extends AnyFunSuite {
     .add("id", LongType.LONG, false)
     .add("label", StringType.STRING)
 
-  private def row(id: Long, label: String): Row =
-    GenericRow.fromValues(schema, Seq(LongJ.valueOf(id), label).asJava)
-
   private def values(rows: (Long, String)*): Values =
-    new Values(schema, rows.map { case (id, label) => row(id, label) }.asJava)
+    new Values(
+      schema,
+      rows.map { case (id, label) => row(schema, LongJ.valueOf(id), label) }.asJava)
 
   private def batch(ids: Long*): FilteredColumnarBatch = {
     val iterator = ValuesExecutor.execute(values(ids.map(id => id -> s"value-$id"): _*))
@@ -48,9 +47,7 @@ class ValuesUnionExecutorSuite extends AnyFunSuite {
   }
 
   private def batchIds(batch: FilteredColumnarBatch): Seq[Long] = {
-    val rows = batch.getRows
-    try rows.asScala.map(_.getLong(0)).toSeq
-    finally rows.close()
+    rows(batch).map(_.getLong(0))
   }
 
   private def unionAll(inputs: BatchIterator*): BatchIterator =
@@ -132,8 +129,10 @@ class ValuesUnionExecutorSuite extends AnyFunSuite {
 
   test("callers can close all UnionAll children after an iteration failure") {
     val failure = new RuntimeException("boom")
-    val first = new TrackingIterator(Seq.empty)
-    val failing = new TrackingIterator(Seq.empty, Some(failure))
+    val first = new TrackingIterator[FilteredColumnarBatch](Seq.empty)
+    val failing = new TrackingIterator[FilteredColumnarBatch](
+      Seq.empty,
+      hasNextFailure = Some(failure))
     val unopened = new TrackingIterator(Seq(batch(3L)))
     val union = unionAll(first, failing, unopened)
 
@@ -149,9 +148,15 @@ class ValuesUnionExecutorSuite extends AnyFunSuite {
 
   test("UnionAll attempts every child close when closes fail") {
     val children = Seq(
-      new TrackingIterator(Seq.empty, closeFailure = true),
-      new TrackingIterator(Seq.empty, closeFailure = true),
-      new TrackingIterator(Seq.empty, closeFailure = true))
+      new TrackingIterator[FilteredColumnarBatch](
+        Seq.empty,
+        closeFailure = Some(new RuntimeException("close failed"))),
+      new TrackingIterator[FilteredColumnarBatch](
+        Seq.empty,
+        closeFailure = Some(new RuntimeException("close failed"))),
+      new TrackingIterator[FilteredColumnarBatch](
+        Seq.empty,
+        closeFailure = Some(new RuntimeException("close failed"))))
     val union = unionAll(children: _*)
 
     assertThrows[RuntimeException](union.close())
@@ -175,35 +180,4 @@ class ValuesUnionExecutorSuite extends AnyFunSuite {
     assert(retained.closeCalls === 0)
   }
 
-  private class TrackingIterator(
-      batches: Seq[FilteredColumnarBatch],
-      failure: Option[RuntimeException] = None,
-      closeFailure: Boolean = false)
-      extends CloseableIterator[FilteredColumnarBatch] {
-    private var index = 0
-    var hasNextCalls = 0
-    var closeCalls = 0
-
-    override def hasNext: Boolean = {
-      hasNextCalls += 1
-      failure.foreach(throw _)
-      index < batches.size
-    }
-
-    override def next(): FilteredColumnarBatch = {
-      if (index >= batches.size) {
-        throw new NoSuchElementException
-      }
-      val result = batches(index)
-      index += 1
-      result
-    }
-
-    override def close(): Unit = {
-      closeCalls += 1
-      if (closeFailure) {
-        throw new RuntimeException("close failed")
-      }
-    }
-  }
 }

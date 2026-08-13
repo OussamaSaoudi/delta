@@ -16,56 +16,30 @@
 package io.delta.kernel.defaults.internal.plans
 
 import java.lang.{Float => FloatJ, Integer => IntegerJ}
-import java.util.Optional
 
 import scala.jdk.CollectionConverters._
 
-import io.delta.kernel.data.{ColumnVector, FilteredColumnarBatch, Row}
-import io.delta.kernel.defaults.internal.data.DefaultRowBasedColumnarBatch
-import io.delta.kernel.defaults.internal.data.vector.DefaultBooleanVector
+import io.delta.kernel.data.{FilteredColumnarBatch, Row}
 import io.delta.kernel.defaults.internal.expressions.DefaultValueComparator
 import io.delta.kernel.expressions.Column
-import io.delta.kernel.internal.data.GenericRow
 import io.delta.kernel.internal.plans.{Agg, Aggregate}
-import io.delta.kernel.internal.util.{Utils, VectorUtils}
+import io.delta.kernel.internal.util.VectorUtils
 import io.delta.kernel.types._
-import io.delta.kernel.utils.CloseableIterator
 
+import PlanTestUtils._
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.prop.TableDrivenPropertyChecks.{forAll, Table}
 
 class AggregateExecutorSuite extends AnyFunSuite {
   private def column(parts: String*): Column = new Column(parts.toArray)
 
-  private def row(schema: StructType, values: AnyRef*): Row =
-    GenericRow.fromValues(schema, values.asJava)
-
-  private def batch(
-      schema: StructType,
-      rows: Seq[Row],
-      selected: Option[Seq[java.lang.Boolean]] = None): FilteredColumnarBatch = {
-    val selection = selected.map { values =>
-      val nulls = values.map(_ == null).toArray
-      val booleans = values.map(value => value != null && value.booleanValue()).toArray
-      new DefaultBooleanVector(values.size, Optional.of(nulls), booleans): ColumnVector
-    }
-    new FilteredColumnarBatch(
-      new DefaultRowBasedColumnarBatch(schema, rows.asJava),
-      Optional.ofNullable(selection.orNull))
-  }
-
   private def execute(
       aggregate: Aggregate,
       inputSchema: StructType,
       batches: Seq[FilteredColumnarBatch]): Seq[Row] = {
-    val input = Utils.toCloseableIterator(batches.iterator.asJava)
+    val input = new TrackingIterator(batches)
     val output = AggregateExecutor.execute(aggregate, inputSchema, input)
-    try {
-      assert(output.hasNext)
-      val rows = output.next().getRows
-      try rows.asScala.toSeq
-      finally rows.close()
-    } finally output.close()
+    rows(output)
   }
 
   test("grouped aggregates consume selected rows across batches") {
@@ -208,7 +182,7 @@ class AggregateExecutorSuite extends AnyFunSuite {
       Aggregate.ungrouped(schema).min(column("items")).build())
 
     forAll(cases) { aggregate =>
-      val input = new TrackingIterator(Seq.empty)
+      val input = new TrackingIterator[FilteredColumnarBatch](Seq.empty)
       assertThrows[UnsupportedOperationException] {
         AggregateExecutor.execute(aggregate, schema, input)
       }
@@ -254,23 +228,4 @@ class AggregateExecutorSuite extends AnyFunSuite {
     }
   }
 
-  private class TrackingIterator(batches: Seq[FilteredColumnarBatch])
-      extends CloseableIterator[FilteredColumnarBatch] {
-    private var index = 0
-    var hasNextCalls = 0
-    var closeCalls = 0
-
-    override def hasNext: Boolean = {
-      hasNextCalls += 1
-      index < batches.size
-    }
-
-    override def next(): FilteredColumnarBatch = {
-      val result = batches(index)
-      index += 1
-      result
-    }
-
-    override def close(): Unit = closeCalls += 1
-  }
 }
