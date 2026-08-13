@@ -107,6 +107,20 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     }
   }
 
+  /** An ARRAY whose children have been transformed against its exact output element type. */
+  private static class ResolvedArrayExpression extends ScalarExpression {
+    private final ArrayType outputType;
+
+    ResolvedArrayExpression(List<Expression> children, ArrayType outputType) {
+      super("ARRAY", children);
+      this.outputType = requireNonNull(outputType, "outputType is null");
+    }
+
+    ArrayType getOutputType() {
+      return outputType;
+    }
+  }
+
   /**
    * Implementation of {@link ExpressionVisitor} to validate the given expression as follows.
    *
@@ -528,6 +542,51 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     @Override
     ExpressionTransformResult visitCoalesce(ScalarExpression coalesce) {
       return transformCoalesce(coalesce, expectedType);
+    }
+
+    @Override
+    ExpressionTransformResult visitArray(ScalarExpression array) {
+      if (array.getChildren().isEmpty()) {
+        throw unsupportedExpressionException(
+            array, "Array expression requires at least one element");
+      }
+      if (expectedType != null && !(expectedType instanceof ArrayType)) {
+        throw unsupportedExpressionException(
+            array, "Array expression requires an ArrayType result type, but got " + expectedType);
+      }
+
+      ArrayType requestedType = (ArrayType) expectedType;
+      DataType requestedElementType = requestedType == null ? null : requestedType.getElementType();
+      List<ExpressionTransformResult> children =
+          array.getChildren().stream()
+              .map(child -> transform(child, requestedElementType))
+              .collect(toList());
+      DataType elementType = children.get(0).outputType;
+      for (int index = 1; index < children.size(); index++) {
+        DataType childType = children.get(index).outputType;
+        if (!elementType.equals(childType)) {
+          throw unsupportedExpressionException(
+              array,
+              format(
+                  "Array expression inputs must share the same element type; input 0 has %s "
+                      + "but input %s has %s",
+                  elementType, index, childType));
+        }
+      }
+      if (requestedElementType != null && !requestedElementType.equals(elementType)) {
+        throw unsupportedExpressionException(
+            array,
+            format(
+                "Array expression element type %s does not match expected type %s",
+                elementType, requestedElementType));
+      }
+
+      ArrayType outputType =
+          requestedType == null ? new ArrayType(elementType, true) : requestedType;
+      return new ExpressionTransformResult(
+          new ResolvedArrayExpression(
+              children.stream().map(child -> child.expression).collect(toList()), outputType),
+          outputType);
     }
 
     @Override
@@ -1137,6 +1196,24 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
             });
       } catch (RuntimeException failure) {
         Utils.closeCloseablesAndAddSuppressed(failure, childResults.toArray(new ColumnVector[0]));
+        throw failure;
+      }
+    }
+
+    @Override
+    ColumnVector visitArray(ScalarExpression array) {
+      checkArgument(
+          array instanceof ResolvedArrayExpression,
+          "Array expression must be transformed before evaluation");
+      ArrayType outputType = ((ResolvedArrayExpression) array).getOutputType();
+      List<ColumnVector> children = new ArrayList<>();
+      try {
+        for (Expression child : array.getChildren()) {
+          children.add(eval(child, outputType.getElementType()));
+        }
+        return ArrayExpressionEvaluator.eval(array, children, outputType, input.getSize());
+      } catch (RuntimeException failure) {
+        Utils.closeCloseablesAndAddSuppressed(failure, children.toArray(new ColumnVector[0]));
         throw failure;
       }
     }

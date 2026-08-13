@@ -78,6 +78,8 @@ abstract class ExpressionVisitor<R> {
 
   abstract R visitCoalesce(ScalarExpression ifNull);
 
+  abstract R visitArray(ScalarExpression array);
+
   abstract R visitTimeAdd(ScalarExpression timeAdd);
 
   abstract R visitSubstring(ScalarExpression subString);
@@ -158,6 +160,8 @@ abstract class ExpressionVisitor<R> {
         return visitIsNull(createPredicate(name, children, collationIdentifier));
       case "COALESCE":
         return visitCoalesce(expression);
+      case "ARRAY":
+        return visitArray(expression);
       case "ADD":
       case "SUBTRACT":
       case "MULTIPLY":

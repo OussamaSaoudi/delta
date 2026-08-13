@@ -44,6 +44,13 @@ import java.util.stream.Collectors;
  *             argument. If all arguments are null, returns null.
  *         <li>Since version: 3.1.0
  *       </ul>
+ *   <li>Name: <code>ARRAY</code>
+ *       <ul>
+ *         <li>Semantic: <code>ARRAY(expr1, ..., exprN)</code>. Evaluate every argument and return
+ *             one array per input row in argument order. At least one argument is required, and all
+ *             arguments must have exactly the same data type.
+ *         <li>Since version: 4.1.0
+ *       </ul>
  *   <li>Name: <code>ADD</code>
  *       <ul>
  *         <li>Semantic: <code>ADD(expr1, expr2)</code>. Return the sum of two numeric expressions.
