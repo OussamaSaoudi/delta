@@ -110,17 +110,24 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     }
 
     ExpressionTransformResult transform(Expression expression, DataType expectedType) {
-      if (!(expression instanceof StructExpression)) {
-        return visit(expression);
+      if (expression instanceof StructExpression) {
+        return transformStruct((StructExpression) expression, expectedType);
       }
+      if (expression instanceof StructPatch) {
+        return transformStructPatch((StructPatch) expression, expectedType);
+      }
+      return visit(expression);
+    }
+
+    private ExpressionTransformResult transformStruct(
+        StructExpression struct, DataType expectedType) {
       if (!(expectedType instanceof StructType)) {
         throw unsupportedExpressionException(
-            expression,
+            struct,
             String.format(
                 "Struct expression expects a StructType output, but got %s", expectedType));
       }
 
-      StructExpression struct = (StructExpression) expression;
       StructType structType = (StructType) expectedType;
       if (struct.getFieldExpressions().size() != structType.length()) {
         throw unsupportedExpressionException(
@@ -163,6 +170,67 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
               .map(value -> new StructExpression(fields, value))
               .orElseGet(() -> new StructExpression(fields));
       return new ExpressionTransformResult(transformed, structType);
+    }
+
+    private ExpressionTransformResult transformStructPatch(
+        StructPatch patch, DataType expectedType) {
+      if (!(expectedType instanceof StructType)) {
+        throw unsupportedExpressionException(
+            patch,
+            String.format("Struct patch expects a StructType output, but got %s", expectedType));
+      }
+
+      StructType sourceType = resolvePatchSourceType(patch);
+      List<Expression> fields = new ArrayList<>(patch.getPrependedFields());
+      Set<String> usedFieldTransforms = new HashSet<>();
+      for (StructField sourceField : sourceType.fields()) {
+        StructPatch.FieldTransform fieldTransform =
+            patch.getFieldTransforms().get(sourceField.getName());
+        if (fieldTransform == null || !fieldTransform.isReplace()) {
+          fields.add(sourceColumn(patch, sourceField.getName()));
+        }
+        if (fieldTransform != null) {
+          fields.addAll(fieldTransform.getExpressions());
+          usedFieldTransforms.add(sourceField.getName());
+        }
+      }
+      patch
+          .getFieldTransforms()
+          .forEach(
+              (fieldName, fieldTransform) -> {
+                if (!fieldTransform.isOptional() && !usedFieldTransforms.contains(fieldName)) {
+                  throw unsupportedExpressionException(
+                      patch, "Required struct patch field does not exist: " + fieldName);
+                }
+              });
+      fields.addAll(patch.getAppendedFields());
+
+      StructExpression densePatch =
+          patch
+              .getInputPath()
+              .<StructExpression>map(
+                  path -> new StructExpression(fields, new Predicate("IS_NOT_NULL", path)))
+              .orElseGet(() -> new StructExpression(fields));
+      return transformStruct(densePatch, expectedType);
+    }
+
+    private StructType resolvePatchSourceType(StructPatch patch) {
+      if (!patch.getInputPath().isPresent()) {
+        return inputDataSchema;
+      }
+      ExpressionTransformResult inputPath = visitColumn(patch.getInputPath().get());
+      if (!(inputPath.outputType instanceof StructType)) {
+        throw unsupportedExpressionException(
+            patch, "Struct patch input path does not point to a struct");
+      }
+      return (StructType) inputPath.outputType;
+    }
+
+    private Column sourceColumn(StructPatch patch, String fieldName) {
+      return patch
+          .getInputPath()
+          .map(path -> path.appendNestedField(fieldName))
+          .orElseGet(() -> new Column(fieldName));
     }
 
     @Override
@@ -234,6 +302,12 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     ExpressionTransformResult visitStruct(StructExpression struct) {
       throw unsupportedExpressionException(
           struct, "A caller-supplied StructType is required to evaluate a struct expression");
+    }
+
+    @Override
+    ExpressionTransformResult visitStructPatch(StructPatch structPatch) {
+      throw unsupportedExpressionException(
+          structPatch, "A caller-supplied StructType is required to evaluate a struct patch");
     }
 
     @Override
@@ -713,6 +787,12 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     ColumnVector visitStruct(StructExpression struct) {
       throw new IllegalArgumentException(
           "A caller-supplied StructType is required to evaluate a struct expression");
+    }
+
+    @Override
+    ColumnVector visitStructPatch(StructPatch structPatch) {
+      throw new IllegalArgumentException(
+          "Struct patches must be lowered before expression evaluation");
     }
 
     @Override

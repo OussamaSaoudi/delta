@@ -50,6 +50,8 @@ abstract class ExpressionVisitor<R> {
 
   abstract R visitStruct(StructExpression struct);
 
+  abstract R visitStructPatch(StructPatch structPatch);
+
   abstract R visitCast(ImplicitCastExpression cast);
 
   abstract R visitPartitionValue(PartitionValueExpression partitionValue);
@@ -89,6 +91,8 @@ abstract class ExpressionVisitor<R> {
       return visitColumn((Column) expression);
     } else if (expression instanceof StructExpression) {
       return visitStruct((StructExpression) expression);
+    } else if (expression instanceof StructPatch) {
+      return visitStructPatch((StructPatch) expression);
     } else if (expression instanceof ImplicitCastExpression) {
       return visitCast((ImplicitCastExpression) expression);
     }
