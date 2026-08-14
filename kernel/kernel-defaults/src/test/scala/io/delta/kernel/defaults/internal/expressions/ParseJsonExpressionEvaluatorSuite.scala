@@ -141,12 +141,14 @@ class ParseJsonExpressionEvaluatorSuite extends AnyFunSuite {
       """{"stats":{"date":"bad","timestamp":"bad","timestampNtz":"bad",""" +
         """"decimal":"999999.00","id":2}}""",
       """{"stats":{"date":"1970-01-03","timestamp":"1970-01-01T00:00:03Z",""" +
-        """"timestampNtz":"1970-01-01T00:00:04","decimal":"12.345","id":3}}"""))
+        """"timestampNtz":"1970-01-01T00:00:04","decimal":"12.345","id":3}}""",
+      """{"stats":{"date":"1970-01-04","timestamp":"+48690-07-02T22:50:38.211Z",""" +
+        """"timestampNtz":"1970-01-01T00:00:05","decimal":"13.50","id":4}}"""))
 
     val result = evaluate(input, new ParseJson(new Column("json"), outputSchema), outputSchema)
     val stats = result.getChild(0)
 
-    assert((0 until 3).forall(rowId => !result.isNullAt(rowId) && !stats.isNullAt(rowId)))
+    assert((0 until 4).forall(rowId => !result.isNullAt(rowId) && !stats.isNullAt(rowId)))
     assert(stats.getChild(0).getInt(0) == 1)
     assert(stats.getChild(1).getLong(0) == 1000000L)
     assert(stats.getChild(2).getLong(0) == 2000000L)
@@ -157,7 +159,44 @@ class ParseJsonExpressionEvaluatorSuite extends AnyFunSuite {
     assert(stats.getChild(1).getLong(2) == 3000000L)
     assert(stats.getChild(2).getLong(2) == 4000000L)
     assert(stats.getChild(3).getDecimal(2) == new JBigDecimal("12.35"))
+    assert(stats.getChild(0).getInt(3) == 3)
+    assert(stats.getChild(1).isNullAt(3))
+    assert(stats.getChild(2).getLong(3) == 5000000L)
+    assert(stats.getChild(3).getDecimal(3) == new JBigDecimal("13.50"))
+    assert(stats.getChild(4).getLong(3) == 4L)
     result.close()
+    result.close()
+  }
+
+  test("duplicate schema names retain the existing tree-decoder fallback") {
+    val outputSchema = new StructType()
+      .add("value", IntegerType.INTEGER, true)
+      .add("value", IntegerType.INTEGER, true)
+    val result = evaluate(
+      jsonBatch(Seq("""{"value":7}""")),
+      new ParseJson(new Column("json"), outputSchema),
+      outputSchema)
+
+    assert(result.getChild(0).getInt(0) == 7)
+    assert(result.getChild(1).getInt(0) == 7)
+    result.close()
+  }
+
+  Seq[(String, DataType, String)](
+    ("array", new ArrayType(LongType.LONG, true), """[1,"bad"]"""),
+    ("map", new MapType(StringType.STRING, LongType.LONG, true), """{"a":"bad"}""")).foreach {
+    case (name, fieldType, value) =>
+      test(s"invalid $name children fail the containing value") {
+        val outputSchema = new StructType().add("value", fieldType, true)
+        val result = evaluate(
+          jsonBatch(Seq(s"""{"value":$value}""")),
+          new ParseJson(new Column("json"), outputSchema),
+          outputSchema)
+
+        assert(result.isNullAt(0))
+        assert(result.getChild(0).isNullAt(0))
+        result.close()
+      }
   }
 
   test("streaming parser preserves rightmost duplicate fields") {

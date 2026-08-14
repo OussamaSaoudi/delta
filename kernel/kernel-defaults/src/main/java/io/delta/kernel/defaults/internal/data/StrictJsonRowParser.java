@@ -504,7 +504,11 @@ final class StrictJsonRowParser {
       return InternalUtils.daysSinceEpoch(Date.valueOf(readString(parser, token, "date")));
     }
     if (type instanceof TimestampType) {
-      Instant time = OffsetDateTime.parse(readString(parser, token, "timestamp")).toInstant();
+      OffsetDateTime timestamp = OffsetDateTime.parse(readString(parser, token, "timestamp"));
+      if (nullFailureProneLeaves && (timestamp.getYear() < 1 || timestamp.getYear() > 9999)) {
+        throw mismatch(parser, "timestamp");
+      }
+      Instant time = timestamp.toInstant();
       return TimestampUtils.toEpochMicros(time);
     }
     if (type instanceof TimestampNTZType) {
