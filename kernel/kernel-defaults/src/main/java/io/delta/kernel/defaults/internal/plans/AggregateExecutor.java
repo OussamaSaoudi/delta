@@ -60,7 +60,7 @@ final class AggregateExecutor {
     BoundAggregate bound = BoundAggregate.bind(aggregate, inputSchema, outputSchema);
     boolean global = bound.groups.isEmpty();
     Map<GroupKey, GroupState> groups = global ? Collections.emptyMap() : new LinkedHashMap<>();
-    GroupState globalState = global ? bound.newState(new Object[0]) : null;
+    GroupState globalState = global ? bound.newState(new Object[bound.aggs.size()]) : null;
     GroupKey lookupKey = global ? null : new GroupKey(bound.groups.size());
 
     try {
@@ -83,11 +83,11 @@ final class AggregateExecutor {
               values.setGroupKey(lookupKey, rowId);
               state = groups.get(lookupKey);
               if (state == null) {
-                state = bound.newState(values.readGroups(rowId));
+                state = bound.newState(values.readGroups(rowId, bound.aggs.size()));
                 groups.put(lookupKey.copy(), state);
               }
             }
-            state.update(values, rowId);
+            state.update(bound.aggs, values, rowId);
           }
         }
       }
@@ -155,8 +155,8 @@ final class AggregateExecutor {
       }
     }
 
-    GroupState newState(Object[] groupValues) {
-      return new GroupState(groupValues, aggs);
+    GroupState newState(Object[] values) {
+      return new GroupState(values, groups.size(), aggs.size());
     }
 
     @Override
@@ -189,12 +189,12 @@ final class AggregateExecutor {
   }
 
   private static final class BoundAgg {
-    private final Agg.Function function;
+    private final boolean minimum;
     private final BoundColumn value;
     private final Optional<BoundColumn> key;
 
     private BoundAgg(Agg.Function function, BoundColumn value, Optional<BoundColumn> key) {
-      this.function = function;
+      this.minimum = function == Agg.Function.MIN || function == Agg.Function.MIN_NON_NULL_BY;
       this.value = value;
       this.key = key;
     }
@@ -259,8 +259,8 @@ final class AggregateExecutor {
       this.groupTypes = groupTypes;
     }
 
-    Object[] readGroups(int rowId) {
-      Object[] values = new Object[groups.size()];
+    Object[] readGroups(int rowId, int aggregateCount) {
+      Object[] values = new Object[groups.size() + aggregateCount];
       for (int index = 0; index < groups.size(); index++) {
         values[index] = materialize(groups.get(index), groupTypes.get(index), rowId);
       }
@@ -313,57 +313,43 @@ final class AggregateExecutor {
   }
 
   private static final class GroupState {
-    private final List<Object> groupValues;
-    private final List<AggState> aggs;
+    private final Object[] values;
+    private final Object[] orderingValues;
+    private final int aggregateOffset;
 
-    private GroupState(Object[] groupValues, List<BoundAgg> boundAggs) {
-      this.groupValues = new ArrayList<>(Arrays.asList(groupValues));
-      this.aggs = new ArrayList<>(boundAggs.size());
-      for (BoundAgg agg : boundAggs) {
-        aggs.add(new AggState(agg.function));
-      }
+    private GroupState(Object[] values, int groupCount, int aggregateCount) {
+      this.values = values;
+      this.orderingValues = new Object[aggregateCount];
+      this.aggregateOffset = groupCount;
     }
 
-    void update(EvaluatedBatch batch, int rowId) {
-      for (int index = 0; index < aggs.size(); index++) {
-        aggs.get(index).update(batch.aggs.get(index), rowId);
+    void update(List<BoundAgg> boundAggs, EvaluatedBatch batch, int rowId) {
+      for (int index = 0; index < orderingValues.length; index++) {
+        update(index, boundAggs.get(index), batch.aggs.get(index), rowId);
       }
     }
 
     List<Object> finish() {
-      List<Object> row = new ArrayList<>(groupValues.size() + aggs.size());
-      row.addAll(groupValues);
-      for (AggState agg : aggs) {
-        row.add(agg.result);
-      }
-      return row;
-    }
-  }
-
-  private static final class AggState {
-    private final Agg.Function function;
-    private Object result;
-    private Object orderingValue;
-
-    private AggState(Agg.Function function) {
-      this.function = function;
+      return Arrays.asList(values);
     }
 
-    void update(EvaluatedAgg agg, int rowId) {
+    private void update(int index, BoundAgg bound, EvaluatedAgg agg, int rowId) {
       if (agg.values.isNullAt(rowId) || agg.keys.isNullAt(rowId)) {
         return;
       }
       Object ordering = read(agg.keys, agg.keyType, rowId);
-      boolean minimum = function == Agg.Function.MIN || function == Agg.Function.MIN_NON_NULL_BY;
-      if (orderingValue == null
-          || (minimum && compare(agg.keyType, ordering, orderingValue) < 0)
-          || (!minimum && compare(agg.keyType, ordering, orderingValue) > 0)) {
+      Object current = orderingValues[index];
+      if (current == null
+          || (bound.minimum && compare(agg.keyType, ordering, current) < 0)
+          || (!bound.minimum && compare(agg.keyType, ordering, current) > 0)) {
         if (agg.separateKey) {
-          result = DefaultValueRetainer.retain(agg.values, agg.valueType, rowId);
-          orderingValue = retainScalar(ordering, agg.keyType);
+          values[aggregateOffset + index] =
+              DefaultValueRetainer.retain(agg.values, agg.valueType, rowId);
+          orderingValues[index] = retainScalar(ordering, agg.keyType);
         } else {
-          result = retainScalar(ordering, agg.valueType);
-          orderingValue = result;
+          Object retained = retainScalar(ordering, agg.valueType);
+          values[aggregateOffset + index] = retained;
+          orderingValues[index] = retained;
         }
       }
     }
