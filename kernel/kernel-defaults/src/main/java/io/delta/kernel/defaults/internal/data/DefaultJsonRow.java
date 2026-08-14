@@ -97,13 +97,18 @@ public class DefaultJsonRow implements RetainableRow {
     return fromJson(JSON_READER, json, readSchema, false);
   }
 
+  static DefaultJsonRow fromJsonTreePermissively(String json, StructType readSchema)
+      throws IOException {
+    return fromJson(SINGLE_OBJECT_JSON_READER, json, readSchema, true);
+  }
+
   /**
    * Decodes one JSON object while turning invalid date, timestamp, and decimal struct leaves into
    * null. This is the permissive leaf behavior required by the ParseJson expression.
    */
   public static DefaultJsonRow fromJsonPermissively(String json, StructType readSchema)
       throws IOException {
-    return fromJson(SINGLE_OBJECT_JSON_READER, json, readSchema, true);
+    return StrictJsonRowParser.forSchema(readSchema).parsePermissively(json);
   }
 
   private static DefaultJsonRow fromJson(

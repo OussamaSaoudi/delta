@@ -155,6 +155,42 @@ class ParseJsonExpressionEvaluatorSuite extends AnyFunSuite {
     result.close()
   }
 
+  test("streaming parser preserves rightmost duplicate fields") {
+    val nested = new StructType().add("x", IntegerType.INTEGER, false)
+    val outputSchema = new StructType()
+      .add("value", IntegerType.INTEGER, false)
+      .add("nested", nested, false)
+    val valid = evaluate(
+      jsonBatch(Seq(
+        """{"value":"bad","value":7,"nested":{"x":"bad"},"nested":{"x":2}}""")),
+      new ParseJson(new Column("json"), outputSchema),
+      outputSchema)
+
+    assert(valid.getChild(0).getInt(0) == 7)
+    assert(valid.getChild(1).getChild(0).getInt(0) == 2)
+    valid.close()
+
+    val invalid = evaluate(
+      jsonBatch(Seq("""{"value":7,"value":"bad","nested":{"x":2}}""")),
+      new ParseJson(new Column("json"), outputSchema),
+      outputSchema)
+    assert(invalid.isNullAt(0))
+    invalid.close()
+  }
+
+  test("streaming parser isolates JSON row boundaries") {
+    val outputSchema = new StructType().add("value", IntegerType.INTEGER, true)
+    val result = evaluate(
+      jsonBatch(Seq(
+        """{"value":1}],[{"value":2}""",
+        """{"value":3}""")),
+      new ParseJson(new Column("json"), outputSchema),
+      outputSchema)
+
+    assert((0 until result.getSize).forall(result.isNullAt))
+    result.close()
+  }
+
   Seq[(String, StructType, Expression, DataType)](
     (
       "non-string input",

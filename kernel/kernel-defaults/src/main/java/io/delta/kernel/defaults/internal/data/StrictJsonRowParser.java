@@ -27,8 +27,10 @@ import io.delta.kernel.internal.util.InternalUtils;
 import io.delta.kernel.internal.util.TimestampUtils;
 import io.delta.kernel.types.*;
 import java.io.IOException;
+import java.io.Reader;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.sql.Date;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -65,7 +67,24 @@ final class StrictJsonRowParser {
         if (token != JsonToken.START_OBJECT) {
           throw new IllegalArgumentException("Expected one JSON object");
         }
-        return readStruct(parser, schema);
+        return readStruct(parser, schema, false);
+      }
+    }
+
+    DefaultJsonRow parsePermissively(String json) throws IOException {
+      if (useTreeDecoder) {
+        return DefaultJsonRow.fromJsonTreePermissively(json, schema);
+      }
+      try (JsonParser parser = JSON_FACTORY.createParser(json)) {
+        JsonToken token = parser.nextToken();
+        if (token != JsonToken.START_OBJECT) {
+          throw new IllegalArgumentException("Expected one JSON object");
+        }
+        DefaultJsonRow row = readStruct(parser, schema, true);
+        if (parser.nextToken() != null) {
+          throw new IllegalArgumentException("JSON input contains multiple values");
+        }
+        return row;
       }
     }
 
@@ -74,12 +93,141 @@ final class StrictJsonRowParser {
     }
   }
 
+  static ColumnVector parsePermissiveBatch(ColumnVector input, StructType schema)
+      throws IOException {
+    if (containsDuplicateFieldNames(schema)) {
+      Object[] rows = new Object[input.getSize()];
+      Decoder decoder = forSchema(schema);
+      for (int rowId = 0; rowId < input.getSize(); rowId++) {
+        rows[rowId] =
+            decoder.parsePermissively(input.isNullAt(rowId) ? "{}" : input.getString(rowId));
+      }
+      return DefaultGenericVector.fromArray(schema, rows);
+    }
+
+    Object[] rows = new Object[input.getSize()];
+    JsonBatchReader reader = new JsonBatchReader(input);
+    try (JsonParser parser = JSON_FACTORY.createParser(reader)) {
+      requireToken(parser.nextToken(), JsonToken.START_ARRAY, "JSON batch");
+      for (int rowId = 0; rowId < input.getSize(); rowId++) {
+        requireToken(parser.nextToken(), JsonToken.START_ARRAY, "JSON row wrapper");
+        requireToken(parser.nextToken(), JsonToken.START_OBJECT, "JSON object");
+        rows[rowId] = readStruct(parser, schema, true);
+        requireToken(parser.nextToken(), JsonToken.END_ARRAY, "JSON row wrapper");
+        if (parser.getTokenLocation().getCharOffset() != reader.rowEndOffset(rowId)) {
+          throw new IllegalArgumentException("JSON row crossed its input boundary");
+        }
+      }
+      requireToken(parser.nextToken(), JsonToken.END_ARRAY, "JSON batch");
+      if (parser.nextToken() != null) {
+        throw new IllegalArgumentException("JSON batch contains trailing data");
+      }
+    }
+    return DefaultGenericVector.fromArray(schema, rows);
+  }
+
+  /** Presents a string vector as one JSON array while preserving each row boundary. */
+  private static final class JsonBatchReader extends Reader {
+    private static final int OUTER_START = 0;
+    private static final int ROW_START = 1;
+    private static final int ROW_CONTENT = 2;
+    private static final int ROW_END = 3;
+    private static final int OUTER_END = 4;
+    private static final int FINISHED = 5;
+
+    private final ColumnVector input;
+    private final long[] rowEndOffsets;
+    private int phase = OUTER_START;
+    private int rowId;
+    private String segment;
+    private int segmentOffset;
+    private long streamOffset;
+    private boolean closed;
+
+    private JsonBatchReader(ColumnVector input) {
+      this.input = input;
+      this.rowEndOffsets = new long[input.getSize()];
+    }
+
+    @Override
+    public int read(char[] buffer, int offset, int length) throws IOException {
+      if (closed) throw new IOException("Reader is closed");
+      if (buffer == null) throw new NullPointerException("buffer is null");
+      if (offset < 0 || length < 0 || offset > buffer.length - length) {
+        throw new IndexOutOfBoundsException();
+      }
+      if (length == 0) return 0;
+
+      int written = 0;
+      while (written < length) {
+        if (segment == null || segmentOffset == segment.length()) {
+          if (!advance()) return written == 0 ? -1 : written;
+        }
+        int count = Math.min(length - written, segment.length() - segmentOffset);
+        segment.getChars(segmentOffset, segmentOffset + count, buffer, offset + written);
+        segmentOffset += count;
+        streamOffset += count;
+        written += count;
+      }
+      return written;
+    }
+
+    private boolean advance() {
+      segment = null;
+      segmentOffset = 0;
+      while (segment == null) {
+        switch (phase) {
+          case OUTER_START:
+            segment = "[";
+            phase = ROW_START;
+            break;
+          case ROW_START:
+            if (rowId == input.getSize()) phase = OUTER_END;
+            else {
+              segment = rowId == 0 ? "[" : ",[";
+              phase = ROW_CONTENT;
+            }
+            break;
+          case ROW_CONTENT:
+            segment = input.isNullAt(rowId) ? "{}" : input.getString(rowId);
+            phase = ROW_END;
+            break;
+          case ROW_END:
+            rowEndOffsets[rowId] = streamOffset;
+            segment = "]";
+            rowId++;
+            phase = ROW_START;
+            break;
+          case OUTER_END:
+            segment = "]";
+            phase = FINISHED;
+            break;
+          case FINISHED:
+            return false;
+          default:
+            throw new IllegalStateException("Unknown JSON batch reader phase: " + phase);
+        }
+      }
+      return true;
+    }
+
+    private long rowEndOffset(int requestedRowId) {
+      return rowEndOffsets[requestedRowId];
+    }
+
+    @Override
+    public void close() {
+      closed = true;
+      segment = null;
+    }
+  }
+
   /**
    * Reads a struct without constructing an intermediate JSON tree. Failures are delayed until the
    * closing token so duplicate fields retain Jackson's last-value-wins behavior.
    */
-  private static DefaultJsonRow readStruct(JsonParser parser, StructType schema)
-      throws IOException {
+  private static DefaultJsonRow readStruct(
+      JsonParser parser, StructType schema, boolean nullFailureProneLeaves) throws IOException {
     Object[] values = new Object[schema.length()];
     boolean[] present = new boolean[schema.length()];
     RuntimeException[] failures = new RuntimeException[schema.length()];
@@ -96,10 +244,14 @@ final class StrictJsonRowParser {
       present[ordinal] = true;
       failures[ordinal] = null;
       try {
-        values[ordinal] = readValue(parser, valueToken, schema.at(ordinal).getDataType());
+        values[ordinal] =
+            readValue(parser, valueToken, schema.at(ordinal).getDataType(), nullFailureProneLeaves);
       } catch (RuntimeException e) {
         values[ordinal] = null;
-        failures[ordinal] = e;
+        failures[ordinal] =
+            nullFailureProneLeaves && isFailureProneLeaf(schema.at(ordinal).getDataType())
+                ? null
+                : e;
       }
     }
 
@@ -143,7 +295,15 @@ final class StrictJsonRowParser {
     return false;
   }
 
-  private static Object readValue(JsonParser parser, JsonToken token, DataType type)
+  private static boolean isFailureProneLeaf(DataType type) {
+    return type instanceof DecimalType
+        || type instanceof DateType
+        || type instanceof TimestampType
+        || type instanceof TimestampNTZType;
+  }
+
+  private static Object readValue(
+      JsonParser parser, JsonToken token, DataType type, boolean nullFailureProneLeaves)
       throws IOException {
     if (token == JsonToken.VALUE_NULL) {
       return null;
@@ -180,9 +340,22 @@ final class StrictJsonRowParser {
       return parser.getText();
     }
     if (type instanceof DecimalType) {
-      requireScalar(parser, token.isNumeric());
-      if (!token.isNumeric()) throw mismatch(parser, "decimal");
-      return normalizeDecimal(parser.getDecimalValue());
+      requireScalar(
+          parser, token.isNumeric() || (nullFailureProneLeaves && token == JsonToken.VALUE_STRING));
+      if (!token.isNumeric() && !(nullFailureProneLeaves && token == JsonToken.VALUE_STRING)) {
+        throw mismatch(parser, "decimal");
+      }
+      BigDecimal value =
+          token == JsonToken.VALUE_STRING
+              ? new BigDecimal(parser.getText())
+              : parser.getDecimalValue();
+      if (!nullFailureProneLeaves) return normalizeDecimal(value);
+      DecimalType decimalType = (DecimalType) type;
+      BigDecimal scaled = value.setScale(decimalType.getScale(), RoundingMode.HALF_UP);
+      if (scaled.precision() > decimalType.getPrecision()) {
+        throw new ArithmeticException("Decimal exceeds precision " + decimalType.getPrecision());
+      }
+      return scaled;
     }
     if (type instanceof DateType) {
       return InternalUtils.daysSinceEpoch(Date.valueOf(readString(parser, token, "date")));
@@ -199,7 +372,7 @@ final class StrictJsonRowParser {
         parser.skipChildren();
         throw mismatch(parser, "object");
       }
-      return readStruct(parser, (StructType) type);
+      return readStruct(parser, (StructType) type, nullFailureProneLeaves);
     }
     if (type instanceof ArrayType) {
       return readArray(parser, token, (ArrayType) type);
@@ -323,7 +496,7 @@ final class StrictJsonRowParser {
     while ((token = parser.nextToken()) != JsonToken.END_ARRAY) {
       Object value = null;
       try {
-        value = readValue(parser, token, type.getElementType());
+        value = readValue(parser, token, type.getElementType(), false);
         if (value == null && !type.containsNull() && !(type.getElementType() instanceof VoidType)) {
           throw new RuntimeException(
               "Array type expects no nulls as elements, but received `null` as array element");
@@ -373,7 +546,7 @@ final class StrictJsonRowParser {
         value =
             type.getValueType() instanceof StringType
                 ? readMapString(parser, valueToken)
-                : readValue(parser, valueToken, type.getValueType());
+                : readValue(parser, valueToken, type.getValueType(), false);
         if (value == null
             && !type.isValueContainsNull()
             && !(type.getValueType() instanceof VoidType)) {
@@ -431,6 +604,12 @@ final class StrictJsonRowParser {
 
   private static void requireToken(JsonParser parser, JsonToken expected, String description) {
     if (parser.currentToken() != expected) {
+      throw new IllegalArgumentException("Expected " + description);
+    }
+  }
+
+  private static void requireToken(JsonToken actual, JsonToken expected, String description) {
+    if (actual != expected) {
       throw new IllegalArgumentException("Expected " + description);
     }
   }

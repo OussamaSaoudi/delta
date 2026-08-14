@@ -27,10 +27,9 @@ import static java.util.stream.Collectors.toList;
 
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.ColumnarBatch;
-import io.delta.kernel.defaults.internal.data.DefaultJsonRow;
+import io.delta.kernel.defaults.internal.data.DefaultJsonBatchParser;
 import io.delta.kernel.defaults.internal.data.vector.DefaultBooleanVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultConstantVector;
-import io.delta.kernel.defaults.internal.data.vector.DefaultGenericVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultViewVector;
 import io.delta.kernel.engine.ExpressionHandler;
 import io.delta.kernel.expressions.*;
@@ -1083,12 +1082,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
           jsonVector.getSize());
 
       try {
-        List<Object> rows = new ArrayList<>(jsonVector.getSize());
-        for (int rowId = 0; rowId < jsonVector.getSize(); rowId++) {
-          String json = jsonVector.isNullAt(rowId) ? "{}" : jsonVector.getString(rowId);
-          rows.add(DefaultJsonRow.fromJsonPermissively(json, parseJson.getOutputSchema()));
-        }
-        return DefaultGenericVector.fromList(parseJson.getOutputSchema(), rows);
+        return DefaultJsonBatchParser.parse(jsonVector, parseJson.getOutputSchema());
       } catch (IOException | RuntimeException ignored) {
         return new DefaultConstantVector(parseJson.getOutputSchema(), jsonVector.getSize(), null);
       } finally {
