@@ -22,6 +22,7 @@ import io.delta.kernel.data.*;
 import io.delta.kernel.defaults.engine.fileio.FileIO;
 import io.delta.kernel.defaults.engine.fileio.SeekableInputStream;
 import io.delta.kernel.defaults.internal.data.DefaultJsonRow;
+import io.delta.kernel.defaults.internal.data.DefaultJsonRow.StrictDecoder;
 import io.delta.kernel.defaults.internal.data.DefaultRowBasedColumnarBatch;
 import io.delta.kernel.defaults.internal.json.JsonUtils;
 import io.delta.kernel.engine.JsonHandler;
@@ -57,12 +58,13 @@ public class DefaultJsonHandler implements JsonHandler {
       StructType outputSchema,
       Optional<ColumnVector> selectionVector) {
     List<Row> rows = new ArrayList<>();
+    StrictDecoder decoder = DefaultJsonRow.strictDecoder(outputSchema);
     for (int i = 0; i < jsonStringVector.getSize(); i++) {
       boolean isSelected =
           !selectionVector.isPresent()
               || (!selectionVector.get().isNullAt(i) && selectionVector.get().getBoolean(i));
       if (isSelected && !jsonStringVector.isNullAt(i)) {
-        rows.add(parseJson(jsonStringVector.getString(i), outputSchema));
+        rows.add(parseJson(jsonStringVector.getString(i), decoder));
       } else {
         rows.add(null);
       }
@@ -76,6 +78,7 @@ public class DefaultJsonHandler implements JsonHandler {
       StructType physicalSchema,
       Optional<Predicate> predicate)
       throws IOException {
+    StrictDecoder decoder = DefaultJsonRow.strictDecoder(physicalSchema);
     return new CloseableIterator<ColumnarBatch>() {
       private FileStatus currentFile;
       private BufferedReader currentFileReader;
@@ -120,7 +123,7 @@ public class DefaultJsonHandler implements JsonHandler {
         int currentBatchSize = 0;
         do {
           // hasNext already reads the next one and keeps it in member variable `nextLine`
-          rows.add(parseJson(nextLine, physicalSchema));
+          rows.add(parseJson(nextLine, decoder));
           nextLine = null;
           currentBatchSize++;
         } while (currentBatchSize < maxBatchSize && hasNext());
@@ -163,9 +166,9 @@ public class DefaultJsonHandler implements JsonHandler {
     fileIO.newOutputFile(filePath).writeAtomically(data.map(JsonUtils::rowToJson), overwrite);
   }
 
-  private Row parseJson(String json, StructType readSchema) {
+  private Row parseJson(String json, StrictDecoder decoder) {
     try {
-      return DefaultJsonRow.fromJson(json, readSchema);
+      return decoder.decode(json);
     } catch (IOException ex) {
       throw new KernelEngineException(format("Could not parse JSON: %s", json), ex);
     }

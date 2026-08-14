@@ -66,8 +66,34 @@ public class DefaultJsonRow implements Row {
     }
   }
 
-  /** Decodes one JSON object using the strict semantics used by {@code JsonHandler}. */
+  DefaultJsonRow(Object[] parsedValues, StructType readSchema) {
+    this.readSchema = readSchema;
+    this.parsedValues = parsedValues;
+  }
+
+  /** Decodes one JSON object using strict type and nullability semantics. */
   public static DefaultJsonRow fromJson(String json, StructType readSchema) throws IOException {
+    return fromJsonTree(json, readSchema);
+  }
+
+  /** Creates a reusable strict decoder for a fixed schema. */
+  public static StrictDecoder strictDecoder(StructType readSchema) {
+    return new StrictDecoder(StrictJsonRowParser.forSchema(readSchema));
+  }
+
+  public static final class StrictDecoder {
+    private final StrictJsonRowParser.Decoder decoder;
+
+    private StrictDecoder(StrictJsonRowParser.Decoder decoder) {
+      this.decoder = decoder;
+    }
+
+    public DefaultJsonRow decode(String json) throws IOException {
+      return decoder.parse(json);
+    }
+  }
+
+  static DefaultJsonRow fromJsonTree(String json, StructType readSchema) throws IOException {
     return fromJson(JSON_READER, json, readSchema, false);
   }
 

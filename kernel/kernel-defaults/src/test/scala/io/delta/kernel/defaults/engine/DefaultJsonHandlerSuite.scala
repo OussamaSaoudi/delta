@@ -78,24 +78,28 @@ class DefaultJsonHandlerSuite extends AnyFunSuite with TestUtils with DefaultVec
 
   test("parse byte type") {
     testJsonParserForSingleType(
-      jsonString = """{"col1":0,"col2":-127,"col3":127, "col4":null}""",
+      jsonString = """{"col1":0,"col2":-127,"col3":127,"col4":null,"col5":1.0}""",
       dataType = ByteType.BYTE,
-      4,
-      TestRow(0.toByte, -127.toByte, 127.toByte, null))
+      5,
+      TestRow(0.toByte, -127.toByte, 127.toByte, null, 1.toByte))
     testOutOfRangeValue("128", ByteType.BYTE)
     testOutOfRangeValue("-129", ByteType.BYTE)
     testOutOfRangeValue("2147483648", ByteType.BYTE)
+    testOutOfRangeValue("1.5", ByteType.BYTE)
+    testOutOfRangeValue("128.0", ByteType.BYTE)
   }
 
   test("parse short type") {
     testJsonParserForSingleType(
-      jsonString = """{"col1":-32767,"col2":8,"col3":32767, "col4":null}""",
+      jsonString = """{"col1":-32767,"col2":8,"col3":32767,"col4":null,"col5":1e3}""",
       dataType = ShortType.SHORT,
-      4,
-      TestRow(-32767.toShort, 8.toShort, 32767.toShort, null))
+      5,
+      TestRow(-32767.toShort, 8.toShort, 32767.toShort, null, 1000.toShort))
     testOutOfRangeValue("32768", ShortType.SHORT)
     testOutOfRangeValue("-32769", ShortType.SHORT)
     testOutOfRangeValue("2147483648", ShortType.SHORT)
+    testOutOfRangeValue("1.5", ShortType.SHORT)
+    testOutOfRangeValue("32768.0", ShortType.SHORT)
   }
 
   test("parse integer type") {
@@ -106,6 +110,7 @@ class DefaultJsonHandlerSuite extends AnyFunSuite with TestUtils with DefaultVec
       TestRow(-2147483648, 8, 2147483647, null))
     testOutOfRangeValue("2147483648", IntegerType.INTEGER)
     testOutOfRangeValue("-2147483649", IntegerType.INTEGER)
+    testOutOfRangeValue("1.0", IntegerType.INTEGER)
   }
 
   test("parse long type") {
@@ -117,6 +122,7 @@ class DefaultJsonHandlerSuite extends AnyFunSuite with TestUtils with DefaultVec
       TestRow(-9223372036854775808L, 8L, 9223372036854775807L, null))
     testOutOfRangeValue("9223372036854775808", LongType.LONG)
     testOutOfRangeValue("-9223372036854775809", LongType.LONG)
+    testOutOfRangeValue("1.0", LongType.LONG)
   }
 
   test("parse float type") {
@@ -124,10 +130,10 @@ class DefaultJsonHandlerSuite extends AnyFunSuite with TestUtils with DefaultVec
       jsonString =
         """
           |{"col1":-9223.33,"col2":0.4,"col3":1.2E8,
-          |"col4":1.23E-7,"col5":0.004444444, "col6":null}""".stripMargin,
+          |"col4":1.23E-7,"col5":0.004444444,"col6":null,"col7":-0.0}""".stripMargin,
       dataType = FloatType.FLOAT,
-      6,
-      TestRow(-9223.33f, 0.4f, 120000000.0f, 0.000000123f, 0.004444444f, null))
+      7,
+      TestRow(-9223.33f, 0.4f, 120000000.0f, 0.000000123f, 0.004444444f, null, 0.0f))
     testOutOfRangeValue("3.4028235E+39", FloatType.FLOAT)
   }
 
@@ -136,10 +142,17 @@ class DefaultJsonHandlerSuite extends AnyFunSuite with TestUtils with DefaultVec
       jsonString =
         """
           |{"col1":-9.2233333333E8,"col2":0.4,"col3":1.2E8,
-          |"col4":1.234444444E-7,"col5":0.0444444444, "col6":null}""".stripMargin,
+          |"col4":1.234444444E-7,"col5":0.0444444444,"col6":null,"col7":-0.0}""".stripMargin,
       dataType = DoubleType.DOUBLE,
-      6,
-      TestRow(-922333333.33d, 0.4d, 120000000.0d, 0.0000001234444444d, 0.0444444444d, null))
+      7,
+      TestRow(
+        -922333333.33d,
+        0.4d,
+        120000000.0d,
+        0.0000001234444444d,
+        0.0444444444d,
+        null,
+        0.0d))
     // For some reason out-of-range doubles are parsed initially as Double.INFINITY instead of
     // a BigDecimal
     val e = intercept[RuntimeException] {
@@ -169,7 +182,9 @@ class DefaultJsonHandlerSuite extends AnyFunSuite with TestUtils with DefaultVec
       |  "col3":123456789123456789123456789123456789,
       |  "col4":1234567891234567891234567891.2345678900,
       |  "col5":1.23,
-      |  "col6":null
+      |  "col6":null,
+      |  "col7":1.2300,
+      |  "col8":-0.00
       |}
       |""".stripMargin,
       schema = new StructType()
@@ -178,14 +193,18 @@ class DefaultJsonHandlerSuite extends AnyFunSuite with TestUtils with DefaultVec
         .add("col3", new DecimalType(38, 0))
         .add("col4", new DecimalType(38, 10))
         .add("col5", new DecimalType(5, 2))
-        .add("col6", new DecimalType(5, 2)),
+        .add("col6", new DecimalType(5, 2))
+        .add("col7", new DecimalType(5, 4))
+        .add("col8", new DecimalType(5, 2)),
       TestRow(
         new JBigDecimal(0),
         new JBigDecimal("0.01234567891234567891234567891234567890"),
         new JBigDecimal("123456789123456789123456789123456789"),
         new JBigDecimal("1234567891234567891234567891.2345678900"),
         new JBigDecimal("1.23"),
-        null))
+        null,
+        new JBigDecimal("1.23"),
+        JBigDecimal.ZERO))
   }
 
   test("parse date type") {
@@ -387,6 +406,102 @@ class DefaultJsonHandlerSuite extends AnyFunSuite with TestUtils with DefaultVec
       Vector(TestRow.fromSeq(Seq("foo", 3)), TestRow.fromSeq(Seq(null, null)))))
 
     checkAnswer(actResult, expResult)
+  }
+
+  test("streaming parser skips unknown values and preserves field order independence") {
+    val schema = new StructType()
+      .add("number", IntegerType.INTEGER)
+      .add("nested", new StructType().add("text", StringType.STRING))
+
+    testJsonParserWithSchema(
+      """{
+        |  "unknown": {"deep": [1, {"ignored": true}]},
+        |  "nested": {"anotherUnknown": [false], "text": "value"},
+        |  "number": 10
+        |}""".stripMargin,
+      schema,
+      TestRow(10, TestRow("value")))
+  }
+
+  test("streaming parser applies last-value-wins to duplicate fields and map keys") {
+    val schema = new StructType()
+      .add("number", IntegerType.INTEGER, false)
+      .add("nested", new StructType().add("value", LongType.LONG, false), false)
+      .add("map", new MapType(StringType.STRING, IntegerType.INTEGER, false), false)
+
+    testJsonParserWithSchema(
+      """{
+        |  "number": "invalid", "number": 5,
+        |  "nested": {"value": "invalid"}, "nested": {"value": 6},
+        |  "map": {"key": "invalid", "key": 7}
+        |}""".stripMargin,
+      schema,
+      TestRow(5, TestRow(6L), Map("key" -> 7)))
+  }
+
+  test("duplicate schema names use the strict tree fallback for every ordinal") {
+    val schema = new StructType()
+      .add("value", ByteType.BYTE, false)
+      .add("value", DecimalType.USER_DEFAULT, false)
+
+    testJsonParserWithSchema(
+      """{"value": 1.0}""",
+      schema,
+      TestRow(1.toByte, JBigDecimal.ONE))
+  }
+
+  test("streaming parser retains strict nullability semantics") {
+    val schema = new StructType()
+      .add("required", IntegerType.INTEGER, false)
+      .add("optional", StringType.STRING, true)
+      .add("nothing", VoidType.VOID, false)
+
+    testJsonParserWithSchema(
+      """{"required": 1, "nothing": null}""",
+      schema,
+      TestRow(1, null, null))
+
+    Seq("""{"nothing": null}""", """{"required": null, "nothing": null}""").foreach {
+      json =>
+        val error = intercept[RuntimeException] {
+          jsonHandler.parseJson(singletonStringColumnVector(json), schema, Optional.empty())
+        }
+        assert(error.getMessage.contains("required"))
+    }
+  }
+
+  test("streaming parser preserves strict decimal and timestamp coercion") {
+    val schema = new StructType()
+      .add("decimal", new DecimalType(20, 4))
+      .add("timestamp", TimestampType.TIMESTAMP)
+      .add("timestampNtz", TimestampNTZType.TIMESTAMP_NTZ)
+
+    testJsonParserWithSchema(
+      """{
+        |  "decimal": 1234567890.125,
+        |  "timestamp": "1970-01-01T00:00:00Z",
+        |  "timestampNtz": "1970-01-01T00:00:00"
+        |}""".stripMargin,
+      schema,
+      TestRow(new JBigDecimal("1234567890.125"), 0L, 0L))
+
+    Seq(
+      """{"decimal": "1.25", "timestamp": "1970-01-01T00:00:00Z",
+        |"timestampNtz": "1970-01-01T00:00:00"}""".stripMargin,
+      """{"decimal": 1.25, "timestamp": 0,
+        |"timestampNtz": "1970-01-01T00:00:00"}""".stripMargin).foreach { json =>
+      intercept[RuntimeException] {
+        jsonHandler.parseJson(singletonStringColumnVector(json), schema, Optional.empty())
+      }
+    }
+  }
+
+  test("strict parser keeps the first object when trailing JSON values are present") {
+    val schema = new StructType().add("value", IntegerType.INTEGER)
+    testJsonParserWithSchema(
+      """{"value": 1} {"value": 2}""",
+      schema,
+      TestRow(1))
   }
 
   test("write rows as json") {
