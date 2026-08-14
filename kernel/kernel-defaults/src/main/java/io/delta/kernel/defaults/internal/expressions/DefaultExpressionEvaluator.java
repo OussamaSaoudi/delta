@@ -152,6 +152,9 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
         if (expression instanceof StructPatch) {
           return transformStructPatch((StructPatch) expression, expectedType);
         }
+        if (expression instanceof ToJson) {
+          return visitToJson((ToJson) expression);
+        }
         if (expression instanceof ParseJson) {
           return transformParseJson((ParseJson) expression, expectedType);
         }
@@ -425,6 +428,15 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     ExpressionTransformResult visitStructPatch(StructPatch structPatch) {
       throw unsupportedExpressionException(
           structPatch, "A caller-supplied StructType is required to evaluate a struct patch");
+    }
+
+    @Override
+    ExpressionTransformResult visitToJson(ToJson toJson) {
+      ExpressionTransformResult input = transformChild(toJson.getInput());
+      if (!(input.outputType instanceof StructType)) {
+        throw unsupportedExpressionException(toJson, "TO_JSON requires a struct input");
+      }
+      return new ExpressionTransformResult(new ToJson(input.expression), StringType.STRING);
     }
 
     @Override
@@ -1024,6 +1036,11 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     ColumnVector visitStructPatch(StructPatch structPatch) {
       throw new IllegalArgumentException(
           "Struct patches must be lowered before expression evaluation");
+    }
+
+    @Override
+    ColumnVector visitToJson(ToJson toJson) {
+      return ToJsonExpressionEvaluator.eval(visit(toJson.getInput()));
     }
 
     @Override
