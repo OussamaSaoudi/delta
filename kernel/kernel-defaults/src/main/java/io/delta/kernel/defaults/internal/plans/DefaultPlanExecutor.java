@@ -52,6 +52,16 @@ public final class DefaultPlanExecutor {
     return execute(plan, engine, defaultIoParallelism());
   }
 
+  /** Executes {@code plan} and reports opt-in per-node execution measurements. */
+  public static CloseableIterator<FilteredColumnarBatch> execute(
+      Plan plan, Engine engine, PlanExecutionObserver observer) {
+    requireNonNull(observer, "observer is null");
+    if (observer == PlanExecutionObserver.NOOP) {
+      return execute(plan, engine);
+    }
+    return execute(plan, engine, defaultIoParallelism(), observer);
+  }
+
   /**
    * Executes {@code plan} with up to {@code ioParallelism} concurrent blocking I/O operations.
    *
@@ -74,6 +84,29 @@ public final class DefaultPlanExecutor {
   }
 
   /**
+   * Executes with explicit I/O parallelism and reports opt-in per-node measurements.
+   *
+   * <p>Measurements are delivered when the returned iterator is closed or exhausted.
+   */
+  public static CloseableIterator<FilteredColumnarBatch> execute(
+      Plan plan, Engine engine, int ioParallelism, PlanExecutionObserver observer) {
+    requireNonNull(observer, "observer is null");
+    if (observer == PlanExecutionObserver.NOOP) {
+      return execute(plan, engine, ioParallelism);
+    }
+    if (ioParallelism <= 0) {
+      throw new IllegalArgumentException("ioParallelism must be positive: " + ioParallelism);
+    }
+    ExecutorService ioExecutor = Executors.newFixedThreadPool(ioParallelism);
+    try {
+      return execute(plan, engine, ioExecutor, true, observer);
+    } catch (RuntimeException | Error failure) {
+      ioExecutor.shutdownNow();
+      throw failure;
+    }
+  }
+
+  /**
    * Executes with a caller-owned executor.
    *
    * <p>Closing or exhausting the returned iterator cancels this query's outstanding work but does
@@ -84,12 +117,35 @@ public final class DefaultPlanExecutor {
     return execute(plan, engine, ioExecutor, false);
   }
 
+  /** Executes with a caller-owned executor and reports opt-in per-node measurements. */
+  public static CloseableIterator<FilteredColumnarBatch> execute(
+      Plan plan, Engine engine, ExecutorService ioExecutor, PlanExecutionObserver observer) {
+    requireNonNull(observer, "observer is null");
+    if (observer == PlanExecutionObserver.NOOP) {
+      return execute(plan, engine, ioExecutor);
+    }
+    return execute(plan, engine, ioExecutor, false, observer);
+  }
+
   private static CloseableIterator<FilteredColumnarBatch> execute(
       Plan plan, Engine engine, ExecutorService ioExecutor, boolean ownsExecutor) {
+    return execute(plan, engine, ioExecutor, ownsExecutor, null);
+  }
+
+  private static CloseableIterator<FilteredColumnarBatch> execute(
+      Plan plan,
+      Engine engine,
+      ExecutorService ioExecutor,
+      boolean ownsExecutor,
+      PlanExecutionObserver observer) {
     requireNonNull(plan, "plan is null");
     requireNonNull(engine, "engine is null");
     requireNonNull(ioExecutor, "ioExecutor is null");
-    return new Execution(plan, engine, ioExecutor, ownsExecutor).execute();
+    PlanExecutionInstrumentation instrumentation =
+        observer == null
+            ? null
+            : new PlanExecutionInstrumentation(plan, observer, System::nanoTime);
+    return new Execution(plan, engine, ioExecutor, ownsExecutor, instrumentation).execute();
   }
 
   private static int defaultIoParallelism() {
@@ -102,15 +158,22 @@ public final class DefaultPlanExecutor {
     private final Engine engine;
     private final ExecutorService ioExecutor;
     private final boolean ownsExecutor;
+    private final PlanExecutionInstrumentation instrumentation;
     private final int[] fanout;
     private final List<ExecutionNode> compiled;
     private final List<SourceExecution> sources = new ArrayList<>();
 
-    private Execution(Plan plan, Engine engine, ExecutorService ioExecutor, boolean ownsExecutor) {
+    private Execution(
+        Plan plan,
+        Engine engine,
+        ExecutorService ioExecutor,
+        boolean ownsExecutor,
+        PlanExecutionInstrumentation instrumentation) {
       this.plan = plan;
       this.engine = engine;
       this.ioExecutor = ioExecutor;
       this.ownsExecutor = ownsExecutor;
+      this.instrumentation = instrumentation;
       int nodes = plan.getNodes().size();
       boolean[] reachable = reachableNodes(plan);
       this.fanout = countFanout(plan, reachable);
@@ -122,12 +185,14 @@ public final class DefaultPlanExecutor {
         ExecutionNode root = compile(plan.getNodes().size() - 1);
         root.prepareIo();
         CloseableIterator<FilteredColumnarBatch> terminal = root.execute();
-        return new ResultIterator(terminal, sources, ownsExecutor ? ioExecutor : null);
+        return new ResultIterator(
+            terminal, sources, ownsExecutor ? ioExecutor : null, instrumentation);
       } catch (RuntimeException | Error failure) {
         closeAfterFailure(failure, sources);
         if (ownsExecutor) {
           ioExecutor.shutdownNow();
         }
+        finishAfterFailure(failure, instrumentation);
         throw failure;
       }
     }
@@ -149,17 +214,25 @@ public final class DefaultPlanExecutor {
       if (operator instanceof ScanParquet) {
         ScanParquet scan = (ScanParquet) operator;
         SourceExecution source =
-            new SourceExecution(() -> FileScanExecutor.execute(scan, engine, ioExecutor));
+            new SourceExecution(
+                nodeIndex,
+                instrumentation,
+                () -> FileScanExecutor.execute(scan, engine, ioExecutor));
         sources.add(source);
         execution = source;
       } else if (operator instanceof ScanJson) {
         ScanJson scan = (ScanJson) operator;
         SourceExecution source =
-            new SourceExecution(() -> FileScanExecutor.execute(scan, engine, ioExecutor));
+            new SourceExecution(
+                nodeIndex,
+                instrumentation,
+                () -> FileScanExecutor.execute(scan, engine, ioExecutor));
         sources.add(source);
         execution = source;
       } else {
-        execution = new OperatorExecution(nodeIndex, inputs, compileOperator(node, operator));
+        execution =
+            new OperatorExecution(
+                nodeIndex, inputs, compileOperator(node, operator), instrumentation);
       }
 
       if (fanout[nodeIndex] > 1) {
@@ -216,22 +289,37 @@ public final class DefaultPlanExecutor {
   /** Runtime graph node with an explicit prepare-I/O then execute lifecycle. */
   private abstract static class ExecutionNode {
     protected final List<ExecutionNode> inputs;
+    protected final int nodeIndex;
+    protected final PlanExecutionInstrumentation instrumentation;
     private boolean prepared;
 
-    private ExecutionNode(List<ExecutionNode> inputs) {
+    private ExecutionNode(
+        List<ExecutionNode> inputs, int nodeIndex, PlanExecutionInstrumentation instrumentation) {
       this.inputs =
           Collections.unmodifiableList(new ArrayList<>(requireNonNull(inputs, "inputs is null")));
+      this.nodeIndex = nodeIndex;
+      this.instrumentation = instrumentation;
     }
 
     final void prepareIo() {
       if (prepared) {
         return;
       }
-      for (ExecutionNode input : inputs) {
-        input.prepareIo();
+      boolean observed = instrumentation != null && nodeIndex >= 0;
+      if (observed) {
+        instrumentation.start(nodeIndex, PlanExecutionObserver.Phase.PREPARE);
       }
-      prepareOwnIo();
-      prepared = true;
+      try {
+        for (ExecutionNode input : inputs) {
+          input.prepareIo();
+        }
+        prepareOwnIo();
+        prepared = true;
+      } finally {
+        if (observed) {
+          instrumentation.stop();
+        }
+      }
     }
 
     protected void prepareOwnIo() {}
@@ -245,8 +333,9 @@ public final class DefaultPlanExecutor {
     private CloseableIterator<FilteredColumnarBatch> stream;
     private boolean executed;
 
-    private SourceExecution(SourcePreparer preparer) {
-      super(Collections.emptyList());
+    private SourceExecution(
+        int nodeIndex, PlanExecutionInstrumentation instrumentation, SourcePreparer preparer) {
+      super(Collections.emptyList(), nodeIndex, instrumentation);
       this.preparer = requireNonNull(preparer, "source preparer is null");
     }
 
@@ -257,14 +346,23 @@ public final class DefaultPlanExecutor {
 
     @Override
     CloseableIterator<FilteredColumnarBatch> execute() {
-      if (executed) {
-        throw new IllegalStateException("Plan source was executed more than once");
+      if (instrumentation != null) {
+        instrumentation.start(nodeIndex, PlanExecutionObserver.Phase.OPEN);
       }
-      executed = true;
-      CloseableIterator<FilteredColumnarBatch> result =
-          requireNonNull(stream, "Plan source I/O was not prepared");
-      stream = null;
-      return result;
+      try {
+        if (executed) {
+          throw new IllegalStateException("Plan source was executed more than once");
+        }
+        executed = true;
+        CloseableIterator<FilteredColumnarBatch> result =
+            requireNonNull(stream, "Plan source I/O was not prepared");
+        stream = null;
+        return instrumentation == null ? result : instrumentation.observe(nodeIndex, result);
+      } finally {
+        if (instrumentation != null) {
+          instrumentation.stop();
+        }
+      }
     }
 
     @Override
@@ -279,32 +377,44 @@ public final class DefaultPlanExecutor {
 
   /** Ordinary operator with input traversal separated from its bound batch transformation. */
   private static final class OperatorExecution extends ExecutionNode {
-    private final int nodeIndex;
     private final BatchOperator operator;
     private boolean executed;
 
-    private OperatorExecution(int nodeIndex, List<ExecutionNode> inputs, BatchOperator operator) {
-      super(inputs);
-      this.nodeIndex = nodeIndex;
+    private OperatorExecution(
+        int nodeIndex,
+        List<ExecutionNode> inputs,
+        BatchOperator operator,
+        PlanExecutionInstrumentation instrumentation) {
+      super(inputs, nodeIndex, instrumentation);
       this.operator = requireNonNull(operator, "batch operator is null");
     }
 
     @Override
     CloseableIterator<FilteredColumnarBatch> execute() {
-      if (executed) {
-        throw new IllegalStateException("Plan node " + nodeIndex + " was executed more than once");
+      if (instrumentation != null) {
+        instrumentation.start(nodeIndex, PlanExecutionObserver.Phase.OPEN);
       }
-      executed = true;
-
-      List<CloseableIterator<FilteredColumnarBatch>> streams = new ArrayList<>(inputs.size());
       try {
-        for (ExecutionNode input : inputs) {
-          streams.add(input.execute());
+        if (executed) {
+          throw new IllegalStateException(
+              "Plan node " + nodeIndex + " was executed more than once");
         }
-        return operator.execute(streams);
-      } catch (RuntimeException | Error failure) {
-        closeAfterFailure(failure, streams);
-        throw failure;
+        executed = true;
+        List<CloseableIterator<FilteredColumnarBatch>> streams = new ArrayList<>(inputs.size());
+        try {
+          for (ExecutionNode input : inputs) {
+            streams.add(input.execute());
+          }
+          CloseableIterator<FilteredColumnarBatch> result = operator.execute(streams);
+          return instrumentation == null ? result : instrumentation.observe(nodeIndex, result);
+        } catch (RuntimeException | Error failure) {
+          closeAfterFailure(failure, streams);
+          throw failure;
+        }
+      } finally {
+        if (instrumentation != null) {
+          instrumentation.stop();
+        }
       }
     }
   }
@@ -315,7 +425,8 @@ public final class DefaultPlanExecutor {
     private List<FilteredColumnarBatch> batches;
 
     private MaterializedExecution(ExecutionNode child) {
-      super(Collections.singletonList(requireNonNull(child, "materialized child is null")));
+      super(
+          Collections.singletonList(requireNonNull(child, "materialized child is null")), -1, null);
       this.child = child;
     }
 
@@ -381,19 +492,36 @@ public final class DefaultPlanExecutor {
     }
   }
 
+  private static void finishAfterFailure(
+      Throwable failure, PlanExecutionInstrumentation instrumentation) {
+    if (instrumentation == null) {
+      return;
+    }
+    try {
+      instrumentation.finish();
+    } catch (Throwable observerFailure) {
+      if (observerFailure != failure) {
+        failure.addSuppressed(observerFailure);
+      }
+    }
+  }
+
   private static final class ResultIterator implements CloseableIterator<FilteredColumnarBatch> {
     private final CloseableIterator<FilteredColumnarBatch> delegate;
     private final List<SourceExecution> sources;
     private final ExecutorService ownedExecutor;
+    private final PlanExecutionInstrumentation instrumentation;
     private boolean closed;
 
     private ResultIterator(
         CloseableIterator<FilteredColumnarBatch> delegate,
         List<SourceExecution> sources,
-        ExecutorService ownedExecutor) {
+        ExecutorService ownedExecutor,
+        PlanExecutionInstrumentation instrumentation) {
       this.delegate = requireNonNull(delegate, "terminal iterator is null");
       this.sources = sources;
       this.ownedExecutor = ownedExecutor;
+      this.instrumentation = instrumentation;
     }
 
     @Override
@@ -440,10 +568,16 @@ public final class DefaultPlanExecutor {
       closeables.add(delegate);
       closeables.addAll(sources);
       try {
-        closeAll(closeables);
+        if (instrumentation != null) {
+          instrumentation.finish();
+        }
       } finally {
-        if (ownedExecutor != null) {
-          ownedExecutor.shutdownNow();
+        try {
+          closeAll(closeables);
+        } finally {
+          if (ownedExecutor != null) {
+            ownedExecutor.shutdownNow();
+          }
         }
       }
     }

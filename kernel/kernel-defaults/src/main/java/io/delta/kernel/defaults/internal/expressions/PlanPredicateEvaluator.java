@@ -183,24 +183,27 @@ final class PlanPredicateEvaluator {
         readPrimitive(left, rowId, type), readPrimitive(right, rowId, type), type);
   }
 
-  private static boolean rowEqualsVector(
-      Row row, ColumnVector vector, int rowId, StructType type) {
+  private static boolean rowEqualsVector(Row row, ColumnVector vector, int rowId, StructType type) {
     for (int ordinal = 0; ordinal < type.length(); ordinal++) {
       DataType fieldType = type.at(ordinal).getDataType();
       ColumnVector fieldVector = vector.getChild(ordinal);
       if (row.isNullAt(ordinal) || fieldVector.isNullAt(rowId)) {
-        if (row.isNullAt(ordinal) != fieldVector.isNullAt(rowId)) return false;
+        if (row.isNullAt(ordinal) != fieldVector.isNullAt(rowId)) {
+          return false;
+        }
       } else if (fieldType instanceof StructType) {
-        if (!rowEqualsVector(
-            row.getStruct(ordinal), fieldVector, rowId, (StructType) fieldType)) return false;
+        if (!rowEqualsVector(row.getStruct(ordinal), fieldVector, rowId, (StructType) fieldType)) {
+          return false;
+        }
       } else if (fieldType instanceof ArrayType) {
         if (!arraysEqual(
             row.getArray(ordinal), fieldVector.getArray(rowId), (ArrayType) fieldType)) {
           return false;
         }
       } else if (fieldType instanceof MapType) {
-        if (!mapsEqual(
-            row.getMap(ordinal), fieldVector.getMap(rowId), (MapType) fieldType)) return false;
+        if (!mapsEqual(row.getMap(ordinal), fieldVector.getMap(rowId), (MapType) fieldType)) {
+          return false;
+        }
       } else if (!primitiveEquals(
           readPrimitive(row, ordinal, fieldType),
           readPrimitive(fieldVector, rowId, fieldType),
@@ -212,10 +215,14 @@ final class PlanPredicateEvaluator {
   }
 
   private static boolean arraysEqual(ArrayValue left, ArrayValue right, ArrayType type) {
-    if (left.getSize() != right.getSize()) return false;
+    if (left.getSize() != right.getSize()) {
+      return false;
+    }
     for (int index = 0; index < left.getSize(); index++) {
       if (!vectorValuesEqual(
-          left.getElements(), right.getElements(), index, type.getElementType())) return false;
+          left.getElements(), right.getElements(), index, type.getElementType())) {
+        return false;
+      }
     }
     return true;
   }
@@ -251,7 +258,9 @@ final class PlanPredicateEvaluator {
     if (type instanceof DecimalType) return vector.getDecimal(rowId);
     if (type instanceof StringType
         || type instanceof GeometryType
-        || type instanceof GeographyType) return vector.getString(rowId);
+        || type instanceof GeographyType) {
+      return vector.getString(rowId);
+    }
     if (type instanceof BinaryType) return vector.getBinary(rowId);
     throw new UnsupportedOperationException(type + " cannot be compared for IN membership");
   }
@@ -269,7 +278,9 @@ final class PlanPredicateEvaluator {
     if (type instanceof DecimalType) return row.getDecimal(ordinal);
     if (type instanceof StringType
         || type instanceof GeometryType
-        || type instanceof GeographyType) return row.getString(ordinal);
+        || type instanceof GeographyType) {
+      return row.getString(ordinal);
+    }
     if (type instanceof BinaryType) return row.getBinary(ordinal);
     throw new UnsupportedOperationException(type + " cannot be compared for IN membership");
   }

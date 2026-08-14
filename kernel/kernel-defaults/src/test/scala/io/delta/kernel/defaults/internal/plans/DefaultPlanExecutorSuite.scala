@@ -18,7 +18,9 @@ package io.delta.kernel.defaults.internal.plans
 import java.lang.{Long => LongJ}
 import java.util.Optional
 import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
+import java.util.function.LongSupplier
 
+import scala.collection.mutable.ArrayBuffer
 import scala.jdk.CollectionConverters._
 
 import io.delta.kernel.data.{ColumnarBatch, Row}
@@ -85,6 +87,97 @@ class DefaultPlanExecutorSuite extends AnyFunSuite with MockEngineUtils {
     PlanTestUtils.assertRows(
       DefaultPlanExecutor.execute(plan, mockEngine()),
       Seq(row(idSchema, LongJ.valueOf(7)), row(idSchema, LongJ.valueOf(7))))
+  }
+
+  test("reports nesting-correct measurements using stable plan node identities") {
+    val filter = new Filter(new Predicate(">", new Column("id"), Literal.ofLong(1)))
+    val plan = new Plan(Seq(
+      node(values(
+        idSchema,
+        row(idSchema, LongJ.valueOf(1)),
+        row(idSchema, LongJ.valueOf(2)))),
+      node(filter, 0)).asJava)
+    val measurements = ArrayBuffer.empty[PlanExecutionObserver.Measurement]
+    val observer = new PlanExecutionObserver {
+      override def onMeasurement(measurement: PlanExecutionObserver.Measurement): Unit =
+        measurements += measurement
+    }
+
+    val result = DefaultPlanExecutor.execute(plan, mockEngine(), observer)
+    assert(measurements.isEmpty, "measurements are reported only when execution finishes")
+    PlanTestUtils.assertRows(
+      result,
+      Seq(row(idSchema, LongJ.valueOf(2))))
+
+    val byNodeAndPhase = measurements.map { measurement =>
+      (measurement.getNodeIndex, measurement.getPhase) -> measurement
+    }.toMap
+    assert(measurements.map(_.getNodeIndex).toSet == Set(0, 1))
+    assert(byNodeAndPhase((0, PlanExecutionObserver.Phase.NEXT)).getOperatorType == "Values")
+    assert(byNodeAndPhase((1, PlanExecutionObserver.Phase.NEXT)).getOperatorType == "Filter")
+
+    measurements.foreach { measurement =>
+      assert(measurement.getInvocationCount > 0)
+      assert(measurement.getInclusiveDurationNs >= measurement.getChildDurationNs)
+      assert(
+        measurement.getSelfDurationNs + measurement.getChildDurationNs ==
+          measurement.getInclusiveDurationNs)
+    }
+    PlanExecutionObserver.Phase.values().foreach { phase =>
+      assert(byNodeAndPhase((1, phase)).getChildDurationNs > 0)
+    }
+
+    val valuesNext = byNodeAndPhase((0, PlanExecutionObserver.Phase.NEXT))
+    assert(valuesNext.getOutputBatchCount == 1)
+    assert(valuesNext.getOutputPhysicalRowCount == 2)
+    assert(valuesNext.getOutputKnownSelectedRowCount == 2)
+    assert(valuesNext.getOutputUnknownSelectedBatchCount == 0)
+
+    val filterNext = byNodeAndPhase((1, PlanExecutionObserver.Phase.NEXT))
+    assert(filterNext.getOutputBatchCount == 1)
+    assert(filterNext.getOutputPhysicalRowCount == 2)
+    assert(filterNext.getOutputKnownSelectedRowCount == 0)
+    assert(filterNext.getOutputUnknownSelectedBatchCount == 1)
+  }
+
+  test("NOOP observer preserves the uninstrumented execution path") {
+    val plan = new Plan(Seq(
+      node(values(idSchema, row(idSchema, LongJ.valueOf(7))))).asJava)
+
+    PlanTestUtils.assertRows(
+      DefaultPlanExecutor.execute(plan, mockEngine(), PlanExecutionObserver.NOOP),
+      Seq(row(idSchema, LongJ.valueOf(7))))
+  }
+
+  test("computes inclusive, child, and self duration from nested calls") {
+    val filter = new Filter(new Predicate(">", new Column("id"), Literal.ofLong(1)))
+    val plan = new Plan(Seq(
+      node(values(idSchema, row(idSchema, LongJ.valueOf(2)))),
+      node(filter, 0)).asJava)
+    val measurements = ArrayBuffer.empty[PlanExecutionObserver.Measurement]
+    val observer = new PlanExecutionObserver {
+      override def onMeasurement(measurement: PlanExecutionObserver.Measurement): Unit =
+        measurements += measurement
+    }
+    val times = Iterator(0L, 2L, 5L, 10L)
+    val clock = new LongSupplier {
+      override def getAsLong: Long = times.next()
+    }
+    val instrumentation = new PlanExecutionInstrumentation(plan, observer, clock)
+
+    instrumentation.start(1, PlanExecutionObserver.Phase.PREPARE)
+    instrumentation.start(0, PlanExecutionObserver.Phase.PREPARE)
+    instrumentation.stop()
+    instrumentation.stop()
+    instrumentation.finish()
+
+    val byNode = measurements.map(measurement => measurement.getNodeIndex -> measurement).toMap
+    assert(byNode(0).getInclusiveDurationNs == 3)
+    assert(byNode(0).getChildDurationNs == 0)
+    assert(byNode(0).getSelfDurationNs == 3)
+    assert(byNode(1).getInclusiveDurationNs == 10)
+    assert(byNode(1).getChildDurationNs == 3)
+    assert(byNode(1).getSelfDurationNs == 7)
   }
 
   test("dispatches an empty Load without introducing an Arrow boundary") {
