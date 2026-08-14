@@ -870,7 +870,11 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
             "Struct expression expects a StructType output, but got %s",
             expectedType);
         return StructExpressionEvaluator.eval(
-            (StructExpression) expression, (StructType) expectedType, input.getSize(), this::eval);
+            (StructExpression) expression,
+            (StructType) expectedType,
+            input.getSchema(),
+            input.getSize(),
+            this::eval);
       }
       return visit(expression);
     }
@@ -1199,8 +1203,8 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
           "Coalesce must be transformed before evaluation");
       DataType outputType = ((DeferredCoalesceExpression) coalesce).getOutputType();
       List<ColumnVector> childResults = new ArrayList<>();
-      boolean[] unresolvedRows = new boolean[input.getSize()];
-      Arrays.fill(unresolvedRows, true);
+      int[] selectedChildren = new int[input.getSize()];
+      Arrays.fill(selectedChildren, -1);
       try {
         for (Expression child : coalesce.getChildren()) {
           ExpressionTransformResult transformed =
@@ -1225,26 +1229,23 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
               input.getSize());
 
           boolean hasUnresolvedRows = false;
-          for (int rowId = 0; rowId < unresolvedRows.length; rowId++) {
-            if (unresolvedRows[rowId] && !result.isNullAt(rowId)) {
-              unresolvedRows[rowId] = false;
+          int childIndex = childResults.size() - 1;
+          for (int rowId = 0; rowId < selectedChildren.length; rowId++) {
+            if (selectedChildren[rowId] == -1 && !result.isNullAt(rowId)) {
+              selectedChildren[rowId] = childIndex;
             }
-            hasUnresolvedRows |= unresolvedRows[rowId];
+            hasUnresolvedRows |= selectedChildren[rowId] == -1;
           }
           if (!hasUnresolvedRows) {
             break;
           }
         }
-        return DefaultExpressionUtils.combinationVector(
-            childResults,
-            rowId -> {
-              for (int idx = 0; idx < childResults.size(); idx++) {
-                if (!childResults.get(idx).isNullAt(rowId)) {
-                  return idx;
-                }
-              }
-              return 0;
-            });
+        for (int rowId = 0; rowId < selectedChildren.length; rowId++) {
+          if (selectedChildren[rowId] == -1) {
+            selectedChildren[rowId] = 0;
+          }
+        }
+        return DefaultExpressionUtils.combinationVector(childResults, selectedChildren);
       } catch (RuntimeException failure) {
         Utils.closeCloseablesAndAddSuppressed(failure, childResults.toArray(new ColumnVector[0]));
         throw failure;

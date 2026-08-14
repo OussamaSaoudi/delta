@@ -158,6 +158,146 @@ class StructExpressionEvaluatorSuite extends AnyFunSuite {
     result.close()
   }
 
+  test("schema-guaranteed direct field skips redundant null validation") {
+    val field = new TrackingVector(vector(IntegerType.INTEGER, Integer.valueOf(1)))
+    val input = batch(new StructField("value", IntegerType.INTEGER, false) -> field)
+    val outputType = new StructType().add("value", IntegerType.INTEGER, false)
+
+    val result = evaluate(
+      input,
+      new StructExpression(util.Collections.singletonList(new Column("value"))),
+      outputType)
+
+    assert(field.nullCheckCount == 0)
+    assert(result.getChild(0).getInt(0) == 1)
+    result.close()
+  }
+
+  test("struct mask proves a sibling under the same nullable parents is non-null") {
+    val nestedType = new StructType()
+      .add("storage", StringType.STRING, false)
+      .add("path", StringType.STRING, false)
+    val storage = new TrackingVector(vector(StringType.STRING, "u"))
+    val path = new TrackingVector(vector(StringType.STRING, "p"))
+    val nested = new DefaultStructVector(
+      1,
+      nestedType,
+      util.Optional.empty(),
+      Array[ColumnVector](storage, path))
+    val input = batch(new StructField("nested", nestedType, true) -> nested)
+    val outputType = new StructType().add("path", StringType.STRING, false)
+    val expression = new StructExpression(
+      util.Collections.singletonList(new Column(Array("nested", "path"))),
+      new Predicate("IS_NOT_NULL", new Column(Array("nested", "storage"))))
+
+    val result = evaluate(input, expression, outputType)
+
+    assert(path.nullCheckCount == 0)
+    assert(result.getChild(0).getString(0) == "p")
+    result.close()
+  }
+
+  test("coalesce mask proves coalesced siblings are non-null") {
+    val nestedType = new StructType()
+      .add("storage", StringType.STRING, false)
+      .add("path", StringType.STRING, false)
+    val addPath = new TrackingVector(vector(StringType.STRING, "add-path", null))
+    val removePath = new TrackingVector(vector(StringType.STRING, null, "remove-path"))
+    val add = new DefaultStructVector(
+      2,
+      nestedType,
+      util.Optional.of(Array(false, true)),
+      Array(vector(StringType.STRING, "u", null), addPath))
+    val remove = new DefaultStructVector(
+      2,
+      nestedType,
+      util.Optional.of(Array(true, false)),
+      Array(vector(StringType.STRING, null, "u"), removePath))
+    val input = batch(
+      new StructField("add", nestedType, true) -> add,
+      new StructField("remove", nestedType, true) -> remove)
+    val outputType = new StructType().add("path", StringType.STRING, false)
+    def coalesce(left: Column, right: Column): ScalarExpression =
+      new ScalarExpression("COALESCE", util.Arrays.asList(left, right))
+    val path = coalesce(new Column(Array("add", "path")), new Column(Array("remove", "path")))
+    val storage = coalesce(
+      new Column(Array("add", "storage")),
+      new Column(Array("remove", "storage")))
+    val expression = new StructExpression(
+      util.Collections.singletonList(path),
+      new Predicate("IS_NOT_NULL", storage))
+
+    val result = evaluate(input, expression, outputType)
+
+    assert(addPath.nullCheckCount + removePath.nullCheckCount == 2)
+    assert(result.getChild(0).getString(0) == "add-path")
+    assert(result.getChild(0).getString(1) == "remove-path")
+    result.close()
+  }
+
+  test("struct mask from a different nullable parent does not suppress validation") {
+    val nestedType = new StructType().add("value", StringType.STRING, false)
+    val left = new DefaultStructVector(
+      1,
+      nestedType,
+      util.Optional.of(Array(true)),
+      Array(vector(StringType.STRING, "masked")))
+    val right = new DefaultStructVector(
+      1,
+      nestedType,
+      util.Optional.empty(),
+      Array(vector(StringType.STRING, "present")))
+    val input = batch(
+      new StructField("left", nestedType, true) -> left,
+      new StructField("right", nestedType, true) -> right)
+    val outputType = new StructType().add("value", StringType.STRING, false)
+    val expression = new StructExpression(
+      util.Collections.singletonList(new Column(Array("left", "value"))),
+      new Predicate("IS_NOT_NULL", new Column(Array("right", "value"))))
+
+    intercept[IllegalArgumentException] {
+      evaluate(input, expression, outputType)
+    }
+  }
+
+  test("struct mask with a same-named nullable ancestor under a different root validates") {
+    val nestedType = new StructType()
+      .add("path", StringType.STRING, false)
+      .add("guard", StringType.STRING, false)
+    val rootType = new StructType().add("x", nestedType, true)
+    val leftX = new DefaultStructVector(
+      1,
+      nestedType,
+      util.Optional.of(Array(true)),
+      Array(vector(StringType.STRING, "masked"), vector(StringType.STRING, "masked")))
+    val rightX = new DefaultStructVector(
+      1,
+      nestedType,
+      util.Optional.empty(),
+      Array(vector(StringType.STRING, "present"), vector(StringType.STRING, "present")))
+    val left = new DefaultStructVector(
+      1,
+      rootType,
+      util.Optional.empty(),
+      Array(leftX))
+    val right = new DefaultStructVector(
+      1,
+      rootType,
+      util.Optional.empty(),
+      Array(rightX))
+    val input = batch(
+      new StructField("left", rootType, false) -> left,
+      new StructField("right", rootType, false) -> right)
+    val outputType = new StructType().add("path", StringType.STRING, false)
+    val expression = new StructExpression(
+      util.Collections.singletonList(new Column(Array("left", "x", "path"))),
+      new Predicate("IS_NOT_NULL", new Column(Array("right", "x", "guard"))))
+
+    intercept[IllegalArgumentException] {
+      evaluate(input, expression, outputType)
+    }
+  }
+
   test("nested struct field nullability is matched exactly") {
     val actualNestedType = new StructType().add("value", IntegerType.INTEGER, true)
     val expectedNestedType = new StructType().add("value", IntegerType.INTEGER, false)
@@ -244,12 +384,17 @@ class StructExpressionEvaluatorSuite extends AnyFunSuite {
 
   private class TrackingVector(delegate: ColumnVector) extends ColumnVector {
     var closeCount = 0
+    var nullCheckCount = 0
 
     override def getDataType: DataType = delegate.getDataType
     override def getSize: Int = delegate.getSize
-    override def isNullAt(rowId: Int): Boolean = delegate.isNullAt(rowId)
+    override def isNullAt(rowId: Int): Boolean = {
+      nullCheckCount += 1
+      delegate.isNullAt(rowId)
+    }
     override def getBoolean(rowId: Int): Boolean = delegate.getBoolean(rowId)
     override def getInt(rowId: Int): Int = delegate.getInt(rowId)
+    override def getString(rowId: Int): String = delegate.getString(rowId)
     override def close(): Unit = closeCount += 1
   }
 }

@@ -16,7 +16,6 @@
 package io.delta.kernel.defaults.internal.expressions
 
 import java.lang.{Integer => IntegerJ, Long => LongJ}
-import java.util.function.Function
 
 import scala.collection.JavaConverters._
 
@@ -91,14 +90,30 @@ class DeferredCoalesceExpressionEvaluatorSuite extends AnyFunSuite {
     assertInts(result, Seq(IntegerJ.valueOf(11), IntegerJ.valueOf(12)))
   }
 
+  test("coalesce retains first selected child for every row") {
+    val input = batch(
+      ("first", IntegerType.INTEGER, Seq(IntegerJ.valueOf(1), null, null, null)),
+      ("middle", IntegerType.INTEGER, Seq(IntegerJ.valueOf(9), IntegerJ.valueOf(2), null, null)),
+      (
+        "last",
+        IntegerType.INTEGER,
+        Seq(IntegerJ.valueOf(8), IntegerJ.valueOf(7), IntegerJ.valueOf(3), null)))
+    val result = evaluate(
+      input,
+      coalesce(new Column("first"), new Column("middle"), new Column("last")),
+      IntegerType.INTEGER)
+
+    val expected = Seq(IntegerJ.valueOf(1), IntegerJ.valueOf(2), IntegerJ.valueOf(3), null)
+    assertInts(result, expected)
+    assertInts(result, expected)
+  }
+
   test("combination vector closes child vectors exactly once") {
     val first = new TrackingIntVector(Seq(IntegerJ.valueOf(1), null))
     val second = new TrackingIntVector(Seq(null, IntegerJ.valueOf(2)))
     val result = DefaultExpressionUtils.combinationVector(
       Seq[ColumnVector](first, second).asJava,
-      new Function[IntegerJ, IntegerJ] {
-        override def apply(rowId: IntegerJ): IntegerJ = rowId
-      })
+      Array(0, 1))
 
     assertInts(result, Seq(IntegerJ.valueOf(1), IntegerJ.valueOf(2)))
     result.close()

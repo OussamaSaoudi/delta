@@ -20,7 +20,11 @@ import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultStructVector;
+import io.delta.kernel.expressions.Column;
 import io.delta.kernel.expressions.Expression;
+import io.delta.kernel.expressions.Literal;
+import io.delta.kernel.expressions.Predicate;
+import io.delta.kernel.expressions.ScalarExpression;
 import io.delta.kernel.expressions.StructExpression;
 import io.delta.kernel.internal.util.Utils;
 import io.delta.kernel.types.BooleanType;
@@ -43,6 +47,15 @@ final class StructExpressionEvaluator {
   static ColumnVector eval(
       StructExpression expression,
       StructType outputType,
+      int rowCount,
+      ChildEvaluator childEvaluator) {
+    return eval(expression, outputType, null, rowCount, childEvaluator);
+  }
+
+  static ColumnVector eval(
+      StructExpression expression,
+      StructType outputType,
+      StructType inputType,
       int rowCount,
       ChildEvaluator childEvaluator) {
     requireNonNull(expression, "expression is null");
@@ -82,7 +95,7 @@ final class StructExpressionEvaluator {
       EvaluatedStructVector result =
           new EvaluatedStructVector(
               rowCount, outputType, fields, Optional.ofNullable(nullabilityVector));
-      validateFieldNullability(result, outputType, fields);
+      validateFieldNullability(result, expression, outputType, inputType, fields);
       return result;
     } catch (RuntimeException failure) {
       closeAfterFailure(failure, fieldVectors, nullabilityVector);
@@ -107,10 +120,18 @@ final class StructExpressionEvaluator {
   }
 
   private static void validateFieldNullability(
-      EvaluatedStructVector structVector, StructType outputType, ColumnVector[] fields) {
+      EvaluatedStructVector structVector,
+      StructExpression expression,
+      StructType outputType,
+      StructType inputType,
+      ColumnVector[] fields) {
     for (int ordinal = 0; ordinal < fields.length; ordinal++) {
       StructField field = outputType.at(ordinal);
-      if (field.isNullable()) {
+      if (field.isNullable()
+          || isGuaranteedNonNull(
+              expression.getFieldExpressions().get(ordinal),
+              expression.getNullabilityPredicate(),
+              inputType)) {
         continue;
       }
       for (int rowId = 0; rowId < structVector.getSize(); rowId++) {
@@ -120,6 +141,153 @@ final class StructExpressionEvaluator {
             rowId,
             field.getName());
       }
+    }
+  }
+
+  private static boolean isGuaranteedNonNull(
+      Expression field, Optional<Expression> structPredicate, StructType inputType) {
+    if (inputType == null) {
+      return false;
+    }
+    if (field instanceof Literal) {
+      return ((Literal) field).getValue() != null;
+    }
+    if (isNullTest(field)) {
+      return true;
+    }
+    Optional<Expression> mask = structPredicate.flatMap(StructExpressionEvaluator::nullTestChild);
+    if (mask.isPresent() && equivalent(field, mask.get())) {
+      return true;
+    }
+    if (field instanceof Column) {
+      return columnGuaranteedByMask((Column) field, mask, inputType);
+    }
+    if (isCoalesce(field) && mask.filter(StructExpressionEvaluator::isCoalesce).isPresent()) {
+      List<Expression> fields = field.getChildren();
+      List<Expression> masks = mask.get().getChildren();
+      if (fields.size() != masks.size()) {
+        return false;
+      }
+      for (int index = 0; index < fields.size(); index++) {
+        if (!(fields.get(index) instanceof Column)
+            || !(masks.get(index) instanceof Column)
+            || !columnGuaranteedByMask(
+                (Column) fields.get(index), Optional.of(masks.get(index)), inputType)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    return false;
+  }
+
+  private static boolean isNullTest(Expression expression) {
+    if (!(expression instanceof Predicate)) {
+      return false;
+    }
+    String name = ((Predicate) expression).getName().replace(' ', '_');
+    return name.equalsIgnoreCase("IS_NULL") || name.equalsIgnoreCase("IS_NOT_NULL");
+  }
+
+  private static Optional<Expression> nullTestChild(Expression expression) {
+    if (!(expression instanceof Predicate)
+        || !((Predicate) expression).getName().replace(' ', '_').equalsIgnoreCase("IS_NOT_NULL")
+        || expression.getChildren().size() != 1) {
+      return Optional.empty();
+    }
+    return Optional.of(expression.getChildren().get(0));
+  }
+
+  private static boolean isCoalesce(Expression expression) {
+    return expression instanceof ScalarExpression
+        && ((ScalarExpression) expression).getName().equalsIgnoreCase("COALESCE");
+  }
+
+  private static boolean equivalent(Expression left, Expression right) {
+    if (left instanceof Column && right instanceof Column) {
+      return Arrays.equals(((Column) left).getNames(), ((Column) right).getNames());
+    }
+    if (isCoalesce(left) && isCoalesce(right)) {
+      List<Expression> leftChildren = left.getChildren();
+      List<Expression> rightChildren = right.getChildren();
+      if (leftChildren.size() != rightChildren.size()) {
+        return false;
+      }
+      for (int index = 0; index < leftChildren.size(); index++) {
+        if (!equivalent(leftChildren.get(index), rightChildren.get(index))) {
+          return false;
+        }
+      }
+      return true;
+    }
+    return false;
+  }
+
+  private static boolean columnGuaranteedByMask(
+      Column field, Optional<Expression> mask, StructType inputType) {
+    List<PathStep> fieldPath = resolve(field, inputType);
+    if (fieldPath == null || fieldPath.get(fieldPath.size() - 1).nullable) {
+      return false;
+    }
+    List<PathStep> maskPath =
+        mask.filter(Column.class::isInstance)
+            .map(Column.class::cast)
+            .map(column -> resolve(column, inputType))
+            .orElse(null);
+    for (int index = 0; index < fieldPath.size() - 1; index++) {
+      PathStep step = fieldPath.get(index);
+      // A non-null mask proves a nullable ancestor exists only when it follows the same path.
+      if (step.nullable && !samePrefix(fieldPath, maskPath, index)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static boolean samePrefix(List<PathStep> left, List<PathStep> right, int lastIndex) {
+    if (right == null || right.size() <= lastIndex) {
+      return false;
+    }
+    for (int index = 0; index <= lastIndex; index++) {
+      if (!left.get(index).sameField(right.get(index))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static List<PathStep> resolve(Column column, StructType inputType) {
+    List<PathStep> path = new ArrayList<>();
+    DataType current = inputType;
+    for (String name : column.getNames()) {
+      if (!(current instanceof StructType)) {
+        return null;
+      }
+      StructType struct = (StructType) current;
+      int ordinal = struct.indexOf(name);
+      if (ordinal < 0) {
+        return null;
+      }
+      StructField field = struct.at(ordinal);
+      path.add(new PathStep(ordinal, field.getName(), field.isNullable()));
+      current = field.getDataType();
+    }
+    return path.isEmpty() ? null : path;
+  }
+
+  private static final class PathStep {
+    private final int ordinal;
+    private final String name;
+    private final boolean nullable;
+
+    private PathStep(int ordinal, String name, boolean nullable) {
+      this.ordinal = ordinal;
+      this.name = name;
+      this.nullable = nullable;
+    }
+
+    private boolean sameField(PathStep other) {
+      return ordinal == other.ordinal && name.equals(other.name);
     }
   }
 

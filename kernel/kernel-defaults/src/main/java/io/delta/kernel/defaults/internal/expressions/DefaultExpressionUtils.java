@@ -308,20 +308,13 @@ class DefaultExpressionUtils {
   }
 
   /**
-   * Combines a list of column vectors into one column vector based on the resolution of idxToReturn
+   * Combines a list of column vectors using the precomputed selected child for each row.
    *
    * @param vectors List of ColumnVectors of the same data type with length >= 1
-   * @param idxToReturn Function that takes in a rowId and returns the index of the column vector to
-   *     use as the return value
+   * @param selectedChildren index of the vector to use for each row
    */
-  static ColumnVector combinationVector(
-      List<ColumnVector> vectors, Function<Integer, Integer> idxToReturn) {
+  static ColumnVector combinationVector(List<ColumnVector> vectors, int[] selectedChildren) {
     return new ColumnVector() {
-      // Store the last lookup value to avoid multiple looks up for same rowId.
-      // The general pattern is call `isNullAt(rowId)` followed by `getBoolean(rowId)` or
-      // some other value accessor. So the cache of one value is enough.
-      private int lastLookupRowId = -1;
-      private ColumnVector lastLookupVector = null;
       private boolean closed;
 
       @Override
@@ -426,16 +419,11 @@ class DefaultExpressionUtils {
       public ColumnVector getChild(int ordinal) {
         return combinationVector(
             vectors.stream().map(v -> v.getChild(ordinal)).collect(Collectors.toList()),
-            idxToReturn);
+            selectedChildren);
       }
 
       private ColumnVector getVector(int rowId) {
-        if (rowId == lastLookupRowId) {
-          return lastLookupVector;
-        }
-        lastLookupRowId = rowId;
-        lastLookupVector = vectors.get(idxToReturn.apply(rowId));
-        return lastLookupVector;
+        return vectors.get(selectedChildren[rowId]);
       }
     };
   }
