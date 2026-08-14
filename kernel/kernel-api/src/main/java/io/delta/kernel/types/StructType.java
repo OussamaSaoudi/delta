@@ -236,7 +236,9 @@ public final class StructType extends DataType {
 
   @Override
   public int hashCode() {
-    return Objects.hash(nameToFieldAndOrdinal, fields, fieldNames);
+    // nameToFieldAndOrdinal and fieldNames are derived from fields. Hashing them repeats the same
+    // nested schema traversal and Tuple2.hashCode allocates an Object[] for every field.
+    return fields.hashCode();
   }
 
   /**
