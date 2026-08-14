@@ -90,6 +90,28 @@ class PlanPredicateEvaluatorSuite extends AnyFunSuite {
     assert(error.getMessage.contains("requires exact type"))
   }
 
+  test("public DISTINCT predicates use null-safe plan semantics") {
+    val schema = new StructType()
+      .add("left", IntegerType.INTEGER, true)
+      .add("right", IntegerType.INTEGER, true)
+    val input = batch(
+      schema,
+      5,
+      vector(IntegerType.INTEGER, Seq(Int.box(1), Int.box(1), null, null, Int.box(1))),
+      vector(IntegerType.INTEGER, Seq(Int.box(1), null, Int.box(1), null, Int.box(2))))
+    val result = evaluate(
+      input,
+      new Predicate("DISTINCT", new Column("left"), new Column("right")))
+
+    assert(bools(result) === Seq(
+      BooleanJ.FALSE,
+      BooleanJ.TRUE,
+      BooleanJ.TRUE,
+      BooleanJ.FALSE,
+      BooleanJ.TRUE))
+    result.close()
+  }
+
   test("geospatial comparisons use their Kernel string representation") {
     val geometryType = GeometryType.ofDefault()
     val geographyType = GeographyType.ofDefault()
@@ -152,6 +174,34 @@ class PlanPredicateEvaluatorSuite extends AnyFunSuite {
         BooleanType.BOOLEAN)
     }
     assert(error.getMessage.contains("requires exact type"))
+  }
+
+  test("supported opaque string predicates reuse the default evaluators") {
+    val schema = new StructType().add("value", StringType.STRING, true)
+    val input = batch(
+      schema,
+      4,
+      vector(StringType.STRING, Seq("alpha", "alpine", "beta", null)))
+    val cases = Seq(
+      new OpaquePredicate(
+        "LIKE",
+        Seq[Expression](new Column("value"), Literal.ofString("alp%")).asJava) ->
+        Seq(BooleanJ.TRUE, BooleanJ.TRUE, BooleanJ.FALSE, null),
+      new OpaquePredicate(
+        "STARTS_WITH",
+        Seq[Expression](new Column("value"), Literal.ofString("alpi")).asJava) ->
+        Seq(BooleanJ.FALSE, BooleanJ.TRUE, BooleanJ.FALSE, null))
+
+    cases.foreach { case (predicate, expected) =>
+      val result = evaluate(input, predicate)
+      assert(bools(result) === expected)
+      result.close()
+    }
+
+    val error = intercept[UnsupportedOperationException] {
+      evaluate(input, new OpaquePredicate("UNKNOWN", Seq.empty[Expression].asJava))
+    }
+    assert(error.getMessage.contains("Expression UNKNOWN"))
   }
 
   test("predicate result vectors close their inputs exactly once") {

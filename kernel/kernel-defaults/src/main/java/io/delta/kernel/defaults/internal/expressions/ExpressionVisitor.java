@@ -106,7 +106,7 @@ abstract class ExpressionVisitor<R> {
     } else if (expression instanceof OpaqueExpression) {
       throw unsupported(expression, ((OpaqueExpression) expression).getName());
     } else if (expression instanceof OpaquePredicate) {
-      throw unsupported(expression, ((OpaquePredicate) expression).getOpaqueName());
+      return visitOpaquePredicate((OpaquePredicate) expression);
     } else if (expression instanceof BooleanExpression) {
       return visitBooleanExpression((BooleanExpression) expression);
     } else if (expression instanceof Junction) {
@@ -144,6 +144,19 @@ abstract class ExpressionVisitor<R> {
         String.format("Expression %s (%s) is not supported.", name, expression.getClass()));
   }
 
+  private R visitOpaquePredicate(OpaquePredicate predicate) {
+    String name = predicate.getOpaqueName().toUpperCase(Locale.ENGLISH);
+    Predicate supported = createPredicate(name, predicate.getChildren(), Optional.empty());
+    switch (name) {
+      case "LIKE":
+        return visitLike(supported);
+      case "STARTS_WITH":
+        return visitStartsWith(supported);
+      default:
+        throw unsupported(predicate, predicate.getOpaqueName());
+    }
+  }
+
   private R visitScalarExpression(ScalarExpression expression) {
     List<Expression> children = expression.getChildren();
     String name = expression.getName().toUpperCase(Locale.ENGLISH);
@@ -167,6 +180,13 @@ abstract class ExpressionVisitor<R> {
       case ">=":
       case "IS NOT DISTINCT FROM":
         return visitComparator(createPredicate(name, children, collationIdentifier));
+      case "DISTINCT":
+        if (children.size() != 2) {
+          throw new IllegalArgumentException("DISTINCT requires exactly two operands");
+        }
+        return visitBinaryPredicate(
+            new BinaryPredicate(
+                BinaryPredicate.Operator.DISTINCT, children.get(0), children.get(1)));
       case "ELEMENT_AT":
         return visitElementAt(expression);
       case "NOT":
