@@ -18,13 +18,14 @@ package io.delta.kernel.defaults.internal.data.vector;
 import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 
 import io.delta.kernel.data.*;
+import io.delta.kernel.defaults.internal.data.DefaultValueRetainer;
 import io.delta.kernel.types.*;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.function.Function;
 
 /** Generic column vector implementation to expose an array of objects as a column vector. */
-public class DefaultGenericVector implements ColumnVector {
+public class DefaultGenericVector implements RetainableColumnVector {
 
   public static DefaultGenericVector fromArray(DataType dataType, Object[] elements) {
     return new DefaultGenericVector(elements.length, dataType, rowId -> elements[rowId]);
@@ -65,6 +66,21 @@ public class DefaultGenericVector implements ColumnVector {
 
   @Override
   public void close() {}
+
+  @Override
+  public Object retainValue(int rowId) {
+    assertValidRowId(rowId);
+    Object value = rowIdToValueAccessor.apply(rowId);
+    if (value instanceof byte[]) {
+      return ((byte[]) value).clone();
+    }
+    if (dataType instanceof StructType
+        || dataType instanceof ArrayType
+        || dataType instanceof MapType) {
+      return DefaultValueRetainer.materialize(this, dataType, rowId);
+    }
+    return value;
+  }
 
   @Override
   public boolean isNullAt(int rowId) {

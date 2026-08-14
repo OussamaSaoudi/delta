@@ -27,6 +27,7 @@ import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.FilteredColumnarBatch;
 import io.delta.kernel.data.Row;
 import io.delta.kernel.defaults.internal.data.DefaultRowBasedColumnarBatch;
+import io.delta.kernel.defaults.internal.data.DefaultValueRetainer;
 import io.delta.kernel.defaults.internal.expressions.DefaultExpressionEvaluator;
 import io.delta.kernel.expressions.Column;
 import io.delta.kernel.expressions.ExpressionEvaluator;
@@ -358,7 +359,7 @@ final class AggregateExecutor {
           || (minimum && compare(agg.keyType, ordering, orderingValue) < 0)
           || (!minimum && compare(agg.keyType, ordering, orderingValue) > 0)) {
         if (agg.separateKey) {
-          result = materialize(agg.values, agg.valueType, rowId);
+          result = DefaultValueRetainer.retain(agg.values, agg.valueType, rowId);
           orderingValue = retainScalar(ordering, agg.keyType);
         } else {
           result = retainScalar(ordering, agg.valueType);

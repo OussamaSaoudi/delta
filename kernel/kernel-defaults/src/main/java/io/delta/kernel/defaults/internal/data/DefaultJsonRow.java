@@ -41,7 +41,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
-public class DefaultJsonRow implements Row {
+public class DefaultJsonRow implements RetainableRow {
   private static final ObjectReader JSON_READER =
       new ObjectMapper().reader(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
   private static final ObjectReader SINGLE_OBJECT_JSON_READER =
@@ -124,6 +124,12 @@ public class DefaultJsonRow implements Row {
   @Override
   public boolean isNullAt(int ordinal) {
     return parsedValues[ordinal] == null;
+  }
+
+  @Override
+  public final Object retainValue(int ordinal) {
+    Object value = parsedValues[ordinal];
+    return value instanceof byte[] ? ((byte[]) value).clone() : value;
   }
 
   @Override

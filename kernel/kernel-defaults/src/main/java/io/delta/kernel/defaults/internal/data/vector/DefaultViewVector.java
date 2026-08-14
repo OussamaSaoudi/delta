@@ -21,12 +21,13 @@ import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.MapValue;
 import io.delta.kernel.data.VariantValue;
+import io.delta.kernel.defaults.internal.data.DefaultValueRetainer;
 import io.delta.kernel.types.DataType;
 import java.math.BigDecimal;
 import java.util.Arrays;
 
 /** Provides a restricted view on an underlying column vector. */
-public class DefaultViewVector implements ColumnVector {
+public class DefaultViewVector implements RetainableColumnVector {
 
   private final ColumnVector underlyingVector;
   private final ColumnVector[] nullableParents;
@@ -63,6 +64,18 @@ public class DefaultViewVector implements ColumnVector {
   @Override
   public void close() {
     // Don't close the underlying vector as it may still be used
+  }
+
+  @Override
+  public Object retainValue(int rowId) {
+    checkValidRowId(rowId);
+    int sourceRowId = offset + rowId;
+    for (ColumnVector parent : nullableParents) {
+      if (parent.isNullAt(sourceRowId)) {
+        return null;
+      }
+    }
+    return DefaultValueRetainer.retain(underlyingVector, getDataType(), sourceRowId);
   }
 
   @Override

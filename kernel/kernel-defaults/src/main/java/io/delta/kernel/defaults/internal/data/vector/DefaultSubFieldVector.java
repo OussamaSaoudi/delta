@@ -23,6 +23,8 @@ import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.MapValue;
 import io.delta.kernel.data.Row;
 import io.delta.kernel.data.VariantValue;
+import io.delta.kernel.defaults.internal.data.DefaultValueRetainer;
+import io.delta.kernel.defaults.internal.data.RetainableRow;
 import io.delta.kernel.types.DataType;
 import io.delta.kernel.types.StructField;
 import io.delta.kernel.types.StructType;
@@ -33,7 +35,7 @@ import java.util.function.Function;
  * {@link ColumnVector} wrapper on top of {@link Row} objects. This wrapper allows referencing any
  * nested level column vector from a set of rows.
  */
-public class DefaultSubFieldVector implements ColumnVector {
+public class DefaultSubFieldVector implements RetainableColumnVector {
   private final int size;
   private final DataType dataType;
   private final int columnOrdinal;
@@ -71,6 +73,16 @@ public class DefaultSubFieldVector implements ColumnVector {
   @Override
   public void close() {
     /* nothing to close */
+  }
+
+  @Override
+  public Object retainValue(int rowId) {
+    assertValidRowId(rowId);
+    Row row = rowIdToRowAccessor.apply(rowId);
+    if (row instanceof RetainableRow) {
+      return ((RetainableRow) row).retainValue(columnOrdinal);
+    }
+    return DefaultValueRetainer.materialize(this, dataType, rowId);
   }
 
   @Override
