@@ -19,7 +19,7 @@ import java.math.{BigDecimal => JBigDecimal}
 
 import io.delta.kernel.data.{ColumnarBatch, ColumnVector}
 import io.delta.kernel.defaults.internal.data.DefaultColumnarBatch
-import io.delta.kernel.defaults.internal.data.vector.DefaultGenericVector
+import io.delta.kernel.defaults.internal.data.vector.{DefaultGenericVector, DefaultStructVector}
 import io.delta.kernel.expressions.{Column, Expression, ParseJson}
 import io.delta.kernel.types._
 
@@ -58,6 +58,8 @@ class ParseJsonExpressionEvaluatorSuite extends AnyFunSuite {
     val result = evaluate(input, new ParseJson(new Column("json"), outputSchema), outputSchema)
 
     assert(result.getDataType == outputSchema)
+    assert(result.isInstanceOf[DefaultStructVector])
+    assert(result.getChild(2).isInstanceOf[DefaultStructVector])
     assert((0 until 3).forall(rowId => !result.isNullAt(rowId)))
     assert(result.getChild(0).getLong(0) == 1L)
     assert(result.getChild(1).getString(0) == "one")
@@ -80,7 +82,10 @@ class ParseJsonExpressionEvaluatorSuite extends AnyFunSuite {
 
     assert(result.getDataType == outputSchema)
     assert(result.getSize == 0)
+    assert(result.isInstanceOf[DefaultStructVector])
     assert(result.getChild(0).getSize == 0)
+    result.close()
+    result.close()
   }
 
   Seq[(String, StructType, Seq[String])](

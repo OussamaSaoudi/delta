@@ -23,8 +23,10 @@ import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.MapValue;
 import io.delta.kernel.defaults.internal.DefaultKernelUtils;
 import io.delta.kernel.defaults.internal.data.vector.DefaultGenericVector;
+import io.delta.kernel.defaults.internal.data.vector.DefaultStructVector;
 import io.delta.kernel.internal.util.InternalUtils;
 import io.delta.kernel.internal.util.TimestampUtils;
+import io.delta.kernel.internal.util.Utils;
 import io.delta.kernel.types.*;
 import java.io.IOException;
 import java.io.Reader;
@@ -38,6 +40,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /** Schema-directed JSON decoder used by the default {@code JsonHandler}. */
 final class StrictJsonRowParser {
@@ -105,14 +108,14 @@ final class StrictJsonRowParser {
       return DefaultGenericVector.fromArray(schema, rows);
     }
 
-    Object[] rows = new Object[input.getSize()];
+    StructColumns output = new StructColumns(schema, input.getSize(), false);
     JsonBatchReader reader = new JsonBatchReader(input);
     try (JsonParser parser = JSON_FACTORY.createParser(reader)) {
       requireToken(parser.nextToken(), JsonToken.START_ARRAY, "JSON batch");
       for (int rowId = 0; rowId < input.getSize(); rowId++) {
         requireToken(parser.nextToken(), JsonToken.START_ARRAY, "JSON row wrapper");
         requireToken(parser.nextToken(), JsonToken.START_OBJECT, "JSON object");
-        rows[rowId] = readStruct(parser, schema, true);
+        output.read(parser, rowId, true);
         requireToken(parser.nextToken(), JsonToken.END_ARRAY, "JSON row wrapper");
         if (parser.getTokenLocation().getCharOffset() != reader.rowEndOffset(rowId)) {
           throw new IllegalArgumentException("JSON row crossed its input boundary");
@@ -123,7 +126,147 @@ final class StrictJsonRowParser {
         throw new IllegalArgumentException("JSON batch contains trailing data");
       }
     }
-    return DefaultGenericVector.fromArray(schema, rows);
+    return output.build();
+  }
+
+  private static final class StructColumns {
+    private final StructType schema;
+    private final int size;
+    private final Object[][] values;
+    private final StructColumns[] structs;
+    private final boolean[] nulls;
+    private final int[] seenGeneration;
+    private final int[] failureGeneration;
+    private final RuntimeException[] failures;
+    private int generation;
+
+    private StructColumns(StructType schema, int size, boolean nullable) {
+      this.schema = schema;
+      this.size = size;
+      this.values = new Object[schema.length()][];
+      this.structs = new StructColumns[schema.length()];
+      this.nulls = nullable ? new boolean[size] : null;
+      this.seenGeneration = new int[schema.length()];
+      this.failureGeneration = new int[schema.length()];
+      this.failures = new RuntimeException[schema.length()];
+      for (int ordinal = 0; ordinal < schema.length(); ordinal++) {
+        DataType type = schema.at(ordinal).getDataType();
+        if (type instanceof StructType) {
+          structs[ordinal] = new StructColumns((StructType) type, size, true);
+        } else {
+          values[ordinal] = new Object[size];
+        }
+      }
+    }
+
+    private void read(JsonParser parser, int rowId, boolean nullFailureProneLeaves)
+        throws IOException {
+      if (nulls != null) nulls[rowId] = false;
+      int currentGeneration = ++generation;
+      while (parser.nextToken() != JsonToken.END_OBJECT) {
+        requireToken(parser, JsonToken.FIELD_NAME, "object field");
+        int ordinal = schema.indexOf(parser.currentName());
+        JsonToken valueToken = parser.nextToken();
+        if (ordinal < 0) {
+          parser.skipChildren();
+          continue;
+        }
+
+        seenGeneration[ordinal] = currentGeneration;
+        failureGeneration[ordinal] = 0;
+        failures[ordinal] = null;
+        DataType type = schema.at(ordinal).getDataType();
+        try {
+          if (type instanceof StructType) {
+            readStructField(parser, valueToken, structs[ordinal], rowId, nullFailureProneLeaves);
+          } else {
+            values[ordinal][rowId] =
+                readValue(parser, valueToken, type, nullFailureProneLeaves);
+          }
+        } catch (RuntimeException failure) {
+          setNull(ordinal, rowId);
+          if (!(nullFailureProneLeaves && isFailureProneLeaf(type))) {
+            failureGeneration[ordinal] = currentGeneration;
+            failures[ordinal] = failure;
+          }
+        }
+      }
+
+      for (int ordinal = 0; ordinal < schema.length(); ordinal++) {
+        StructField field = schema.at(ordinal);
+        if (seenGeneration[ordinal] != currentGeneration) {
+          setNull(ordinal, rowId);
+        } else if (failureGeneration[ordinal] == currentGeneration) {
+          throw failures[ordinal];
+        }
+        if (isNull(ordinal, rowId)
+            && !field.isNullable()
+            && !(field.getDataType() instanceof VoidType)) {
+          throw new IllegalArgumentException(
+              "Null value for non-nullable field " + field.getName());
+        }
+      }
+    }
+
+    private static void readStructField(
+        JsonParser parser,
+        JsonToken token,
+        StructColumns child,
+        int rowId,
+        boolean nullFailureProneLeaves)
+        throws IOException {
+      if (token == JsonToken.VALUE_NULL) {
+        child.nulls[rowId] = true;
+      } else {
+        if (token != JsonToken.START_OBJECT) {
+          parser.skipChildren();
+          throw mismatch(parser, "object");
+        }
+        child.read(parser, rowId, nullFailureProneLeaves);
+      }
+    }
+
+    private void setNull(int ordinal, int rowId) {
+      if (structs[ordinal] == null) values[ordinal][rowId] = null;
+      else structs[ordinal].nulls[rowId] = true;
+    }
+
+    private boolean isNull(int ordinal, int rowId) {
+      return structs[ordinal] == null
+          ? values[ordinal][rowId] == null
+          : structs[ordinal].nulls[rowId];
+    }
+
+    private ColumnVector build() {
+      ColumnVector[] children = new ColumnVector[schema.length()];
+      for (int ordinal = 0; ordinal < schema.length(); ordinal++) {
+        children[ordinal] =
+            structs[ordinal] == null
+                ? DefaultGenericVector.fromArray(schema.at(ordinal).getDataType(), values[ordinal])
+                : structs[ordinal].build();
+      }
+      Optional<boolean[]> nullability = nulls == null ? Optional.empty() : Optional.of(nulls);
+      return new OwnedStructVector(size, schema, nullability, children);
+    }
+  }
+
+  private static final class OwnedStructVector extends DefaultStructVector {
+    private final ColumnVector[] children;
+    private boolean closed;
+
+    private OwnedStructVector(
+        int size, StructType schema, Optional<boolean[]> nullability, ColumnVector[] children) {
+      super(size, schema, nullability, children);
+      this.children = children;
+    }
+
+    @Override
+    public void close() {
+      if (!closed) {
+        closed = true;
+        Utils.closeCloseables(children);
+      }
+    }
   }
 
   /** Presents a string vector as one JSON array while preserving each row boundary. */
