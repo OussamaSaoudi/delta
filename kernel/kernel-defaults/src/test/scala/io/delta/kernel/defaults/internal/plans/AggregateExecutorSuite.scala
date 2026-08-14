@@ -194,6 +194,45 @@ class AggregateExecutorSuite extends AnyFunSuite {
     assert(outputType.at(0).getMetadata === FieldMetadata.empty())
   }
 
+  test("non-null-by detaches retained complex values from input vectors") {
+    val binariesType = new ArrayType(BinaryType.BINARY, false)
+    val lookupType = new MapType(StringType.STRING, BinaryType.BINARY, false)
+    val payloadType = new StructType()
+      .add("bytes", BinaryType.BINARY)
+      .add("binaries", binariesType)
+      .add("lookup", lookupType)
+    val schema = new StructType()
+      .add("payload", payloadType)
+      .add("key", IntegerType.INTEGER)
+    val bytes = Array[Byte](1)
+    val arrayBytes = Array[Byte](2)
+    val mapBytes = Array[Byte](3)
+    val payload = row(
+      payloadType,
+      bytes,
+      VectorUtils.buildArrayValue(Seq(arrayBytes).asJava, BinaryType.BINARY),
+      VectorUtils.buildMapValue(
+        Seq("key").asJava,
+        Seq(mapBytes).asJava,
+        lookupType))
+    val aggregate = Aggregate.ungrouped(schema)
+      .aggregateAs(Agg.maxNonNullBy(column("payload"), column("key")), "payload")
+      .build()
+
+    val result = execute(
+      aggregate,
+      schema,
+      Seq(batch(schema, Seq(row(schema, payload, IntegerJ.valueOf(1)))))).head
+    bytes(0) = 11
+    arrayBytes(0) = 12
+    mapBytes(0) = 13
+
+    val retained = result.getStruct(0)
+    assert(retained.getBinary(0).sameElements(Array[Byte](1)))
+    assert(retained.getArray(1).getElements.getBinary(0).sameElements(Array[Byte](2)))
+    assert(retained.getMap(2).getValues.getBinary(0).sameElements(Array[Byte](3)))
+  }
+
   test("unsupported grouping and ordering types fail before consuming input") {
     val arrayType = new ArrayType(IntegerType.INTEGER, true)
     val mapType = new MapType(StringType.STRING, IntegerType.INTEGER, true)

@@ -18,6 +18,7 @@ package io.delta.kernel.defaults.internal.plans;
 import static io.delta.kernel.defaults.internal.expressions.DefaultValueComparator.compare;
 import static io.delta.kernel.defaults.internal.expressions.DefaultValueComparator.supports;
 import static io.delta.kernel.defaults.internal.plans.PlanValueUtils.canonicalize;
+import static io.delta.kernel.defaults.internal.plans.PlanValueUtils.materialize;
 import static io.delta.kernel.defaults.internal.plans.PlanValueUtils.read;
 import static io.delta.kernel.internal.util.Utils.singletonCloseableIterator;
 import static java.util.Objects.requireNonNull;
@@ -37,6 +38,7 @@ import io.delta.kernel.types.DataType;
 import io.delta.kernel.types.StructType;
 import io.delta.kernel.utils.CloseableIterator;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -55,10 +57,10 @@ final class AggregateExecutor {
 
     StructType outputSchema = aggregate.getOutputSchema(Collections.singletonList(inputSchema));
     BoundAggregate bound = BoundAggregate.bind(aggregate, inputSchema, outputSchema);
-    Map<GroupKey, GroupState> groups = new LinkedHashMap<>();
-    if (bound.groups.isEmpty()) {
-      groups.put(new GroupKey(Collections.emptyList()), bound.newState(Collections.emptyList()));
-    }
+    boolean global = bound.groups.isEmpty();
+    Map<GroupKey, GroupState> groups = global ? Collections.emptyMap() : new LinkedHashMap<>();
+    GroupState globalState = global ? bound.newState(new Object[0]) : null;
+    GroupKey lookupKey = global ? null : new GroupKey(bound.groups.size());
 
     try {
       while (input.hasNext()) {
@@ -75,11 +77,14 @@ final class AggregateExecutor {
             if (!batch.isSelected(rowId)) {
               continue;
             }
-            GroupKey key = values.groupKey(rowId);
-            GroupState state = groups.get(key);
-            if (state == null) {
-              state = bound.newState(values.readGroups(rowId));
-              groups.put(key, state);
+            GroupState state = globalState;
+            if (!global) {
+              values.setGroupKey(lookupKey, rowId);
+              state = groups.get(lookupKey);
+              if (state == null) {
+                state = bound.newState(values.readGroups(rowId));
+                groups.put(lookupKey.copy(), state);
+              }
             }
             state.update(values, rowId);
           }
@@ -89,8 +94,9 @@ final class AggregateExecutor {
       Utils.closeCloseables(bound, input);
     }
 
-    List<Row> rows = new ArrayList<>(groups.size());
-    for (GroupState state : groups.values()) {
+    Iterable<GroupState> states = global ? Collections.singletonList(globalState) : groups.values();
+    List<Row> rows = new ArrayList<>(global ? 1 : groups.size());
+    for (GroupState state : states) {
       rows.add(GenericRow.fromValues(outputSchema, state.finish()));
     }
     FilteredColumnarBatch output =
@@ -148,7 +154,7 @@ final class AggregateExecutor {
       }
     }
 
-    GroupState newState(List<Object> groupValues) {
+    GroupState newState(Object[] groupValues) {
       return new GroupState(groupValues, aggs);
     }
 
@@ -252,20 +258,19 @@ final class AggregateExecutor {
       this.groupTypes = groupTypes;
     }
 
-    List<Object> readGroups(int rowId) {
-      List<Object> values = new ArrayList<>(groups.size());
+    Object[] readGroups(int rowId) {
+      Object[] values = new Object[groups.size()];
       for (int index = 0; index < groups.size(); index++) {
-        values.add(read(groups.get(index), groupTypes.get(index), rowId));
+        values[index] = materialize(groups.get(index), groupTypes.get(index), rowId);
       }
       return values;
     }
 
-    GroupKey groupKey(int rowId) {
-      List<Object> values = new ArrayList<>(groups.size());
+    void setGroupKey(GroupKey key, int rowId) {
       for (int index = 0; index < groups.size(); index++) {
-        values.add(canonicalize(groups.get(index), groupTypes.get(index), rowId));
+        key.set(index, canonicalize(groups.get(index), groupTypes.get(index), rowId));
       }
-      return new GroupKey(values);
+      key.finish();
     }
 
     @Override
@@ -310,8 +315,8 @@ final class AggregateExecutor {
     private final List<Object> groupValues;
     private final List<AggState> aggs;
 
-    private GroupState(List<Object> groupValues, List<BoundAgg> boundAggs) {
-      this.groupValues = new ArrayList<>(groupValues);
+    private GroupState(Object[] groupValues, List<BoundAgg> boundAggs) {
+      this.groupValues = new ArrayList<>(Arrays.asList(groupValues));
       this.aggs = new ArrayList<>(boundAggs.size());
       for (BoundAgg agg : boundAggs) {
         aggs.add(new AggState(agg.function));
@@ -344,43 +349,62 @@ final class AggregateExecutor {
     }
 
     void update(EvaluatedAgg agg, int rowId) {
-      Object candidate = read(agg.values, agg.valueType, rowId);
-      if (candidate == null) {
+      if (agg.values.isNullAt(rowId) || agg.keys.isNullAt(rowId)) {
         return;
       }
       Object ordering = read(agg.keys, agg.keyType, rowId);
-      if (ordering == null) {
-        return;
-      }
-      if (orderingValue == null) {
-        orderingValue = ordering;
-        result = candidate;
-        return;
-      }
-      int order = compare(agg.keyType, ordering, orderingValue);
       boolean minimum = function == Agg.Function.MIN || function == Agg.Function.MIN_NON_NULL_BY;
-      if ((minimum && order < 0) || (!minimum && order > 0)) {
-        orderingValue = ordering;
-        result = candidate;
+      if (orderingValue == null
+          || (minimum && compare(agg.keyType, ordering, orderingValue) < 0)
+          || (!minimum && compare(agg.keyType, ordering, orderingValue) > 0)) {
+        if (agg.separateKey) {
+          result = materialize(agg.values, agg.valueType, rowId);
+          orderingValue = retainScalar(ordering, agg.keyType);
+        } else {
+          result = retainScalar(ordering, agg.valueType);
+          orderingValue = result;
+        }
       }
+    }
+
+    private static Object retainScalar(Object value, DataType type) {
+      return type instanceof io.delta.kernel.types.BinaryType ? ((byte[]) value).clone() : value;
     }
   }
 
   private static final class GroupKey {
-    private final List<Object> values;
+    private final Object[] values;
+    private int hashCode;
 
-    private GroupKey(List<Object> values) {
-      this.values = Collections.unmodifiableList(new ArrayList<>(values));
+    private GroupKey(int size) {
+      this.values = new Object[size];
+    }
+
+    private GroupKey(Object[] values, int hashCode) {
+      this.values = values;
+      this.hashCode = hashCode;
+    }
+
+    void set(int index, Object value) {
+      values[index] = value;
+    }
+
+    void finish() {
+      hashCode = Arrays.hashCode(values);
+    }
+
+    GroupKey copy() {
+      return new GroupKey(values.clone(), hashCode);
     }
 
     @Override
     public boolean equals(Object other) {
-      return other instanceof GroupKey && values.equals(((GroupKey) other).values);
+      return other instanceof GroupKey && Arrays.equals(values, ((GroupKey) other).values);
     }
 
     @Override
     public int hashCode() {
-      return values.hashCode();
+      return hashCode;
     }
   }
 }

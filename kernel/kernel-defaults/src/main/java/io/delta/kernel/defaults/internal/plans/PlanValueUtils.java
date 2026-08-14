@@ -22,7 +22,9 @@ import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.MapValue;
 import io.delta.kernel.data.Row;
+import io.delta.kernel.internal.data.GenericRow;
 import io.delta.kernel.internal.data.StructRow;
+import io.delta.kernel.internal.util.VectorUtils;
 import io.delta.kernel.types.ArrayType;
 import io.delta.kernel.types.BinaryType;
 import io.delta.kernel.types.BooleanType;
@@ -101,6 +103,50 @@ final class PlanValueUtils {
       return vector.getMap(rowId);
     }
     throw unsupported(type);
+  }
+
+  /** Copies one vector value into standalone Kernel data safe to retain after the vector closes. */
+  static Object materialize(ColumnVector vector, DataType type, int rowId) {
+    requireNonNull(vector, "vector is null");
+    requireNonNull(type, "type is null");
+    if (vector.isNullAt(rowId)) {
+      return null;
+    }
+    if (type instanceof BinaryType) {
+      return vector.getBinary(rowId).clone();
+    }
+    if (type instanceof StructType) {
+      StructType struct = (StructType) type;
+      List<Object> fields = new ArrayList<>(struct.length());
+      for (int ordinal = 0; ordinal < struct.length(); ordinal++) {
+        fields.add(materialize(vector.getChild(ordinal), struct.at(ordinal).getDataType(), rowId));
+      }
+      return GenericRow.fromValues(struct, fields);
+    }
+    if (type instanceof ArrayType) {
+      ArrayType arrayType = (ArrayType) type;
+      ArrayValue array = vector.getArray(rowId);
+      ColumnVector elementsVector = array.getElements();
+      List<Object> elements = new ArrayList<>(array.getSize());
+      for (int index = 0; index < array.getSize(); index++) {
+        elements.add(materialize(elementsVector, arrayType.getElementType(), index));
+      }
+      return VectorUtils.buildArrayValue(elements, arrayType.getElementType());
+    }
+    if (type instanceof MapType) {
+      MapType mapType = (MapType) type;
+      MapValue map = vector.getMap(rowId);
+      ColumnVector keysVector = map.getKeys();
+      ColumnVector valuesVector = map.getValues();
+      List<Object> keys = new ArrayList<>(map.getSize());
+      List<Object> values = new ArrayList<>(map.getSize());
+      for (int index = 0; index < map.getSize(); index++) {
+        keys.add(materialize(keysVector, mapType.getKeyType(), index));
+        values.add(materialize(valuesVector, mapType.getValueType(), index));
+      }
+      return VectorUtils.buildMapValue(keys, values, mapType);
+    }
+    return read(vector, type, rowId);
   }
 
   /** Reads one row value, cloning mutable binary data for safe retention. */
