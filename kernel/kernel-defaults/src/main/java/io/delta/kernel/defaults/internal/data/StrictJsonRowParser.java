@@ -24,6 +24,7 @@ import io.delta.kernel.data.ColumnarBatch;
 import io.delta.kernel.data.MapValue;
 import io.delta.kernel.data.Row;
 import io.delta.kernel.defaults.internal.DefaultKernelUtils;
+import io.delta.kernel.defaults.internal.data.vector.DefaultConstantVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultGenericVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultStructVector;
 import io.delta.kernel.internal.util.InternalUtils;
@@ -208,8 +209,6 @@ final class StrictJsonRowParser {
         DataType type = schema.at(ordinal).getDataType();
         if (type instanceof StructType) {
           structs[ordinal] = new StructColumns((StructType) type, size, true);
-        } else {
-          values[ordinal] = new Object[size];
         }
       }
     }
@@ -235,8 +234,12 @@ final class StrictJsonRowParser {
           if (type instanceof StructType) {
             readStructField(parser, valueToken, structs[ordinal], rowId, nullFailureProneLeaves);
           } else {
-            values[ordinal][rowId] =
-                readValue(parser, valueToken, type, nullFailureProneLeaves);
+            Object value = readValue(parser, valueToken, type, nullFailureProneLeaves);
+            if (value == null) {
+              setNull(ordinal, rowId);
+            } else {
+              leafValues(ordinal)[rowId] = value;
+            }
           }
         } catch (RuntimeException failure) {
           setNull(ordinal, rowId);
@@ -282,14 +285,26 @@ final class StrictJsonRowParser {
     }
 
     private void setNull(int ordinal, int rowId) {
-      if (structs[ordinal] == null) values[ordinal][rowId] = null;
-      else structs[ordinal].setNull(rowId);
+      if (structs[ordinal] == null) {
+        if (values[ordinal] != null) values[ordinal][rowId] = null;
+      } else {
+        structs[ordinal].setNull(rowId);
+      }
     }
 
     private boolean isNull(int ordinal, int rowId) {
       return structs[ordinal] == null
-          ? values[ordinal][rowId] == null
+          ? values[ordinal] == null || values[ordinal][rowId] == null
           : structs[ordinal].nulls[rowId];
+    }
+
+    private Object[] leafValues(int ordinal) {
+      Object[] column = values[ordinal];
+      if (column == null) {
+        column = new Object[size];
+        values[ordinal] = column;
+      }
+      return column;
     }
 
     private void setNull(int rowId) {
@@ -303,11 +318,16 @@ final class StrictJsonRowParser {
       ColumnVector[] children = new ColumnVector[schema.length()];
       for (int ordinal = 0; ordinal < schema.length(); ordinal++) {
         children[ordinal] =
-            structs[ordinal] == null
-                ? DefaultGenericVector.fromArray(schema.at(ordinal).getDataType(), values[ordinal])
-                : structs[ordinal].build();
+            structs[ordinal] == null ? buildLeaf(ordinal) : structs[ordinal].build();
       }
       return children;
+    }
+
+    private ColumnVector buildLeaf(int ordinal) {
+      DataType type = schema.at(ordinal).getDataType();
+      return values[ordinal] == null
+          ? new DefaultConstantVector(type, size, null)
+          : DefaultGenericVector.fromArray(type, values[ordinal]);
     }
 
     private ColumnVector build() {

@@ -24,7 +24,7 @@ import scala.collection.JavaConverters._
 import io.delta.kernel.data.ColumnVector
 import io.delta.kernel.defaults.engine.hadoopio.HadoopFileIO
 import io.delta.kernel.defaults.internal.data.{DefaultColumnarBatch, DefaultRowBasedColumnarBatch}
-import io.delta.kernel.defaults.internal.data.vector.DefaultStructVector
+import io.delta.kernel.defaults.internal.data.vector.{DefaultConstantVector, DefaultStructVector}
 import io.delta.kernel.defaults.utils.{DefaultVectorTestUtils, TestRow, TestUtils}
 import io.delta.kernel.internal.actions.CommitInfo
 import io.delta.kernel.internal.util.InternalUtils.singletonStringColumnVector
@@ -445,6 +445,38 @@ class DefaultJsonHandlerSuite extends AnyFunSuite with TestUtils with DefaultVec
         |}""".stripMargin,
       schema,
       TestRow(5, TestRow(6L), Map("key" -> 7)))
+  }
+
+  test("columnar parser lazily populates primitive columns") {
+    val schema = new StructType().add("value", ByteType.BYTE)
+    val batch = jsonHandler.parseJson(
+      stringVector(Seq(
+        """{"value":null,"value":5}""",
+        """{"value":6,"value":null}""",
+        "{}",
+        """{"value":7}""")),
+      schema,
+      Optional.empty())
+
+    val values = batch.getColumnVector(0)
+    assert(!values.isNullAt(0) && values.getByte(0) == 5.toByte)
+    assert(values.isNullAt(1))
+    assert(values.isNullAt(2))
+    assert(!values.isNullAt(3) && values.getByte(3) == 7.toByte)
+  }
+
+  test("columnar parser represents an unpopulated leaf as an all-null constant") {
+    val schema = new StructType().add("value", LongType.LONG)
+    val batch = jsonHandler.parseJson(
+      stringVector(Seq("{}", """{"value":null}""")),
+      schema,
+      Optional.empty())
+
+    val values = batch.getColumnVector(0)
+    assert(values.isInstanceOf[DefaultConstantVector])
+    assert(values.getDataType == LongType.LONG)
+    assert(values.getSize == 2)
+    assert(values.isNullAt(0) && values.isNullAt(1))
   }
 
   test("columnar parser clears children when the last duplicate struct is null") {
