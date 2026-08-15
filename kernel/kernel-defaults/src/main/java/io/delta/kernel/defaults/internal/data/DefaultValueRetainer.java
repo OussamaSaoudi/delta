@@ -72,11 +72,11 @@ public final class DefaultValueRetainer {
     }
     if (type instanceof StructType) {
       StructType struct = (StructType) type;
-      List<Object> fields = new ArrayList<>(struct.length());
+      Object[] fields = new Object[struct.length()];
       for (int ordinal = 0; ordinal < struct.length(); ordinal++) {
-        fields.add(retain(vector.getChild(ordinal), struct.at(ordinal).getDataType(), rowId));
+        fields[ordinal] = retain(vector.getChild(ordinal), struct.at(ordinal).getDataType(), rowId);
       }
-      return GenericRow.fromValues(struct, fields);
+      return GenericRow.fromOwnedValues(struct, fields);
     } else if (type instanceof ArrayType) {
       return materialize(vector, type, rowId);
     } else if (type instanceof MapType) {
@@ -98,11 +98,12 @@ public final class DefaultValueRetainer {
       return vector.getBinary(rowId).clone();
     } else if (type instanceof StructType) {
       StructType struct = (StructType) type;
-      List<Object> fields = new ArrayList<>(struct.length());
+      Object[] fields = new Object[struct.length()];
       for (int ordinal = 0; ordinal < struct.length(); ordinal++) {
-        fields.add(materialize(vector.getChild(ordinal), struct.at(ordinal).getDataType(), rowId));
+        fields[ordinal] =
+            materialize(vector.getChild(ordinal), struct.at(ordinal).getDataType(), rowId);
       }
-      return GenericRow.fromValues(struct, fields);
+      return GenericRow.fromOwnedValues(struct, fields);
     } else if (type instanceof ArrayType) {
       ArrayType arrayType = (ArrayType) type;
       ArrayValue array = vector.getArray(rowId);

@@ -24,8 +24,6 @@ import io.delta.kernel.data.Row;
 import io.delta.kernel.data.VariantValue;
 import io.delta.kernel.types.*;
 import java.math.BigDecimal;
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -33,7 +31,7 @@ import java.util.Map;
 public class GenericRow implements Row {
   private final StructType schema;
   private final Map<Integer, ?> ordinalToValue;
-  private final List<?> ordinalValues;
+  private final Object[] ordinalValues;
 
   /**
    * @param schema the schema of the row
@@ -58,19 +56,34 @@ public class GenericRow implements Row {
    * @param ordinalValues one value for every field in {@code schema}, in ordinal order
    */
   public static GenericRow fromValues(StructType schema, List<?> ordinalValues) {
+    requireNonNull(schema, "schema is null");
+    requireNonNull(ordinalValues, "ordinalValues is null");
+    return new GenericRow(schema, ordinalValues.toArray());
+  }
+
+  /**
+   * Creates a dense row that takes ownership of values in schema ordinal order.
+   *
+   * <p>The caller must not retain or modify {@code ordinalValues} after this call.
+   *
+   * @param schema the schema of the row
+   * @param ordinalValues one value for every field in {@code schema}, in ordinal order
+   */
+  public static GenericRow fromOwnedValues(StructType schema, Object[] ordinalValues) {
+    requireNonNull(schema, "schema is null");
+    requireNonNull(ordinalValues, "ordinalValues is null");
     return new GenericRow(schema, ordinalValues);
   }
 
-  private GenericRow(StructType schema, List<?> ordinalValues) {
-    this.schema = requireNonNull(schema, "schema is null");
-    requireNonNull(ordinalValues, "ordinalValues is null");
-    if (ordinalValues.size() != schema.length()) {
+  private GenericRow(StructType schema, Object[] ordinalValues) {
+    this.schema = schema;
+    if (ordinalValues.length != schema.length()) {
       throw new IllegalArgumentException(
           String.format(
-              "Expected %s values for row schema, got %s", schema.length(), ordinalValues.size()));
+              "Expected %s values for row schema, got %s", schema.length(), ordinalValues.length));
     }
     this.ordinalToValue = null;
-    this.ordinalValues = Collections.unmodifiableList(new ArrayList<Object>(ordinalValues));
+    this.ordinalValues = ordinalValues;
     validateVoidValues();
   }
 
@@ -186,7 +199,7 @@ public class GenericRow implements Row {
   }
 
   private Object getValue(int ordinal) {
-    return ordinalValues != null ? ordinalValues.get(ordinal) : ordinalToValue.get(ordinal);
+    return ordinalValues != null ? ordinalValues[ordinal] : ordinalToValue.get(ordinal);
   }
 
   private void validateVoidValues() {

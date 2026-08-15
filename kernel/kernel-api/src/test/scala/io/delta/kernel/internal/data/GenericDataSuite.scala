@@ -54,6 +54,17 @@ class GenericDataSuite extends AnyFunSuite {
     assert(error.getMessage.contains("Expected 1 values"))
   }
 
+  test("GenericRow constructs a dense row from owned values") {
+    val schema = new StructType()
+      .add("id", LongType.LONG, false)
+      .add("name", StringType.STRING)
+
+    val row = GenericRow.fromOwnedValues(schema, Array[AnyRef](LongJ.valueOf(17L), null))
+
+    assert(row.getLong(0) === 17L)
+    assert(row.isNullAt(1))
+  }
+
   test("GenericColumnVector exposes null children for a null struct") {
     val structType = new StructType().add("value", IntegerType.INTEGER)
     val row: Row = GenericRow.fromValues(structType, Seq(IntegerJ.valueOf(7)).asJava)
