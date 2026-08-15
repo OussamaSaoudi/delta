@@ -32,7 +32,6 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.Comparator;
 import java.util.List;
-import java.util.function.Function;
 import java.util.function.IntPredicate;
 import java.util.stream.Collectors;
 
@@ -84,9 +83,7 @@ class DefaultExpressionUtils {
    * accessors.
    */
   static ColumnVector booleanWrapperVector(
-      ColumnVector childVector,
-      Function<Integer, Boolean> valueAccessor,
-      Function<Integer, Boolean> nullabilityAccessor) {
+      ColumnVector childVector, IntPredicate valueAccessor, IntPredicate nullabilityAccessor) {
 
     return new ColumnVector() {
       private boolean closed;
@@ -111,12 +108,12 @@ class DefaultExpressionUtils {
 
       @Override
       public boolean isNullAt(int rowId) {
-        return nullabilityAccessor.apply(rowId);
+        return nullabilityAccessor.test(rowId);
       }
 
       @Override
       public boolean getBoolean(int rowId) {
-        return valueAccessor.apply(rowId);
+        return valueAccessor.test(rowId);
       }
     };
   }

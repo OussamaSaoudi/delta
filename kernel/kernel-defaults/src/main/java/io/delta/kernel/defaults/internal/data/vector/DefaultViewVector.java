@@ -189,6 +189,8 @@ public class DefaultViewVector implements RetainableColumnVector {
   }
 
   private void checkValidRowId(int rowId) {
-    checkArgument(rowId >= 0 && rowId < size, "Invalid rowId=%s for size=%s", rowId, size);
+    if (rowId < 0 || rowId >= size) {
+      checkArgument(false, "Invalid rowId=%s for size=%s", rowId, size);
+    }
   }
 }

@@ -22,7 +22,7 @@ import io.delta.kernel.defaults.internal.data.DefaultValueRetainer;
 import io.delta.kernel.types.*;
 import java.math.BigDecimal;
 import java.util.List;
-import java.util.function.Function;
+import java.util.function.IntFunction;
 
 /** Generic column vector implementation to expose an array of objects as a column vector. */
 public class DefaultGenericVector implements RetainableColumnVector {
@@ -37,10 +37,10 @@ public class DefaultGenericVector implements RetainableColumnVector {
 
   private final int size;
   private final DataType dataType;
-  private final Function<Integer, Object> rowIdToValueAccessor;
+  private final IntFunction<Object> rowIdToValueAccessor;
 
   protected DefaultGenericVector(
-      int size, DataType dataType, Function<Integer, Object> rowIdToValueAccessor) {
+      int size, DataType dataType, IntFunction<Object> rowIdToValueAccessor) {
     if (dataType instanceof VoidType) {
       for (int rowId = 0; rowId < size; rowId++) {
         checkArgument(
@@ -250,6 +250,8 @@ public class DefaultGenericVector implements RetainableColumnVector {
   }
 
   private void assertValidRowId(int rowId) {
-    checkArgument(rowId < size, "Invalid rowId: %s, max allowed rowId is: %s", rowId, (size - 1));
+    if (rowId >= size) {
+      checkArgument(false, "Invalid rowId: %s, max allowed rowId is: %s", rowId, (size - 1));
+    }
   }
 }

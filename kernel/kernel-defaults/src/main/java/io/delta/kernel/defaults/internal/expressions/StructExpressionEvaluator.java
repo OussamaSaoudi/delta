@@ -320,9 +320,11 @@ final class StructExpressionEvaluator {
     @Override
     public boolean isNullAt(int rowId) {
       super.isNullAt(rowId); // Validate the row id.
-      return nullabilityVector
-          .map(vector -> vector.isNullAt(rowId) || !vector.getBoolean(rowId))
-          .orElse(false);
+      if (nullabilityVector.isEmpty()) {
+        return false;
+      }
+      ColumnVector vector = nullabilityVector.get();
+      return vector.isNullAt(rowId) || !vector.getBoolean(rowId);
     }
 
     @Override
