@@ -23,6 +23,8 @@ import scala.collection.JavaConverters._
 
 import io.delta.kernel.data.ColumnVector
 import io.delta.kernel.defaults.engine.hadoopio.HadoopFileIO
+import io.delta.kernel.defaults.internal.data.{DefaultColumnarBatch, DefaultRowBasedColumnarBatch}
+import io.delta.kernel.defaults.internal.data.vector.DefaultStructVector
 import io.delta.kernel.defaults.utils.{DefaultVectorTestUtils, TestRow, TestUtils}
 import io.delta.kernel.internal.actions.CommitInfo
 import io.delta.kernel.internal.util.InternalUtils.singletonStringColumnVector
@@ -250,6 +252,8 @@ class DefaultJsonHandlerSuite extends AnyFunSuite with TestUtils with DefaultVec
       singletonStringColumnVector(null),
       schema,
       Optional.empty())
+    assert(batch.isInstanceOf[DefaultColumnarBatch])
+    assert(batch.getColumnVector(0).isInstanceOf[DefaultStructVector])
     assert(batch.getColumnVector(0).getChild(0).isNullAt(0))
   }
 
@@ -284,13 +288,15 @@ class DefaultJsonHandlerSuite extends AnyFunSuite with TestUtils with DefaultVec
     val selectionVector = booleanVector(Seq(true, false, false))
     val jsonVector = stringVector(
       Seq("""{"col1":1}""", """{"col1":"foo"}""", """{"col1":"foo"}"""))
-    val batchRows = jsonHandler.parseJson(
+    val batch = jsonHandler.parseJson(
       jsonVector,
       new StructType()
         .add("col1", IntegerType.INTEGER),
-      Optional.of(selectionVector)).getRows.toSeq
-    assert(!batchRows(0).isNullAt(0) && batchRows(0).getInt(0) == 1)
-    assert(batchRows(1).isNullAt(0) && batchRows(2).isNullAt(0))
+      Optional.of(selectionVector))
+    assert(batch.isInstanceOf[DefaultColumnarBatch])
+    val rows = batch.getRows.toSeq
+    assert(!rows(0).isNullAt(0) && rows(0).getInt(0) == 1)
+    assert(rows(1).isNullAt(0) && rows(2).isNullAt(0))
   }
 
   test("read json files") {
@@ -316,13 +322,15 @@ class DefaultJsonHandlerSuite extends AnyFunSuite with TestUtils with DefaultVec
         fsClient.listFrom(getTestResourceFilePath("json-files-all-empty/1.json")),
         Seq())).foreach {
       case (testFiles, expResults) =>
-        val actResult = jsonHandler.readJsonFiles(
+        val batches = jsonHandler.readJsonFiles(
           testFiles,
           new StructType()
             .add("path", StringType.STRING)
             .add("size", LongType.LONG)
             .add("dataChange", BooleanType.BOOLEAN),
-          Optional.empty()).toSeq.map(batch => TestRow(batch.getRows.next))
+          Optional.empty()).toSeq
+        assert(batches.forall(_.isInstanceOf[DefaultColumnarBatch]))
+        val actResult = batches.map(batch => TestRow(batch.getRows.next))
 
         checkAnswer(actResult, expResults)
     }
@@ -439,15 +447,29 @@ class DefaultJsonHandlerSuite extends AnyFunSuite with TestUtils with DefaultVec
       TestRow(5, TestRow(6L), Map("key" -> 7)))
   }
 
+  test("columnar parser clears children when the last duplicate struct is null") {
+    val schema = new StructType()
+      .add("nested", new StructType().add("value", IntegerType.INTEGER))
+    val batch = jsonHandler.parseJson(
+      singletonStringColumnVector("""{"nested":{"value":1},"nested":null}"""),
+      schema,
+      Optional.empty())
+    val nested = batch.getColumnVector(0)
+    assert(nested.isNullAt(0))
+    assert(nested.getChild(0).isNullAt(0))
+  }
+
   test("duplicate schema names use the strict tree fallback for every ordinal") {
     val schema = new StructType()
       .add("value", ByteType.BYTE, false)
       .add("value", DecimalType.USER_DEFAULT, false)
 
-    testJsonParserWithSchema(
-      """{"value": 1.0}""",
+    val batch = jsonHandler.parseJson(
+      singletonStringColumnVector("""{"value": 1.0}"""),
       schema,
-      TestRow(1.toByte, JBigDecimal.ONE))
+      Optional.empty())
+    assert(batch.isInstanceOf[DefaultRowBasedColumnarBatch])
+    checkAnswer(batch.getRows.toSeq, Seq(TestRow(1.toByte, JBigDecimal.ONE)))
   }
 
   test("streaming parser retains strict nullability semantics") {
@@ -498,10 +520,12 @@ class DefaultJsonHandlerSuite extends AnyFunSuite with TestUtils with DefaultVec
 
   test("strict parser keeps the first object when trailing JSON values are present") {
     val schema = new StructType().add("value", IntegerType.INTEGER)
-    testJsonParserWithSchema(
-      """{"value": 1} {"value": 2}""",
+    val batch = jsonHandler.parseJson(
+      singletonStringColumnVector("""{"value": 1} {"value": 2}"""),
       schema,
-      TestRow(1))
+      Optional.empty())
+    assert(batch.isInstanceOf[DefaultColumnarBatch])
+    checkAnswer(batch.getRows.toSeq, Seq(TestRow(1)))
   }
 
   test("write rows as json") {

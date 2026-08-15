@@ -20,7 +20,9 @@ import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
+import io.delta.kernel.data.ColumnarBatch;
 import io.delta.kernel.data.MapValue;
+import io.delta.kernel.data.Row;
 import io.delta.kernel.defaults.internal.DefaultKernelUtils;
 import io.delta.kernel.defaults.internal.data.vector.DefaultGenericVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultStructVector;
@@ -129,6 +131,59 @@ final class StrictJsonRowParser {
     return output.build();
   }
 
+  static ColumnarBatch parseStrictBatch(
+      ColumnVector input, StructType schema, Optional<ColumnVector> selectionVector)
+      throws IOException {
+    if (containsDuplicateFieldNames(schema)) {
+      List<Row> rows = new ArrayList<>(input.getSize());
+      Decoder decoder = forSchema(schema);
+      for (int rowId = 0; rowId < input.getSize(); rowId++) {
+        if (!isSelected(selectionVector, rowId) || input.isNullAt(rowId)) {
+          rows.add(null);
+        } else {
+          String json = input.getString(rowId);
+          try {
+            rows.add(decoder.parse(json));
+          } catch (IOException failure) {
+            throw parseFailure(json, failure);
+          }
+        }
+      }
+      return new DefaultRowBasedColumnarBatch(schema, rows);
+    }
+
+    StructColumns output = new StructColumns(schema, input.getSize(), false);
+    for (int rowId = 0; rowId < input.getSize(); rowId++) {
+      if (!isSelected(selectionVector, rowId) || input.isNullAt(rowId)) {
+        output.setNull(rowId);
+        continue;
+      }
+
+      // Strict JsonHandler semantics intentionally accept the first object and ignore trailing
+      // values. Keep one parser per row so batching does not accidentally tighten that contract.
+      String json = input.getString(rowId);
+      try (JsonParser parser = JSON_FACTORY.createParser(json)) {
+        JsonToken token = parser.nextToken();
+        if (token != JsonToken.START_OBJECT) {
+          throw new IllegalArgumentException("Expected one JSON object");
+        }
+        output.read(parser, rowId, false);
+      } catch (IOException failure) {
+        throw parseFailure(json, failure);
+      }
+    }
+    return output.buildBatch();
+  }
+
+  private static boolean isSelected(Optional<ColumnVector> selectionVector, int rowId) {
+    return !selectionVector.isPresent()
+        || (!selectionVector.get().isNullAt(rowId) && selectionVector.get().getBoolean(rowId));
+  }
+
+  private static IOException parseFailure(String json, IOException cause) {
+    return new IOException("Could not parse JSON: " + json, cause);
+  }
+
   private static final class StructColumns {
     private final StructType schema;
     private final int size;
@@ -216,7 +271,7 @@ final class StrictJsonRowParser {
         boolean nullFailureProneLeaves)
         throws IOException {
       if (token == JsonToken.VALUE_NULL) {
-        child.nulls[rowId] = true;
+        child.setNull(rowId);
       } else {
         if (token != JsonToken.START_OBJECT) {
           parser.skipChildren();
@@ -228,7 +283,7 @@ final class StrictJsonRowParser {
 
     private void setNull(int ordinal, int rowId) {
       if (structs[ordinal] == null) values[ordinal][rowId] = null;
-      else structs[ordinal].nulls[rowId] = true;
+      else structs[ordinal].setNull(rowId);
     }
 
     private boolean isNull(int ordinal, int rowId) {
@@ -237,7 +292,14 @@ final class StrictJsonRowParser {
           : structs[ordinal].nulls[rowId];
     }
 
-    private ColumnVector build() {
+    private void setNull(int rowId) {
+      if (nulls != null) nulls[rowId] = true;
+      for (int ordinal = 0; ordinal < schema.length(); ordinal++) {
+        setNull(ordinal, rowId);
+      }
+    }
+
+    private ColumnVector[] buildChildren() {
       ColumnVector[] children = new ColumnVector[schema.length()];
       for (int ordinal = 0; ordinal < schema.length(); ordinal++) {
         children[ordinal] =
@@ -245,8 +307,16 @@ final class StrictJsonRowParser {
                 ? DefaultGenericVector.fromArray(schema.at(ordinal).getDataType(), values[ordinal])
                 : structs[ordinal].build();
       }
+      return children;
+    }
+
+    private ColumnVector build() {
       Optional<boolean[]> nullability = nulls == null ? Optional.empty() : Optional.of(nulls);
-      return new OwnedStructVector(size, schema, nullability, children);
+      return new OwnedStructVector(size, schema, nullability, buildChildren());
+    }
+
+    private ColumnarBatch buildBatch() {
+      return new DefaultColumnarBatch(size, schema, buildChildren());
     }
   }
 

@@ -16,8 +16,10 @@
 package io.delta.kernel.defaults.internal.data;
 
 import io.delta.kernel.data.ColumnVector;
+import io.delta.kernel.data.ColumnarBatch;
 import io.delta.kernel.types.StructType;
 import java.io.IOException;
+import java.util.Optional;
 
 /** Internal batch entry point for permissive ParseJson decoding. */
 public final class DefaultJsonBatchParser {
@@ -25,5 +27,12 @@ public final class DefaultJsonBatchParser {
 
   public static ColumnVector parse(ColumnVector input, StructType schema) throws IOException {
     return StrictJsonRowParser.parsePermissiveBatch(input, schema);
+  }
+
+  /** Decode strict JsonHandler input directly into column vectors. */
+  public static ColumnarBatch parseStrict(
+      ColumnVector input, StructType schema, Optional<ColumnVector> selectionVector)
+      throws IOException {
+    return StrictJsonRowParser.parseStrictBatch(input, schema, selectionVector);
   }
 }
