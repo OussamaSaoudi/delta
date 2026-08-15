@@ -23,6 +23,7 @@ import io.delta.kernel.data.MapValue;
 import io.delta.kernel.data.VariantValue;
 import io.delta.kernel.defaults.internal.data.DefaultValueRetainer;
 import io.delta.kernel.types.DataType;
+import io.delta.kernel.types.StructType;
 import java.math.BigDecimal;
 import java.util.Arrays;
 
@@ -33,6 +34,7 @@ public class DefaultViewVector implements RetainableColumnVector {
   private final ColumnVector[] nullableParents;
   private final int offset;
   private final int size;
+  private final ColumnVector[] childViews;
 
   /**
    * @param underlyingVector the underlying column vector to read
@@ -49,6 +51,9 @@ public class DefaultViewVector implements RetainableColumnVector {
     this.nullableParents = nullableParents;
     this.offset = start;
     this.size = end - start;
+    DataType dataType = underlyingVector.getDataType();
+    this.childViews =
+        dataType instanceof StructType ? new ColumnVector[((StructType) dataType).length()] : null;
   }
 
   @Override
@@ -182,6 +187,19 @@ public class DefaultViewVector implements RetainableColumnVector {
 
   @Override
   public ColumnVector getChild(int ordinal) {
+    if (childViews != null && ordinal >= 0 && ordinal < childViews.length) {
+      ColumnVector child = childViews[ordinal];
+      if (child == null) {
+        child = createChild(ordinal);
+        childViews[ordinal] = child;
+      }
+      return child;
+    }
+    // Delegate invalid ordinals and non-struct access to preserve the underlying error behavior.
+    return createChild(ordinal);
+  }
+
+  private ColumnVector createChild(int ordinal) {
     ColumnVector[] parents = Arrays.copyOf(nullableParents, nullableParents.length + 1);
     parents[nullableParents.length] = underlyingVector;
     return new DefaultViewVector(
