@@ -59,9 +59,10 @@ final class AggregateExecutor {
     StructType outputSchema = aggregate.getOutputSchema(Collections.singletonList(inputSchema));
     BoundAggregate bound = BoundAggregate.bind(aggregate, inputSchema, outputSchema);
     boolean global = bound.groups.isEmpty();
-    Map<GroupKey, GroupState> groups = global ? Collections.emptyMap() : new LinkedHashMap<>();
+    boolean singleGroup = bound.groups.size() == 1;
+    Map<Object, GroupState> groups = global ? Collections.emptyMap() : new LinkedHashMap<>();
     GroupState globalState = global ? bound.newState(new Object[bound.aggs.size()]) : null;
-    GroupKey lookupKey = global ? null : new GroupKey(bound.groups.size());
+    GroupKey lookupKey = global || singleGroup ? null : new GroupKey(bound.groups.size());
 
     try {
       while (input.hasNext()) {
@@ -80,11 +81,17 @@ final class AggregateExecutor {
             }
             GroupState state = globalState;
             if (!global) {
-              values.setGroupKey(lookupKey, rowId);
-              state = groups.get(lookupKey);
+              Object key;
+              if (singleGroup) {
+                key = values.singleGroupKey(rowId);
+              } else {
+                values.setGroupKey(lookupKey, rowId);
+                key = lookupKey;
+              }
+              state = groups.get(key);
               if (state == null) {
                 state = bound.newState(values.readGroups(rowId, bound.aggs.size()));
-                groups.put(lookupKey.copy(), state);
+                groups.put(singleGroup ? key : lookupKey.copy(), state);
               }
             }
             state.update(bound.aggs, values, rowId);
@@ -96,7 +103,8 @@ final class AggregateExecutor {
     }
 
     Iterable<GroupState> states = global ? Collections.singletonList(globalState) : groups.values();
-    List<Row> rows = new ArrayList<>(global ? 1 : groups.size());
+    int outputSize = global ? 1 : groups.size();
+    List<Row> rows = new ArrayList<>(outputSize);
     for (GroupState state : states) {
       rows.add(GenericRow.fromValues(outputSchema, state.finish()));
     }
@@ -272,6 +280,10 @@ final class AggregateExecutor {
         key.set(index, canonicalize(groups.get(index), groupTypes.get(index), rowId));
       }
       key.finish();
+    }
+
+    Object singleGroupKey(int rowId) {
+      return canonicalize(groups.get(0), groupTypes.get(0), rowId);
     }
 
     @Override
