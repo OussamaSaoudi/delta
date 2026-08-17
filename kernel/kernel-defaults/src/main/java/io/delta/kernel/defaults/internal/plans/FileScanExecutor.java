@@ -85,8 +85,9 @@ final class FileScanExecutor {
   }
 
   /**
-   * Opens one reader per file and starts every reader's first blocking read on {@code ioExecutor}.
-   * Results remain pull-based and are emitted in the scan's declared file order.
+   * Keeps a bounded set of file readers one batch ahead on {@code ioExecutor}. Pending files refill
+   * the window as readers are exhausted. Results remain pull-based and are emitted in the scan's
+   * declared file order.
    *
    * <p>The caller owns {@code ioExecutor}. Closing the result cancels its outstanding reads and
    * closes every file reader, but does not shut down the executor.

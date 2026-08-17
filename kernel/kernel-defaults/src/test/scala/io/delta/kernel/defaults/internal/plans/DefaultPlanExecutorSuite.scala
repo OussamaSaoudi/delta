@@ -244,6 +244,46 @@ class DefaultPlanExecutorSuite extends AnyFunSuite with MockEngineUtils {
     }
   }
 
+  test("each scan source makes progress when sources exceed I/O parallelism") {
+    val files = (0 until 4).map(index =>
+      new ScanFile(FileStatus.of(s"file:///table/progress$index.parquet", 10, 1)))
+    val starts = ArrayBuffer.empty[String]
+    val parquet = new BarrierParquetHandler(
+      new CountDownLatch(0),
+      starts,
+      files.zipWithIndex.map { case (file, index) =>
+        file.getFileStatus.getPath -> PlanTestUtils.columnarBatch(
+          idSchema,
+          Seq(row(idSchema, LongJ.valueOf(index + 1))))
+      }.toMap)
+    val first = new ScanParquet(files.take(2).asJava, Seq.empty[String].asJava, idSchema)
+    val second = new ScanParquet(files.drop(2).asJava, Seq.empty[String].asJava, idSchema)
+    val plan = new Plan(Seq(
+      node(first),
+      node(second),
+      node(UnionAll.UNION_ALL, 0, 1)).asJava)
+    val ioExecutor = Executors.newFixedThreadPool(1)
+    val consumer = Executors.newSingleThreadExecutor()
+    val result = DefaultPlanExecutor.execute(plan, mockEngine(parquetHandler = parquet), ioExecutor)
+
+    try {
+      consumer.submit(new Runnable {
+        override def run(): Unit = PlanTestUtils.assertRows(
+          result,
+          (1L to 4L).map(value => row(idSchema, LongJ.valueOf(value))))
+      }).get(5, TimeUnit.SECONDS)
+      assert(starts.synchronized(starts.take(2).toSeq) === Seq(
+        files(0).getFileStatus.getPath,
+        files(2).getFileStatus.getPath))
+    } finally {
+      result.close()
+      consumer.shutdownNow()
+      ioExecutor.shutdownNow()
+      assert(consumer.awaitTermination(10, TimeUnit.SECONDS))
+      assert(ioExecutor.awaitTermination(10, TimeUnit.SECONDS))
+    }
+  }
+
   test("rejects non-positive public I/O parallelism") {
     val plan = new Plan(Seq(node(values(idSchema))).asJava)
     for (parallelism <- Seq(0, -1)) {

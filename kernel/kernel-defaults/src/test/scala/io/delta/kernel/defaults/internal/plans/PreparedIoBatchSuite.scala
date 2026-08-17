@@ -16,8 +16,8 @@
 package io.delta.kernel.defaults.internal.plans
 
 import java.io.IOException
-import java.util.Collections
-import java.util.concurrent.{AbstractExecutorService, CountDownLatch, Executors, Future, RejectedExecutionException, TimeUnit}
+import java.util.{Collections, NoSuchElementException}
+import java.util.concurrent.{AbstractExecutorService, ConcurrentLinkedQueue, CountDownLatch, Executors, Future, LinkedBlockingQueue, RejectedExecutionException, ThreadPoolExecutor, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
 import scala.collection.mutable.ArrayBuffer
@@ -275,6 +275,403 @@ class PreparedIoBatchSuite extends AnyFunSuite {
     }
   }
 
+  test("logical readers use a bounded number of submissions and open readers") {
+    val readerCount = 10000
+    val window = 4
+    val pausedExecutor = new PausedExecutorService
+    val pausedBatch = new PreparedIoBatch(pausedExecutor, window)
+    pausedBatch.registerIteratorGroup(
+      Seq.fill(readerCount)(preparer(iterator(1))).asJava)
+
+    try {
+      pausedBatch.launch()
+      assert(pausedExecutor.queued === window)
+    } finally {
+      pausedBatch.close()
+      shutdown(pausedExecutor)
+    }
+
+    val executor = Executors.newFixedThreadPool(window)
+    val opened = new AtomicInteger()
+    val maxOpened = new AtomicInteger()
+    val allOpened = new CountDownLatch(window)
+    val batch = new PreparedIoBatch(executor, window)
+    batch.registerIteratorGroup(Seq.fill(readerCount)(preparer {
+      val current = opened.incrementAndGet()
+      maxOpened.accumulateAndGet(current, Math.max)
+      allOpened.countDown()
+      new CloseableIterator[Integer] {
+        private var available = true
+
+        override def hasNext: Boolean = available
+
+        override def next(): Integer = {
+          available = false
+          1
+        }
+
+        override def close(): Unit = opened.decrementAndGet()
+      }
+    }).asJava)
+
+    try {
+      batch.launch()
+      assert(allOpened.await(5, TimeUnit.SECONDS))
+      assert(maxOpened.get() === window)
+      assert(opened.get() === window)
+    } finally {
+      batch.close()
+      assert(opened.get() === 0)
+      shutdown(executor)
+    }
+  }
+
+  test("default window follows fixed-pool capacity with a bounded opaque fallback") {
+    val fixedExecutor = Executors.newFixedThreadPool(3)
+    val fixedOpened = new AtomicInteger()
+    val threeOpened = new CountDownLatch(3)
+    val fixedBatch = new PreparedIoBatch(fixedExecutor)
+    fixedBatch.registerIteratorGroup(Seq.fill(10)(preparer {
+      fixedOpened.incrementAndGet()
+      threeOpened.countDown()
+      iterator(1)
+    }).asJava)
+
+    try {
+      fixedBatch.launch()
+      assert(threeOpened.await(5, TimeUnit.SECONDS))
+      assert(fixedOpened.get() === 3)
+    } finally {
+      fixedBatch.close()
+      shutdown(fixedExecutor)
+    }
+
+    val opaqueExecutor = new DirectExecutorService
+    val opaqueOpened = new AtomicInteger()
+    val opaqueBatch = new PreparedIoBatch(opaqueExecutor)
+    opaqueBatch.registerIteratorGroup(Seq.fill(40)(preparer {
+      opaqueOpened.incrementAndGet()
+      iterator(1)
+    }).asJava)
+
+    try {
+      opaqueBatch.launch()
+      assert(opaqueOpened.get() === 32)
+    } finally {
+      opaqueBatch.close()
+      shutdown(opaqueExecutor)
+    }
+
+    val wideExecutor = new FixedCapacityPausedExecutor(64)
+    val wideBatch = new PreparedIoBatch(wideExecutor)
+    wideBatch.registerIteratorGroup(Seq.fill(40)(preparer(iterator(1))).asJava)
+
+    try {
+      wideBatch.launch()
+      assert(wideExecutor.queued === 40)
+    } finally {
+      wideBatch.close()
+      shutdown(wideExecutor)
+    }
+  }
+
+  test("initial reader window is round-robin across source groups") {
+    val executor = new DirectExecutorService
+    val events = ArrayBuffer.empty[String]
+    val batch = new PreparedIoBatch(executor, 2)
+
+    def named(name: String): PreparedIoBatch.IteratorPreparer[Integer] = preparer {
+      events += name
+      iterator(1)
+    }
+
+    batch.registerIteratorGroup(Seq(named("a0"), named("a1")).asJava)
+    batch.registerIteratorGroup(Seq(named("b0"), named("b1")).asJava)
+
+    try {
+      batch.launch()
+      assert(events.toSeq === Seq("a0", "b0"))
+    } finally {
+      batch.close()
+      shutdown(executor)
+    }
+  }
+
+  test("source lane advances when another source holds the only configured slot") {
+    val executor = new DirectExecutorService
+    val opened = ArrayBuffer.empty[String]
+    val batch = new PreparedIoBatch(executor, 1)
+
+    def named(name: String, value: Int): PreparedIoBatch.IteratorPreparer[Integer] = preparer {
+      opened += name
+      iterator(value)
+    }
+
+    val a = batch.registerIteratorGroup(Seq(named("a0", 0), named("a1", 1)).asJava)
+    val b = batch.registerIteratorGroup(Seq(named("b0", 2), named("b1", 3)).asJava)
+    val output = batch.own(FileScanExecutor.combine(a).combine(FileScanExecutor.combine(b)))
+
+    try {
+      batch.launch()
+      assert(opened.toSeq === Seq("a0", "b0"))
+      assert(output.toInMemoryList().asScala.map(_.intValue()).toSeq === Seq(0, 1, 2, 3))
+      assert(opened.toSeq === Seq("a0", "b0", "a1", "b1"))
+    } finally {
+      output.close()
+      shutdown(executor)
+    }
+  }
+
+  test("every source gets a progress lane when source count exceeds the window") {
+    val executor = new DirectExecutorService
+    val opened = ArrayBuffer.empty[String]
+    val batch = new PreparedIoBatch(executor, 2)
+    val groups = (0 until 5).map { group =>
+      batch.registerIteratorGroup((0 until 2).map { ordinal =>
+        preparer {
+          opened += s"$group-$ordinal"
+          iterator(group * 10 + ordinal)
+        }
+      }.asJava)
+    }
+    val output = batch.own(FileScanExecutor.combine(groups.flatMap(_.asScala).asJava))
+
+    try {
+      batch.launch()
+      assert(opened.toSeq === (0 until 5).map(group => s"$group-0"))
+      assert(output.toInMemoryList().asScala.map(_.intValue()).toSeq ===
+        Seq(0, 1, 10, 11, 20, 21, 30, 31, 40, 41))
+    } finally {
+      output.close()
+      shutdown(executor)
+    }
+  }
+
+  test("reverse read completion still emits declared file order") {
+    val executor = Executors.newFixedThreadPool(3)
+    val started = new CountDownLatch(3)
+    val releases = Seq.fill(3)(new CountDownLatch(1))
+    val finished = Seq.fill(3)(new CountDownLatch(1))
+    val batch = new PreparedIoBatch(executor, 3)
+    val readers = batch.registerIteratorGroup((0 until 3).map { value =>
+      preparer(blockingIterator(value, started, releases(value), finished(value)))
+    }.asJava)
+    val output = batch.own(FileScanExecutor.combine(readers))
+
+    try {
+      batch.launch()
+      assert(started.await(5, TimeUnit.SECONDS))
+      Seq(2, 1, 0).foreach { ordinal =>
+        releases(ordinal).countDown()
+        assert(finished(ordinal).await(5, TimeUnit.SECONDS))
+      }
+      assert(output.toInMemoryList().asScala.map(_.intValue()).toSeq === Seq(0, 1, 2))
+    } finally {
+      releases.foreach(_.countDown())
+      output.close()
+      shutdown(executor)
+    }
+  }
+
+  test("active reader keeps exactly one batch read ahead") {
+    val executor = Executors.newSingleThreadExecutor()
+    val firstRead = new CountDownLatch(1)
+    val secondRead = new CountDownLatch(1)
+    val reads = new AtomicInteger()
+    val batch = new PreparedIoBatch(executor, 1)
+    val output = batch.own(batch.registerIteratorGroup(Seq(preparer {
+      val values = Iterator(1, 2, 3)
+      new CloseableIterator[Integer] {
+        override def hasNext: Boolean = values.hasNext
+
+        override def next(): Integer = {
+          val count = reads.incrementAndGet()
+          if (count == 1) firstRead.countDown()
+          if (count == 2) secondRead.countDown()
+          values.next()
+        }
+
+        override def close(): Unit = ()
+      }
+    }).asJava).get(0))
+
+    try {
+      batch.launch()
+      assert(firstRead.await(5, TimeUnit.SECONDS))
+      assert(reads.get() === 1)
+      assert(output.next() === 1)
+      assert(secondRead.await(5, TimeUnit.SECONDS))
+      Thread.sleep(25)
+      assert(reads.get() === 2)
+      assert(output.toInMemoryList().asScala.map(_.intValue()).toSeq === Seq(2, 3))
+    } finally {
+      output.close()
+      shutdown(executor)
+    }
+  }
+
+  test("empty readers refill the window iteratively") {
+    val readerCount = 10000
+    val executor = new DirectExecutorService
+    val opened = new AtomicInteger()
+    val batch = new PreparedIoBatch(executor, 1)
+    val readers = batch.registerIteratorGroup(Seq.fill(readerCount)(preparer {
+      opened.incrementAndGet()
+      emptyIterator()
+    }).asJava)
+    val output = batch.own(FileScanExecutor.combine(readers))
+
+    try {
+      batch.launch()
+      assert(!output.hasNext)
+      assert(opened.get() === readerCount)
+    } finally {
+      output.close()
+      shutdown(executor)
+    }
+  }
+
+  test("early close refills a slot and failure cancels pending work") {
+    val executor = new DirectExecutorService
+    val opened = new AtomicInteger()
+    val batch = new PreparedIoBatch(executor, 1)
+    val readers = batch.registerIteratorGroup(Seq(
+      preparer { opened.incrementAndGet(); iterator(1) },
+      preparer { opened.incrementAndGet(); iterator(2) },
+      preparer { opened.incrementAndGet(); iterator(3) }).asJava)
+
+    try {
+      batch.launch()
+      assert(opened.get() === 1)
+      readers.get(1).close()
+      assert(opened.get() === 1)
+      readers.get(0).close()
+      assert(opened.get() === 2)
+      assert(readers.get(2).next() === 3)
+    } finally {
+      batch.close()
+      shutdown(executor)
+    }
+
+    val failureExecutor = new DirectExecutorService
+    val pendingTaskRan = new AtomicBoolean(false)
+    val pendingReaderOpened = new AtomicBoolean(false)
+    val failureBatch = new PreparedIoBatch(failureExecutor, 1)
+    val pendingTask = failureBatch.registerTask(() => pendingTaskRan.compareAndSet(false, true))
+    val failureReaders = failureBatch.registerIteratorGroup(
+      Seq(
+        preparer(new FailingIterator),
+        preparer { pendingReaderOpened.set(true); iterator(2) }).asJava,
+      Seq(null, pendingTask).asJava)
+
+    try {
+      failureBatch.launch()
+      assertThrows[IllegalStateException](failureReaders.get(0).hasNext)
+      assert(pendingTask.isCancelled)
+      assert(!pendingTaskRan.get())
+      assert(!pendingReaderOpened.get())
+    } finally {
+      failureBatch.close()
+      shutdown(failureExecutor)
+    }
+  }
+
+  test("exhausted reader close failure terminates the whole batch") {
+    val executor = new DirectExecutorService
+    val pendingOpened = new AtomicBoolean(false)
+    val batch = new PreparedIoBatch(executor, 1)
+    val readers = batch.registerIteratorGroup(Seq(
+      preparer {
+        new CloseableIterator[Integer] {
+          override def hasNext: Boolean = false
+
+          override def next(): Integer = throw new NoSuchElementException()
+
+          override def close(): Unit = throw new IOException("close failed")
+        }
+      },
+      preparer { pendingOpened.set(true); iterator(2) }).asJava)
+
+    try {
+      batch.launch()
+      val failure = intercept[io.delta.kernel.exceptions.KernelEngineException] {
+        readers.get(0).hasNext
+      }
+      assert(failure.getCause.getMessage === "close failed")
+      assert(!pendingOpened.get())
+      assertThrows[IllegalStateException](batch.launch())
+    } finally {
+      batch.close()
+      shutdown(executor)
+    }
+  }
+
+  test("read-ahead submission rejection closes the whole batch") {
+    val executor = new RejectingExecutorService(1)
+    val firstClosed = new AtomicBoolean(false)
+    val pendingOpened = new AtomicBoolean(false)
+    val batch = new PreparedIoBatch(executor, 1)
+    val readers = batch.registerIteratorGroup(Seq(
+      preparer(iterator(1, firstClosed)),
+      preparer { pendingOpened.set(true); iterator(2) }).asJava)
+    val output = batch.own(FileScanExecutor.combine(readers))
+
+    try {
+      batch.launch()
+      assertThrows[RejectedExecutionException](output.next())
+      assert(firstClosed.get())
+      assert(!pendingOpened.get())
+      assertThrows[IllegalStateException](batch.launch())
+    } finally {
+      output.close()
+      shutdown(executor)
+    }
+  }
+
+  test("close cancels and awaits a dynamically submitted read-ahead task") {
+    val executor = Executors.newSingleThreadExecutor()
+    val secondReadStarted = new CountDownLatch(1)
+    val secondReadInterrupted = new CountDownLatch(1)
+    val readerClosed = new CountDownLatch(1)
+    val reads = new AtomicInteger()
+    val batch = new PreparedIoBatch(executor, 1)
+    val output = batch.own(batch.registerIteratorGroup(Seq(preparer {
+      new CloseableIterator[Integer] {
+        override def hasNext: Boolean = true
+
+        override def next(): Integer = {
+          if (reads.incrementAndGet() == 1) {
+            1
+          } else {
+            secondReadStarted.countDown()
+            try {
+              new CountDownLatch(1).await()
+              2
+            } catch {
+              case failure: InterruptedException =>
+                secondReadInterrupted.countDown()
+                throw failure
+            }
+          }
+        }
+
+        override def close(): Unit = readerClosed.countDown()
+      }
+    }).asJava).get(0))
+
+    try {
+      batch.launch()
+      assert(output.next() === 1)
+      assert(secondReadStarted.await(5, TimeUnit.SECONDS))
+      output.close()
+      assert(secondReadInterrupted.await(5, TimeUnit.SECONDS))
+      assert(readerClosed.getCount === 0)
+    } finally {
+      output.close()
+      shutdown(executor)
+    }
+  }
+
   private def preparer(
       open: => CloseableIterator[Integer]): PreparedIoBatch.IteratorPreparer[Integer] =
     () => open
@@ -316,6 +713,44 @@ class PreparedIoBatchSuite extends AnyFunSuite {
       override def close(): Unit = closed.set(true)
     }
 
+  private def blockingIterator(
+      value: Integer,
+      started: CountDownLatch,
+      release: CountDownLatch,
+      finished: CountDownLatch): CloseableIterator[Integer] =
+    new CloseableIterator[Integer] {
+      private var available = true
+
+      override def hasNext: Boolean = available
+
+      override def next(): Integer = {
+        started.countDown()
+        release.await()
+        available = false
+        finished.countDown()
+        value
+      }
+
+      override def close(): Unit = release.countDown()
+    }
+
+  private def emptyIterator(): CloseableIterator[Integer] =
+    new CloseableIterator[Integer] {
+      override def hasNext: Boolean = false
+
+      override def next(): Integer = throw new NoSuchElementException()
+
+      override def close(): Unit = ()
+    }
+
+  private class FailingIterator extends CloseableIterator[Integer] {
+    override def hasNext: Boolean = true
+
+    override def next(): Integer = throw new IllegalStateException("read failed")
+
+    override def close(): Unit = ()
+  }
+
   private def shutdown(executor: java.util.concurrent.ExecutorService): Unit = {
     executor.shutdownNow()
     assert(executor.awaitTermination(5, TimeUnit.SECONDS))
@@ -350,5 +785,27 @@ class PreparedIoBatchSuite extends AnyFunSuite {
       }
       super.execute(command)
     }
+  }
+
+  private class PausedExecutorService extends DirectExecutorService {
+    private val commands = new ConcurrentLinkedQueue[Runnable]()
+
+    def queued: Int = commands.size()
+
+    override def execute(command: Runnable): Unit = commands.add(command)
+  }
+
+  private class FixedCapacityPausedExecutor(capacity: Int)
+      extends ThreadPoolExecutor(
+        capacity,
+        capacity,
+        0,
+        TimeUnit.MILLISECONDS,
+        new LinkedBlockingQueue[Runnable]()) {
+    private val commands = new ConcurrentLinkedQueue[Runnable]()
+
+    def queued: Int = commands.size()
+
+    override def execute(command: Runnable): Unit = commands.add(command)
   }
 }
