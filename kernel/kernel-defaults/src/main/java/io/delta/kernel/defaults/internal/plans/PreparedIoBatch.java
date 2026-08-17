@@ -89,7 +89,8 @@ final class PreparedIoBatch implements AutoCloseable {
     if (executor instanceof ThreadPoolExecutor) {
       ThreadPoolExecutor threadPool = (ThreadPoolExecutor) executor;
       if (threadPool.getCorePoolSize() == threadPool.getMaximumPoolSize()) {
-        return Math.max(1, threadPool.getMaximumPoolSize());
+        // Keep one queued wave so ordered consumption and EOF checks do not idle the pool.
+        return (int) Math.min(Integer.MAX_VALUE, 2L * threadPool.getMaximumPoolSize());
       }
     }
     return FALLBACK_READER_WINDOW;

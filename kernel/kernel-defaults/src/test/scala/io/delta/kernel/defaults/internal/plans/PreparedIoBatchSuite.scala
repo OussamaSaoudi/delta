@@ -330,20 +330,13 @@ class PreparedIoBatchSuite extends AnyFunSuite {
   }
 
   test("default window follows fixed-pool capacity with a bounded opaque fallback") {
-    val fixedExecutor = Executors.newFixedThreadPool(3)
-    val fixedOpened = new AtomicInteger()
-    val threeOpened = new CountDownLatch(3)
+    val fixedExecutor = new FixedCapacityPausedExecutor(3)
     val fixedBatch = new PreparedIoBatch(fixedExecutor)
-    fixedBatch.registerIteratorGroup(Seq.fill(10)(preparer {
-      fixedOpened.incrementAndGet()
-      threeOpened.countDown()
-      iterator(1)
-    }).asJava)
+    fixedBatch.registerIteratorGroup(Seq.fill(10)(preparer(iterator(1))).asJava)
 
     try {
       fixedBatch.launch()
-      assert(threeOpened.await(5, TimeUnit.SECONDS))
-      assert(fixedOpened.get() === 3)
+      assert(fixedExecutor.queued === 6)
     } finally {
       fixedBatch.close()
       shutdown(fixedExecutor)
