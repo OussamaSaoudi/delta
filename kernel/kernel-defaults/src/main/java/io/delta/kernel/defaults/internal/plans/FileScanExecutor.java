@@ -126,6 +126,14 @@ final class FileScanExecutor {
         ioExecutor);
   }
 
+  static void validate(ScanParquet scan) {
+    ScanLayout.forParquet(requireNonNull(scan, "scan is null"));
+  }
+
+  static void validate(ScanJson scan) {
+    ScanLayout.forJson(requireNonNull(scan, "scan is null"));
+  }
+
   private static CloseableIterator<FilteredColumnarBatch> openParquet(
       ScanParquet scan, ScanLayout layout, List<ScanFile> files, Engine engine) {
     CloseableIterator<FileReadResult> reader =
