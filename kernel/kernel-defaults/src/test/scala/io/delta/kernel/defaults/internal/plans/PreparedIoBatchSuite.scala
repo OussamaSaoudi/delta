@@ -160,6 +160,9 @@ class PreparedIoBatchSuite extends AnyFunSuite {
     val bReaders = batch.registerIteratorGroup(
       Seq(reader("b0-reader"), reader("b1-reader")).asJava,
       bDependencies.asJava)
+    assertThrows[IllegalArgumentException] {
+      batch.registerIteratorGroup(Seq(reader("reused")).asJava, Seq(aDependencies.head).asJava)
+    }
 
     try {
       batch.launch()
@@ -376,24 +379,16 @@ class PreparedIoBatchSuite extends AnyFunSuite {
   }
 
   test("initial reader window is round-robin across source groups") {
-    val executor = new DirectExecutorService
-    val events = ArrayBuffer.empty[String]
-    val batch = new PreparedIoBatch(executor, 2)
-
-    def named(name: String): PreparedIoBatch.IteratorPreparer[Integer] = preparer {
-      events += name
-      iterator(1)
-    }
-
-    batch.registerIteratorGroup(Seq(named("a0"), named("a1")).asJava)
-    batch.registerIteratorGroup(Seq(named("b0"), named("b1")).asJava)
-
-    try {
+    withBatch(new DirectExecutorService, 2) { batch =>
+      val events = ArrayBuffer.empty[String]
+      def named(name: String): PreparedIoBatch.IteratorPreparer[Integer] = preparer {
+        events += name
+        iterator(1)
+      }
+      batch.registerIteratorGroup(Seq(named("a0"), named("a1")).asJava)
+      batch.registerIteratorGroup(Seq(named("b0"), named("b1")).asJava)
       batch.launch()
       assert(events.toSeq === Seq("a0", "b0"))
-    } finally {
-      batch.close()
-      shutdown(executor)
     }
   }
 
@@ -512,22 +507,16 @@ class PreparedIoBatchSuite extends AnyFunSuite {
 
   test("empty readers refill the window iteratively") {
     val readerCount = 10000
-    val executor = new DirectExecutorService
-    val opened = new AtomicInteger()
-    val batch = new PreparedIoBatch(executor, 1)
-    val readers = batch.registerIteratorGroup(Seq.fill(readerCount)(preparer {
-      opened.incrementAndGet()
-      emptyIterator()
-    }).asJava)
-    val output = batch.own(FileScanExecutor.combine(readers))
-
-    try {
+    withBatch(new DirectExecutorService, 1) { batch =>
+      val opened = new AtomicInteger()
+      val readers = batch.registerIteratorGroup(Seq.fill(readerCount)(preparer {
+        opened.incrementAndGet()
+        emptyIterator()
+      }).asJava)
+      val output = batch.own(FileScanExecutor.combine(readers))
       batch.launch()
       assert(!output.hasNext)
       assert(opened.get() === readerCount)
-    } finally {
-      output.close()
-      shutdown(executor)
     }
   }
 
@@ -577,22 +566,17 @@ class PreparedIoBatchSuite extends AnyFunSuite {
   }
 
   test("exhausted reader close failure terminates the whole batch") {
-    val executor = new DirectExecutorService
-    val pendingOpened = new AtomicBoolean(false)
-    val batch = new PreparedIoBatch(executor, 1)
-    val readers = batch.registerIteratorGroup(Seq(
-      preparer {
-        new CloseableIterator[Integer] {
-          override def hasNext: Boolean = false
-
-          override def next(): Integer = throw new NoSuchElementException()
-
-          override def close(): Unit = throw new IOException("close failed")
-        }
-      },
-      preparer { pendingOpened.set(true); iterator(2) }).asJava)
-
-    try {
+    withBatch(new DirectExecutorService, 1) { batch =>
+      val pendingOpened = new AtomicBoolean(false)
+      val readers = batch.registerIteratorGroup(Seq(
+        preparer {
+          new CloseableIterator[Integer] {
+            override def hasNext: Boolean = false
+            override def next(): Integer = throw new NoSuchElementException()
+            override def close(): Unit = throw new IOException("close failed")
+          }
+        },
+        preparer { pendingOpened.set(true); iterator(2) }).asJava)
       batch.launch()
       val failure = intercept[io.delta.kernel.exceptions.KernelEngineException] {
         readers.get(0).hasNext
@@ -600,9 +584,6 @@ class PreparedIoBatchSuite extends AnyFunSuite {
       assert(failure.getCause.getMessage === "close failed")
       assert(!pendingOpened.get())
       assertThrows[IllegalStateException](batch.launch())
-    } finally {
-      batch.close()
-      shutdown(executor)
     }
   }
 
@@ -675,6 +656,20 @@ class PreparedIoBatchSuite extends AnyFunSuite {
   private def preparer(
       open: => CloseableIterator[Integer]): PreparedIoBatch.IteratorPreparer[Integer] =
     () => open
+
+  private def withBatch[T](
+      executor: java.util.concurrent.ExecutorService,
+      readerWindow: Int)(test: PreparedIoBatch => T): T =
+    withBatch(new PreparedIoBatch(executor, readerWindow), executor)(test)
+
+  private def withBatch[T](
+      batch: PreparedIoBatch,
+      executor: java.util.concurrent.ExecutorService)(test: PreparedIoBatch => T): T =
+    try test(batch)
+    finally {
+      batch.close()
+      shutdown(executor)
+    }
 
   private def failingPreparer(
       message: String,

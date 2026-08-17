@@ -25,10 +25,8 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
-import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.NoSuchElementException;
-import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CountDownLatch;
@@ -40,9 +38,12 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-/** A set of file-I/O tasks registered before fair, deterministic submission. */
+/**
+ * Registers file readers by source, launches them fairly, and keeps one batch read ahead while
+ * completed readers return credit to the shared reader window.
+ */
 final class PreparedIoBatch implements AutoCloseable {
-  private static final int FALLBACK_MAX_ACTIVE_READERS = 32;
+  private static final int FALLBACK_READER_WINDOW = 32;
 
   @FunctionalInterface
   interface IteratorPreparer<T> {
@@ -57,31 +58,33 @@ final class PreparedIoBatch implements AutoCloseable {
 
   private final Object lock = new Object();
   private final ExecutorService executor;
-  private final int maxActiveReaders;
+  private final int readerWindow;
   private final List<TrackedFutureTask<?>> registeredTasks = new ArrayList<>();
-  private final Set<TrackedFutureTask<?>> submittedTasks =
-      Collections.newSetFromMap(new IdentityHashMap<>());
   private final List<SourceGroup> iteratorGroups = new ArrayList<>();
   private final Deque<SourceGroup> pendingGroups = new ArrayDeque<>();
   private State state = State.REGISTERING;
-  private int effectiveMaxActiveReaders;
+  private int effectiveReaderLimit;
   private int activeReaders;
   private boolean ownershipClaimed;
 
   PreparedIoBatch(ExecutorService executor) {
-    this(executor, defaultMaxActiveReaders(executor));
+    this(executor, defaultReaderWindow(executor));
   }
 
-  /** Test hook for exercising a deterministic read-ahead window. */
-  PreparedIoBatch(ExecutorService executor, int maxActiveReaders) {
+  /**
+   * Test hook for exercising a deterministic read-ahead window. The window is a base limit: launch
+   * permits at least one reader per nonempty source group so pull execution cannot wait on a source
+   * whose first read was never submitted.
+   */
+  PreparedIoBatch(ExecutorService executor, int readerWindow) {
     this.executor = requireNonNull(executor, "I/O executor is null");
-    if (maxActiveReaders <= 0) {
-      throw new IllegalArgumentException("Maximum active readers must be positive");
+    if (readerWindow <= 0) {
+      throw new IllegalArgumentException("Reader window must be positive");
     }
-    this.maxActiveReaders = maxActiveReaders;
+    this.readerWindow = readerWindow;
   }
 
-  private static int defaultMaxActiveReaders(ExecutorService executor) {
+  private static int defaultReaderWindow(ExecutorService executor) {
     requireNonNull(executor, "I/O executor is null");
     if (executor instanceof ThreadPoolExecutor) {
       ThreadPoolExecutor threadPool = (ThreadPoolExecutor) executor;
@@ -89,7 +92,7 @@ final class PreparedIoBatch implements AutoCloseable {
         return Math.max(1, threadPool.getMaximumPoolSize());
       }
     }
-    return FALLBACK_MAX_ACTIVE_READERS;
+    return FALLBACK_READER_WINDOW;
   }
 
   /** Registers a task that may be associated with a reader as its leading submission. */
@@ -130,14 +133,14 @@ final class PreparedIoBatch implements AutoCloseable {
       List<CloseableIterator<T>> result = new ArrayList<>(preparers.size());
       for (int ordinal = 0; ordinal < preparers.size(); ordinal++) {
         IteratorPreparer<T> preparer = preparers.get(ordinal);
-        IteratorSlot<T> slot =
-            new IteratorSlot<>(
+        PreparedIterator<T> iterator =
+            new PreparedIterator<>(
                 this,
                 requireNonNull(preparer, "reader preparer is null"),
-                registeredTask(leadingTasks.get(ordinal)),
+                claimLeadingTask(leadingTasks.get(ordinal)),
                 group);
-        group.add(slot);
-        result.add(slot.iterator);
+        group.add(iterator);
+        result.add(iterator);
       }
       iteratorGroups.add(group);
       return Collections.unmodifiableList(result);
@@ -146,7 +149,6 @@ final class PreparedIoBatch implements AutoCloseable {
 
   /** Finalizes registration and fills the bounded reader window in fair source order. */
   void launch() {
-    List<TrackedFutureTask<?>> submitted = new ArrayList<>();
     Throwable failure = null;
     synchronized (lock) {
       if (state == State.LAUNCHED) {
@@ -156,30 +158,19 @@ final class PreparedIoBatch implements AutoCloseable {
         throw new IllegalStateException("Prepared I/O batch is closed");
       }
       try {
-        Set<TrackedFutureTask<?>> associated = Collections.newSetFromMap(new IdentityHashMap<>());
-        for (SourceGroup group : iteratorGroups) {
-          for (IteratorSlot<?> slot : group.pending) {
-            if (slot.leadingTask != null) {
-              associated.add(slot.leadingTask);
-            }
-          }
-        }
         for (TrackedFutureTask<?> task : registeredTasks) {
-          if (!associated.contains(task)) {
-            submit(task, submitted, submittedTasks);
+          if (!task.isClaimedAsLeading()) {
+            submit(task);
           }
         }
         state = State.LAUNCHED;
-        launchFirstReaderPerGroup(submitted, submittedTasks);
-        fillReaderWindow(submitted, submittedTasks);
+        launchFirstReaderPerGroup();
+        fillReaderWindow();
       } catch (RuntimeException | Error launchFailure) {
         failure = launchFailure;
       }
     }
     if (failure != null) {
-      for (TrackedFutureTask<?> task : submitted) {
-        task.cancelTracked();
-      }
       closeAfterFailure(failure);
       throwFailure(failure);
     }
@@ -251,8 +242,8 @@ final class PreparedIoBatch implements AutoCloseable {
       pendingGroups.clear();
       activeReaders = 0;
       for (SourceGroup group : iteratorGroups) {
-        for (IteratorSlot<?> slot : group.slots) {
-          slot.state = IteratorState.RELEASED;
+        for (PreparedIterator<?> iterator : group.iterators) {
+          iterator.state = IteratorState.RELEASED;
         }
         group.pending.clear();
       }
@@ -282,45 +273,38 @@ final class PreparedIoBatch implements AutoCloseable {
     return new TrackedFutureTask<>(callable);
   }
 
-  private void submit(
-      TrackedFutureTask<?> task,
-      List<TrackedFutureTask<?>> submitted,
-      Set<TrackedFutureTask<?>> submittedSet) {
+  private void submit(TrackedFutureTask<?> task) {
     executor.execute(task);
-    submitted.add(task);
-    submittedSet.add(task);
   }
 
-  private void launchFirstReaderPerGroup(
-      List<TrackedFutureTask<?>> submitted, Set<TrackedFutureTask<?>> submittedSet) {
-    List<IteratorSlot<?>> firstReaders = new ArrayList<>();
+  private void launchFirstReaderPerGroup() {
+    List<PreparedIterator<?>> firstReaders = new ArrayList<>();
     for (SourceGroup group : iteratorGroups) {
-      IteratorSlot<?> first = group.pollPending();
+      PreparedIterator<?> first = group.pollPending();
       if (first != null) {
         firstReaders.add(first);
       }
     }
-    effectiveMaxActiveReaders = Math.max(maxActiveReaders, firstReaders.size());
-    for (IteratorSlot<?> slot : firstReaders) {
-      activate(slot, submitted, submittedSet);
-      if (slot.group.hasPending()) {
-        pendingGroups.addLast(slot.group);
+    effectiveReaderLimit = Math.max(readerWindow, firstReaders.size());
+    for (PreparedIterator<?> iterator : firstReaders) {
+      activate(iterator);
+      if (iterator.group.hasPending()) {
+        pendingGroups.addLast(iterator.group);
       }
     }
   }
 
   /** Caller holds {@link #lock}. */
-  private void fillReaderWindow(
-      List<TrackedFutureTask<?>> submitted, Set<TrackedFutureTask<?>> submittedSet) {
+  private void fillReaderWindow() {
     while (state == State.LAUNCHED
-        && activeReaders < effectiveMaxActiveReaders
+        && activeReaders < effectiveReaderLimit
         && !pendingGroups.isEmpty()) {
       SourceGroup group = pendingGroups.removeFirst();
-      IteratorSlot<?> slot = group.pollPending();
-      if (slot == null) {
+      PreparedIterator<?> iterator = group.pollPending();
+      if (iterator == null) {
         continue;
       }
-      activate(slot, submitted, submittedSet);
+      activate(iterator);
       if (group.hasPending()) {
         pendingGroups.addLast(group);
       }
@@ -328,61 +312,54 @@ final class PreparedIoBatch implements AutoCloseable {
   }
 
   /** Caller holds {@link #lock}. */
-  private void activate(
-      IteratorSlot<?> slot,
-      List<TrackedFutureTask<?>> submitted,
-      Set<TrackedFutureTask<?>> submittedSet) {
-    slot.state = IteratorState.ACTIVE;
+  private void activate(PreparedIterator<?> iterator) {
+    iterator.state = IteratorState.ACTIVE;
     activeReaders++;
-    if (slot.leadingTask != null && !submittedSet.contains(slot.leadingTask)) {
-      submit(slot.leadingTask, submitted, submittedSet);
+    if (iterator.leadingTask != null) {
+      submit(iterator.leadingTask);
     }
-    submit(slot.iterator.initialRead(), submitted, submittedSet);
+    submit(iterator.initialRead());
   }
 
-  private void release(IteratorSlot<?> slot) {
-    List<TrackedFutureTask<?>> submitted = new ArrayList<>();
+  private void release(PreparedIterator<?> iterator) {
     Throwable failure = null;
     synchronized (lock) {
-      if (slot.state == IteratorState.RELEASED) {
+      if (iterator.state == IteratorState.RELEASED) {
         return;
       }
-      boolean wasActive = slot.state == IteratorState.ACTIVE;
+      boolean wasActive = iterator.state == IteratorState.ACTIVE;
       if (wasActive) {
         activeReaders--;
       }
-      slot.state = IteratorState.RELEASED;
-      if (slot.leadingTask != null && !slot.leadingTask.isDone()) {
-        slot.leadingTask.cancelTracked();
+      iterator.state = IteratorState.RELEASED;
+      if (iterator.leadingTask != null && !iterator.leadingTask.isDone()) {
+        iterator.leadingTask.cancelTracked();
       }
       if (state == State.LAUNCHED) {
         try {
-          if (wasActive && slot.group.hasPending()) {
-            pendingGroups.remove(slot.group);
-            IteratorSlot<?> sameGroup = slot.group.pollPending();
+          if (wasActive && iterator.group.hasPending()) {
+            pendingGroups.remove(iterator.group);
+            PreparedIterator<?> sameGroup = iterator.group.pollPending();
             if (sameGroup != null) {
-              activate(sameGroup, submitted, submittedTasks);
+              activate(sameGroup);
             }
-            if (slot.group.hasPending()) {
-              pendingGroups.addLast(slot.group);
+            if (iterator.group.hasPending()) {
+              pendingGroups.addLast(iterator.group);
             }
           }
-          fillReaderWindow(submitted, submittedTasks);
+          fillReaderWindow();
         } catch (RuntimeException | Error submitFailure) {
           failure = submitFailure;
         }
       }
     }
     if (failure != null) {
-      for (TrackedFutureTask<?> task : submitted) {
-        task.cancelTracked();
-      }
       closeAfterFailure(failure);
       throwFailure(failure);
     }
   }
 
-  private TrackedFutureTask<?> registeredTask(Future<?> future) {
+  private TrackedFutureTask<?> claimLeadingTask(Future<?> future) {
     if (future == null) {
       return null;
     }
@@ -393,6 +370,7 @@ final class PreparedIoBatch implements AutoCloseable {
     if (registered.owner != this) {
       throw new IllegalArgumentException("Leading task belongs to another I/O batch");
     }
+    registered.delegate.claimAsLeading();
     return registered.delegate;
   }
 
@@ -416,9 +394,7 @@ final class PreparedIoBatch implements AutoCloseable {
   private List<PreparedIterator<?>> flattenIteratorGroups() {
     List<PreparedIterator<?>> iterators = new ArrayList<>();
     for (SourceGroup group : iteratorGroups) {
-      for (IteratorSlot<?> slot : group.slots) {
-        iterators.add(slot.iterator);
-      }
+      iterators.addAll(group.iterators);
     }
     return iterators;
   }
@@ -500,19 +476,19 @@ final class PreparedIoBatch implements AutoCloseable {
   }
 
   private static final class SourceGroup {
-    private final List<IteratorSlot<?>> slots = new ArrayList<>();
-    private final Deque<IteratorSlot<?>> pending = new ArrayDeque<>();
+    private final List<PreparedIterator<?>> iterators = new ArrayList<>();
+    private final Deque<PreparedIterator<?>> pending = new ArrayDeque<>();
 
-    private void add(IteratorSlot<?> slot) {
-      slots.add(slot);
-      pending.addLast(slot);
+    private void add(PreparedIterator<?> iterator) {
+      iterators.add(iterator);
+      pending.addLast(iterator);
     }
 
-    private IteratorSlot<?> pollPending() {
+    private PreparedIterator<?> pollPending() {
       while (!pending.isEmpty()) {
-        IteratorSlot<?> slot = pending.removeFirst();
-        if (slot.state == IteratorState.PENDING) {
-          return slot;
+        PreparedIterator<?> iterator = pending.removeFirst();
+        if (iterator.state == IteratorState.PENDING) {
+          return iterator;
         }
       }
       return null;
@@ -526,30 +502,15 @@ final class PreparedIoBatch implements AutoCloseable {
     }
   }
 
-  private static final class IteratorSlot<T> {
-    private final PreparedIterator<T> iterator;
-    private final TrackedFutureTask<?> leadingTask;
-    private final SourceGroup group;
-    private IteratorState state = IteratorState.PENDING;
-
-    private IteratorSlot(
-        PreparedIoBatch owner,
-        IteratorPreparer<T> preparer,
-        TrackedFutureTask<?> leadingTask,
-        SourceGroup group) {
-      this.iterator = new PreparedIterator<>(owner, preparer, this);
-      this.leadingTask = leadingTask;
-      this.group = group;
-    }
-  }
-
   /** Opens a reader asynchronously and keeps one read buffered ahead of the consumer. */
   private static final class PreparedIterator<T> implements CloseableIterator<T> {
     private final Object lock = new Object();
     private final PreparedIoBatch owner;
     private final IteratorPreparer<T> preparer;
-    private final IteratorSlot<T> slot;
+    private final TrackedFutureTask<?> leadingTask;
+    private final SourceGroup group;
     private final TrackedFutureTask<ReadResult<T>> initialRead;
+    private IteratorState state = IteratorState.PENDING;
     private CloseableIterator<T> delegate;
     private TrackedFutureTask<ReadResult<T>> readAhead;
     private ReadResult<T> buffered;
@@ -558,10 +519,14 @@ final class PreparedIoBatch implements AutoCloseable {
     private volatile boolean closed;
 
     private PreparedIterator(
-        PreparedIoBatch owner, IteratorPreparer<T> preparer, IteratorSlot<T> slot) {
+        PreparedIoBatch owner,
+        IteratorPreparer<T> preparer,
+        TrackedFutureTask<?> leadingTask,
+        SourceGroup group) {
       this.owner = owner;
       this.preparer = preparer;
-      this.slot = slot;
+      this.leadingTask = leadingTask;
+      this.group = group;
       this.initialRead = owner.trackedTask(this::readOne);
       this.readAhead = initialRead;
     }
@@ -621,7 +586,7 @@ final class PreparedIoBatch implements AutoCloseable {
         owner.closeAfterFailure(failure);
         throwCloseFailure(failure);
       }
-      owner.release(slot);
+      owner.release(this);
     }
 
     private void finish() {
@@ -815,11 +780,23 @@ final class PreparedIoBatch implements AutoCloseable {
   /** Future whose exit latch distinguishes queued cancellation from a running task unwinding. */
   private static final class TrackedFutureTask<T> extends FutureTask<T> {
     private final CountDownLatch exited = new CountDownLatch(1);
+    private boolean claimedAsLeading;
     private boolean entered;
     private boolean cancelledBeforeRun;
 
     private TrackedFutureTask(Callable<T> callable) {
       super(callable);
+    }
+
+    private synchronized void claimAsLeading() {
+      if (claimedAsLeading) {
+        throw new IllegalArgumentException("Leading task is already attached to a reader");
+      }
+      claimedAsLeading = true;
+    }
+
+    private synchronized boolean isClaimedAsLeading() {
+      return claimedAsLeading;
     }
 
     @Override
