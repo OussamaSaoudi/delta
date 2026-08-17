@@ -28,7 +28,7 @@ import io.delta.kernel.engine.FileReadResult
 import io.delta.kernel.expressions.{Column, Expression, Literal, Predicate, StructExpression}
 import io.delta.kernel.internal.actions.DeletionVectorDescriptor
 import io.delta.kernel.internal.plans._
-import io.delta.kernel.test.{BaseMockJsonHandler, BaseMockParquetHandler, MockEngineUtils}
+import io.delta.kernel.test.{BaseMockParquetHandler, MockEngineUtils}
 import io.delta.kernel.types.{LongType, StringType, StructType}
 import io.delta.kernel.utils.{CloseableIterator, FileStatus}
 
@@ -202,34 +202,41 @@ class DefaultPlanExecutorSuite extends AnyFunSuite with MockEngineUtils {
     PlanTestUtils.assertRows(DefaultPlanExecutor.execute(plan, mockEngine()), Seq.empty)
   }
 
-  test("prefetches all reachable leaf scans before an eager aggregate blocks") {
+  test("fairly prefetches all reachable leaf scan groups before execution") {
     val bothStarted = new CountDownLatch(2)
-    val parquetFile = new ScanFile(FileStatus.of("file:///table/data.parquet", 10, 1))
-    val jsonFile = new ScanFile(FileStatus.of("file:///table/data.json", 10, 1))
+    val firstFiles = (0 until 3).map(index =>
+      new ScanFile(FileStatus.of(s"file:///table/a$index.parquet", 10, 1)))
+    val secondFile = new ScanFile(FileStatus.of("file:///table/b0.parquet", 10, 1))
+    val starts = ArrayBuffer.empty[String]
     val parquet = new BarrierParquetHandler(
       bothStarted,
-      PlanTestUtils.columnarBatch(idSchema, Seq(row(idSchema, LongJ.valueOf(1)))))
-    val json = new BarrierJsonHandler(
-      bothStarted,
-      PlanTestUtils.columnarBatch(idSchema, Seq(row(idSchema, LongJ.valueOf(2)))))
+      starts,
+      (firstFiles :+ secondFile).zipWithIndex.map { case (file, index) =>
+        file.getFileStatus.getPath -> PlanTestUtils.columnarBatch(
+          idSchema,
+          Seq(row(idSchema, LongJ.valueOf(index + 1))))
+      }.toMap)
     val aggregate = Aggregate.ungrouped(idSchema).max(new Column("id")).build()
     val plan = new Plan(Seq(
-      node(new ScanParquet(Seq(parquetFile).asJava, Seq.empty[String].asJava, idSchema)),
+      node(new ScanParquet(firstFiles.asJava, Seq.empty[String].asJava, idSchema)),
       node(aggregate, 0),
-      node(new ScanJson(Seq(jsonFile).asJava, Seq.empty[String].asJava, idSchema)),
+      node(new ScanParquet(Seq(secondFile).asJava, Seq.empty[String].asJava, idSchema)),
       node(aggregate, 2),
       node(UnionAll.UNION_ALL, 1, 3)).asJava)
-    val ioExecutor = Executors.newFixedThreadPool(4)
+    val ioExecutor = Executors.newFixedThreadPool(2)
 
     try {
       val result = DefaultPlanExecutor.execute(
         plan,
-        mockEngine(jsonHandler = json, parquetHandler = parquet),
+        mockEngine(parquetHandler = parquet),
         ioExecutor)
       val outputSchema = aggregate.getSchema
       PlanTestUtils.assertRows(
         result,
-        Seq(row(outputSchema, LongJ.valueOf(1)), row(outputSchema, LongJ.valueOf(2))))
+        Seq(row(outputSchema, LongJ.valueOf(3)), row(outputSchema, LongJ.valueOf(4))))
+      assert(starts.synchronized(starts.take(2).toSet) === Set(
+        firstFiles.head.getFileStatus.getPath,
+        secondFile.getFileStatus.getPath))
       assert(!ioExecutor.isShutdown, "the caller owns an explicit ExecutorService")
     } finally {
       ioExecutor.shutdownNow()
@@ -292,6 +299,64 @@ class DefaultPlanExecutorSuite extends AnyFunSuite with MockEngineUtils {
     assert(!opened)
   }
 
+  test("does not register unreachable scan sources") {
+    var opened = false
+    val handler = new BaseMockParquetHandler {
+      override def readParquetFiles(
+          files: CloseableIterator[FileStatus],
+          physicalSchema: StructType,
+          predicate: Optional[Predicate]): CloseableIterator[FileReadResult] = {
+        opened = true
+        new TrackingIterator(Seq.empty)
+      }
+    }
+    val scanFile = new ScanFile(FileStatus.of("file:///table/unreachable.parquet", 10, 1))
+    val plan = new Plan(Seq(
+      node(new ScanParquet(Seq(scanFile).asJava, Seq.empty[String].asJava, idSchema)),
+      node(values(idSchema, row(idSchema, LongJ.valueOf(7))))).asJava)
+
+    PlanTestUtils.assertRows(
+      DefaultPlanExecutor.execute(plan, mockEngine(parquetHandler = handler)),
+      Seq(row(idSchema, LongJ.valueOf(7))))
+    assert(!opened)
+  }
+
+  test("failure during eager root execution cancels every launched source") {
+    val first = new ScanFile(FileStatus.of("file:///table/failing.parquet", 10, 1))
+    val second = new ScanFile(FileStatus.of("file:///table/blocked.parquet", 10, 1))
+    val bothStarted = new CountDownLatch(2)
+    val release = new CountDownLatch(1)
+    val interrupted = new CountDownLatch(1)
+    val failure = new IllegalStateException("first source failed")
+    val handler = new FailingFrontierParquetHandler(
+      first.getFileStatus.getPath,
+      bothStarted,
+      release,
+      interrupted,
+      failure)
+    val aggregate = Aggregate.ungrouped(idSchema).max(new Column("id")).build()
+    val plan = new Plan(Seq(
+      node(new ScanParquet(Seq(first).asJava, Seq.empty[String].asJava, idSchema)),
+      node(aggregate, 0),
+      node(new ScanParquet(Seq(second).asJava, Seq.empty[String].asJava, idSchema)),
+      node(aggregate, 2),
+      node(UnionAll.UNION_ALL, 1, 3)).asJava)
+    val ioExecutor = Executors.newFixedThreadPool(2)
+
+    try {
+      val thrown = intercept[IllegalStateException] {
+        DefaultPlanExecutor.execute(plan, mockEngine(parquetHandler = handler), ioExecutor)
+      }
+      assert(thrown eq failure)
+      assert(interrupted.await(5, TimeUnit.SECONDS))
+      assert(!ioExecutor.isShutdown)
+    } finally {
+      release.countDown()
+      ioExecutor.shutdownNow()
+      assert(ioExecutor.awaitTermination(10, TimeUnit.SECONDS))
+    }
+  }
+
   test("exhaustion closes readers without an explicit close call") {
     val reader = new TrackingIterator[FileReadResult](Seq.empty)
     val handler = new BaseMockParquetHandler {
@@ -310,7 +375,8 @@ class DefaultPlanExecutorSuite extends AnyFunSuite with MockEngineUtils {
 
   private final class BarrierParquetHandler(
       barrier: CountDownLatch,
-      batch: ColumnarBatch)
+      starts: ArrayBuffer[String],
+      outputs: Map[String, ColumnarBatch])
       extends BaseMockParquetHandler {
     override def readParquetFiles(
         files: CloseableIterator[FileStatus],
@@ -319,25 +385,16 @@ class DefaultPlanExecutorSuite extends AnyFunSuite with MockEngineUtils {
       val file = files.next()
       files.close()
       new BarrierIterator(
-        Seq(new FileReadResult(batch, file.getPath)),
-        barrier)
+        Seq(new FileReadResult(outputs(file.getPath), file.getPath)),
+        () => {
+          starts.synchronized(starts += file.getPath)
+          barrier.countDown()
+          assert(barrier.await(5, TimeUnit.SECONDS), "leaf scan groups did not start together")
+        })
     }
   }
 
-  private final class BarrierJsonHandler(
-      barrier: CountDownLatch,
-      batch: ColumnarBatch)
-      extends BaseMockJsonHandler {
-    override def readJsonFiles(
-        files: CloseableIterator[FileStatus],
-        physicalSchema: StructType,
-        predicate: Optional[Predicate]): CloseableIterator[ColumnarBatch] = {
-      files.close()
-      new BarrierIterator(Seq(batch), barrier)
-    }
-  }
-
-  private final class BarrierIterator[T](values: Seq[T], barrier: CountDownLatch)
+  private final class BarrierIterator[T](values: Seq[T], onStart: () => Unit)
       extends CloseableIterator[T] {
     private var index = 0
     private var started = false
@@ -345,8 +402,7 @@ class DefaultPlanExecutorSuite extends AnyFunSuite with MockEngineUtils {
     override def hasNext: Boolean = {
       if (!started) {
         started = true
-        barrier.countDown()
-        assert(barrier.await(5, TimeUnit.SECONDS), "leaf scans did not start together")
+        onStart()
       }
       index < values.size
     }
@@ -358,5 +414,42 @@ class DefaultPlanExecutorSuite extends AnyFunSuite with MockEngineUtils {
     }
 
     override def close(): Unit = {}
+  }
+
+  private final class FailingFrontierParquetHandler(
+      failingPath: String,
+      bothStarted: CountDownLatch,
+      release: CountDownLatch,
+      interrupted: CountDownLatch,
+      failure: RuntimeException)
+      extends BaseMockParquetHandler {
+    override def readParquetFiles(
+        files: CloseableIterator[FileStatus],
+        physicalSchema: StructType,
+        predicate: Optional[Predicate]): CloseableIterator[FileReadResult] = {
+      val file = files.next()
+      files.close()
+      new CloseableIterator[FileReadResult] {
+        override def hasNext: Boolean = {
+          bothStarted.countDown()
+          if (file.getPath == failingPath) {
+            assert(bothStarted.await(5, TimeUnit.SECONDS))
+            throw failure
+          }
+          try {
+            release.await()
+            false
+          } catch {
+            case interruptedFailure: InterruptedException =>
+              interrupted.countDown()
+              throw new RuntimeException(interruptedFailure)
+          }
+        }
+
+        override def next(): FileReadResult = throw new NoSuchElementException()
+
+        override def close(): Unit = {}
+      }
+    }
   }
 }

@@ -106,6 +106,20 @@ final class FileScanExecutor {
         ioExecutor);
   }
 
+  /** Registers a Parquet source in a query-owned batch without launching or owning that batch. */
+  static CloseableIterator<FilteredColumnarBatch> prepare(
+      ScanParquet scan, Engine engine, PreparedIoBatch ioBatch) {
+    requireNonNull(scan, "scan is null");
+    return prepare(
+        FileType.PARQUET,
+        scan.getSchema(),
+        scan.getFileConstantColumns(),
+        Optional.empty(),
+        scan.getFiles(),
+        requireNonNull(engine, "engine is null"),
+        requireNonNull(ioBatch, "I/O batch is null"));
+  }
+
   static CloseableIterator<FilteredColumnarBatch> execute(ScanJson scan, Engine engine) {
     requireNonNull(scan, "scan is null");
     requireNonNull(engine, "engine is null");
@@ -138,6 +152,20 @@ final class FileScanExecutor {
         ioExecutor);
   }
 
+  /** Registers a JSON source in a query-owned batch without launching or owning that batch. */
+  static CloseableIterator<FilteredColumnarBatch> prepare(
+      ScanJson scan, Engine engine, PreparedIoBatch ioBatch) {
+    requireNonNull(scan, "scan is null");
+    return prepare(
+        FileType.JSON,
+        scan.getSchema(),
+        scan.getFileConstantColumns(),
+        Optional.empty(),
+        scan.getFiles(),
+        requireNonNull(engine, "engine is null"),
+        requireNonNull(ioBatch, "I/O batch is null"));
+  }
+
   /** Executes scan files through one shared status, deletion-vector, and prepared-I/O path. */
   static CloseableIterator<FilteredColumnarBatch> execute(
       FileType fileType,
@@ -155,39 +183,57 @@ final class FileScanExecutor {
     requireNonNull(engine, "engine is null");
     requireNonNull(ioExecutor, "ioExecutor is null");
 
+    PreparedIoBatch ioBatch = new PreparedIoBatch(ioExecutor);
+    try {
+      CloseableIterator<FilteredColumnarBatch> prepared =
+          prepare(
+              fileType,
+              outputSchema,
+              fileConstantColumns,
+              deletionVectorRoot,
+              files,
+              engine,
+              ioBatch);
+      ioBatch.launch();
+      return ioBatch.own(prepared);
+    } catch (RuntimeException | Error failure) {
+      Utils.closeCloseablesAndAddSuppressed(failure, ioBatch);
+      throw failure;
+    }
+  }
+
+  /** Registers one ordered scan source without launching or claiming the supplied batch. */
+  private static CloseableIterator<FilteredColumnarBatch> prepare(
+      FileType fileType,
+      StructType outputSchema,
+      List<String> fileConstantColumns,
+      Optional<URI> deletionVectorRoot,
+      List<ScanFile> files,
+      Engine engine,
+      PreparedIoBatch ioBatch) {
     boolean hasDeletionVector =
         files.stream().anyMatch(file -> file.getDeletionVector().isPresent());
     ScanSchema scanSchema = scanSchema(outputSchema, hasDeletionVector);
     validate(fileType, scanSchema.schema, fileConstantColumns);
     validateDeletionVectors(files, deletionVectorRoot);
 
-    PreparedIoBatch ioBatch = new PreparedIoBatch(ioExecutor);
     List<Future<RoaringBitmapArray>> deletionVectors = new ArrayList<>(files.size());
     List<PreparedIoBatch.IteratorPreparer<FilteredColumnarBatch>> preparers =
         new ArrayList<>(files.size());
-    try {
-      for (ScanFile file : files) {
-        Future<RoaringBitmapArray> deletionVector =
-            registerDeletionVector(file, deletionVectorRoot, engine, ioBatch);
-        deletionVectors.add(deletionVector);
-        preparers.add(() -> openFile(fileType, scanSchema, fileConstantColumns, file, engine));
-      }
-      List<CloseableIterator<FilteredColumnarBatch>> preparedReaders =
-          ioBatch.registerIteratorGroup(preparers, deletionVectors);
-      ioBatch.launch();
-      List<CloseableIterator<FilteredColumnarBatch>> readers =
-          new ArrayList<>(preparedReaders.size());
-      for (int ordinal = 0; ordinal < preparedReaders.size(); ordinal++) {
-        readers.add(
-            applyDeletionVector(
-                preparedReaders.get(ordinal), scanSchema, deletionVectors.get(ordinal)));
-      }
-      return ioBatch.own(combine(readers));
-    } catch (RuntimeException | Error failure) {
-      deletionVectors.forEach(FileScanExecutor::cancel);
-      Utils.closeCloseablesAndAddSuppressed(failure, ioBatch);
-      throw failure;
+    for (ScanFile file : files) {
+      deletionVectors.add(registerDeletionVector(file, deletionVectorRoot, engine, ioBatch));
+      preparers.add(() -> openFile(fileType, scanSchema, fileConstantColumns, file, engine));
     }
+    List<CloseableIterator<FilteredColumnarBatch>> preparedReaders =
+        ioBatch.registerIteratorGroup(preparers, deletionVectors);
+    List<CloseableIterator<FilteredColumnarBatch>> readers =
+        new ArrayList<>(preparedReaders.size());
+    for (int ordinal = 0; ordinal < preparedReaders.size(); ordinal++) {
+      readers.add(
+          applyDeletionVector(
+              preparedReaders.get(ordinal), scanSchema, deletionVectors.get(ordinal)));
+    }
+    return combine(readers);
   }
 
   static void validate(FileType fileType, StructType schema, List<String> fileConstantColumns) {

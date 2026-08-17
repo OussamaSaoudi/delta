@@ -161,7 +161,7 @@ public final class DefaultPlanExecutor {
     private final PlanExecutionInstrumentation instrumentation;
     private final int[] fanout;
     private final List<ExecutionNode> compiled;
-    private final List<SourceExecution> sources = new ArrayList<>();
+    private final PreparedIoBatch ioBatch;
 
     private Execution(
         Plan plan,
@@ -174,6 +174,7 @@ public final class DefaultPlanExecutor {
       this.ioExecutor = ioExecutor;
       this.ownsExecutor = ownsExecutor;
       this.instrumentation = instrumentation;
+      this.ioBatch = new PreparedIoBatch(ioExecutor);
       int nodes = plan.getNodes().size();
       boolean[] reachable = reachableNodes(plan);
       this.fanout = countFanout(plan, reachable);
@@ -184,11 +185,11 @@ public final class DefaultPlanExecutor {
       try {
         ExecutionNode root = compile(plan.getNodes().size() - 1);
         root.prepareIo();
-        CloseableIterator<FilteredColumnarBatch> terminal = root.execute();
-        return new ResultIterator(
-            terminal, sources, ownsExecutor ? ioExecutor : null, instrumentation);
+        ioBatch.launch();
+        CloseableIterator<FilteredColumnarBatch> terminal = ioBatch.own(root.execute());
+        return new ResultIterator(terminal, ownsExecutor ? ioExecutor : null, instrumentation);
       } catch (RuntimeException | Error failure) {
-        closeAfterFailure(failure, sources);
+        closeAfterFailure(failure, Collections.singletonList(ioBatch));
         if (ownsExecutor) {
           ioExecutor.shutdownNow();
         }
@@ -215,19 +216,13 @@ public final class DefaultPlanExecutor {
         ScanParquet scan = (ScanParquet) operator;
         SourceExecution source =
             new SourceExecution(
-                nodeIndex,
-                instrumentation,
-                () -> FileScanExecutor.execute(scan, engine, ioExecutor));
-        sources.add(source);
+                nodeIndex, instrumentation, () -> FileScanExecutor.prepare(scan, engine, ioBatch));
         execution = source;
       } else if (operator instanceof ScanJson) {
         ScanJson scan = (ScanJson) operator;
         SourceExecution source =
             new SourceExecution(
-                nodeIndex,
-                instrumentation,
-                () -> FileScanExecutor.execute(scan, engine, ioExecutor));
-        sources.add(source);
+                nodeIndex, instrumentation, () -> FileScanExecutor.prepare(scan, engine, ioBatch));
         execution = source;
       } else {
         execution =
@@ -328,7 +323,7 @@ public final class DefaultPlanExecutor {
   }
 
   /** Static I/O source whose asynchronous iterator is created during the preparation pass. */
-  private static final class SourceExecution extends ExecutionNode implements AutoCloseable {
+  private static final class SourceExecution extends ExecutionNode {
     private final SourcePreparer preparer;
     private CloseableIterator<FilteredColumnarBatch> stream;
     private boolean executed;
@@ -362,15 +357,6 @@ public final class DefaultPlanExecutor {
         if (instrumentation != null) {
           instrumentation.stop();
         }
-      }
-    }
-
-    @Override
-    public void close() throws IOException {
-      if (stream != null) {
-        CloseableIterator<FilteredColumnarBatch> toClose = stream;
-        stream = null;
-        toClose.close();
       }
     }
   }
@@ -508,18 +494,15 @@ public final class DefaultPlanExecutor {
 
   private static final class ResultIterator implements CloseableIterator<FilteredColumnarBatch> {
     private final CloseableIterator<FilteredColumnarBatch> delegate;
-    private final List<SourceExecution> sources;
     private final ExecutorService ownedExecutor;
     private final PlanExecutionInstrumentation instrumentation;
     private boolean closed;
 
     private ResultIterator(
         CloseableIterator<FilteredColumnarBatch> delegate,
-        List<SourceExecution> sources,
         ExecutorService ownedExecutor,
         PlanExecutionInstrumentation instrumentation) {
       this.delegate = requireNonNull(delegate, "terminal iterator is null");
-      this.sources = sources;
       this.ownedExecutor = ownedExecutor;
       this.instrumentation = instrumentation;
     }
@@ -564,16 +547,13 @@ public final class DefaultPlanExecutor {
         return;
       }
       closed = true;
-      List<AutoCloseable> closeables = new ArrayList<>();
-      closeables.add(delegate);
-      closeables.addAll(sources);
       try {
         if (instrumentation != null) {
           instrumentation.finish();
         }
       } finally {
         try {
-          closeAll(closeables);
+          closeAll(Collections.singletonList(delegate));
         } finally {
           if (ownedExecutor != null) {
             ownedExecutor.shutdownNow();
