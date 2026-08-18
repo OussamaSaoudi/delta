@@ -284,6 +284,32 @@ class DefaultPlanExecutorSuite extends AnyFunSuite with MockEngineUtils {
     }
   }
 
+  test("caller-configurable pool-size matrix preserves deterministic output") {
+    for (parallelism <- Seq(4, 16, 32, 64)) {
+      val file = new ScanFile(FileStatus.of(s"file:///table/data-$parallelism", 10, 1))
+      val handler = new BaseMockParquetHandler {
+        override def readParquetFiles(
+            files: CloseableIterator[FileStatus],
+            physicalSchema: StructType,
+            predicate: Optional[Predicate]): CloseableIterator[FileReadResult] = {
+          val status = files.next()
+          files.close()
+          new TrackingIterator(Seq(new FileReadResult(
+            PlanTestUtils.columnarBatch(
+              idSchema,
+              Seq(row(idSchema, LongJ.valueOf(parallelism.toLong)))),
+            status.getPath)))
+        }
+      }
+      val plan = new Plan(Seq(
+        node(new ScanParquet(Seq(file).asJava, Seq.empty[String].asJava, idSchema))).asJava)
+
+      PlanTestUtils.assertRows(
+        DefaultPlanExecutor.execute(plan, mockEngine(parquetHandler = handler), parallelism),
+        Seq(row(idSchema, LongJ.valueOf(parallelism.toLong))))
+    }
+  }
+
   test("rejects non-positive public I/O parallelism") {
     val plan = new Plan(Seq(node(values(idSchema))).asJava)
     for (parallelism <- Seq(0, -1)) {
