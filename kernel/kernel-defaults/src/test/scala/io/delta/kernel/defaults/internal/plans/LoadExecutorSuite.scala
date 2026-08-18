@@ -58,6 +58,71 @@ class LoadExecutorSuite extends AnyFunSuite with MockEngineUtils with BeforeAndA
     .add("part", StringType.STRING, true)
     .add("dv", DeletionVectorDescriptor.READ_SCHEMA, true)
 
+  private val nullablePathMetadataSchema = new StructType()
+    .add("path", StringType.STRING, true)
+    .add("size", LongType.LONG, true)
+    .add("num_records", LongType.LONG, true)
+    .add("part", StringType.STRING, true)
+    .add("dv", DeletionVectorDescriptor.READ_SCHEMA, true)
+
+  test("Load accepts non-null values from a nullable path column") {
+    val outputSchema = new StructType().add("id", LongType.LONG, false)
+    val input = new TrackingIterator(Seq(valuesBatch(
+      nullablePathMetadataSchema,
+      Seq(GenericRow.fromValues(
+        nullablePathMetadataSchema,
+        Seq("data.parquet", LongJ.valueOf(10), null, null, null).asJava)))))
+    val handler = new TrackingParquetHandler((_, schema) =>
+      Seq(rowBatch(schema, Seq(Seq(LongJ.valueOf(1))))))
+    val load = new Load(
+      outputSchema,
+      FileType.PARQUET,
+      Optional.of(new URI("file:///table/")),
+      Seq.empty[String].asJava,
+      fileMeta(),
+      new Column("dv"))
+
+    val result = LoadExecutor.execute(
+      load,
+      nullablePathMetadataSchema,
+      input,
+      mockEngine(parquetHandler = handler),
+      ioExecutor)
+
+    assert(collect(result)(_.getLong(0)) === Seq(1L))
+    assert(handler.calls.map(_.files.head.getPath) === Seq("file:/table/data.parquet"))
+  }
+
+  test("Load rejects a selected null path value") {
+    val outputSchema = new StructType().add("id", LongType.LONG, false)
+    val input = new TrackingIterator(Seq(valuesBatch(
+      nullablePathMetadataSchema,
+      Seq(GenericRow.fromValues(
+        nullablePathMetadataSchema,
+        Seq(null, LongJ.valueOf(10), null, null, null).asJava)))))
+    val handler = new TrackingParquetHandler((_, schema) => Seq(rowBatch(schema, Seq.empty)))
+    val load = new Load(
+      outputSchema,
+      FileType.PARQUET,
+      Optional.of(new URI("file:///table/")),
+      Seq.empty[String].asJava,
+      fileMeta(),
+      new Column("dv"))
+
+    val error = intercept[IllegalArgumentException] {
+      LoadExecutor.execute(
+        load,
+        nullablePathMetadataSchema,
+        input,
+        mockEngine(parquetHandler = handler),
+        ioExecutor)
+    }
+
+    assert(error.getMessage === "Load path must not be null")
+    assert(handler.calls.isEmpty)
+    assert(input.closeCalls === 1)
+  }
+
   test("Parquet resolves metadata and dispatches status and data IO concurrently") {
     val outputSchema = new StructType()
       .add("id", LongType.LONG, false)

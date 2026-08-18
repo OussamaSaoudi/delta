@@ -92,7 +92,7 @@ public final class Load implements Operator {
       throw new IllegalArgumentException("Load requires one input, got " + inputSchemas.size());
     }
     StructType input = requireNonNull(inputSchemas.get(0), "input schema is null");
-    requireColumn(input, fileMeta.getPathColumn(), StringType.STRING, false, "path");
+    requireColumnType(input, fileMeta.getPathColumn(), StringType.STRING, "path");
     requireColumn(input, fileMeta.getFileSizeColumn(), LongType.LONG, true, "file size");
     requireColumn(input, fileMeta.getNumRecordsColumn(), LongType.LONG, true, "record count");
     requireColumn(input, dvColumn, DeletionVectorDescriptor.READ_SCHEMA, true, "deletion vector");
@@ -117,18 +117,25 @@ public final class Load implements Operator {
       DataType expectedType,
       boolean expectedNullable,
       String label) {
-    StructField field = PlanSchemaUtils.resolveField(input, column, "Load " + label);
-    if (!expectedType.equals(field.getDataType()) || expectedNullable != field.isNullable()) {
+    StructField field = requireColumnType(input, column, expectedType, label);
+    if (expectedNullable != field.isNullable()) {
       throw new IllegalArgumentException(
           String.format(
-              "Load %s column %s must have type %s and nullable=%s, got %s and nullable=%s",
-              label,
-              column,
-              expectedType,
-              expectedNullable,
-              field.getDataType(),
-              field.isNullable()));
+              "Load %s column %s must have nullable=%s, got nullable=%s",
+              label, column, expectedNullable, field.isNullable()));
     }
+  }
+
+  private static StructField requireColumnType(
+      StructType input, Column column, DataType expectedType, String label) {
+    StructField field = PlanSchemaUtils.resolveField(input, column, "Load " + label);
+    if (!expectedType.equals(field.getDataType())) {
+      throw new IllegalArgumentException(
+          String.format(
+              "Load %s column %s must have type %s, got %s",
+              label, column, expectedType, field.getDataType()));
+    }
+    return field;
   }
 
   private static StructField topLevelField(StructType owner, String name, String label) {

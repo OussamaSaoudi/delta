@@ -112,6 +112,14 @@ class LoadSuite extends AnyFunSuite {
     assert(operator.getFileConstantColumns.isEmpty)
   }
 
+  test("Load accepts a nullable path column") {
+    val nullablePathInput = replace(
+      inputSchema,
+      new StructField("path", StringType.STRING, true))
+
+    assert(plan(load(), nullablePathInput).getOutputSchema === outputSchema)
+  }
+
   test("Load validates every metadata column path, type, and nullability") {
     val cases = Table(
       ("case", "operator", "input", "message"),
@@ -136,11 +144,6 @@ class LoadSuite extends AnyFunSuite {
         load(),
         replace(inputSchema, new StructField("path", LongType.LONG, false)),
         "must have type string"),
-      (
-        "path nullability",
-        load(),
-        replace(inputSchema, new StructField("path", StringType.STRING, true)),
-        "nullable=false"),
       (
         "size type",
         load(),
