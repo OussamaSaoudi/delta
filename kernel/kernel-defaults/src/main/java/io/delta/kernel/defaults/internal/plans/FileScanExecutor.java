@@ -54,13 +54,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
-import java.util.concurrent.FutureTask;
 import java.util.function.Function;
 
 /** Executes Parquet and JSON scan sources through the Kernel Java handlers. */
@@ -164,24 +161,31 @@ final class FileScanExecutor {
     validate(fileType, scanSchema.schema, fileConstantColumns);
     validateDeletionVectors(files, deletionVectorRoot);
 
-    List<CloseableIterator<FilteredColumnarBatch>> readers = new ArrayList<>(files.size());
+    PreparedIoBatch ioBatch = new PreparedIoBatch(ioExecutor);
     List<Future<RoaringBitmapArray>> deletionVectors = new ArrayList<>(files.size());
+    List<PreparedIoBatch.IteratorPreparer<FilteredColumnarBatch>> preparers =
+        new ArrayList<>(files.size());
     try {
       for (ScanFile file : files) {
         Future<RoaringBitmapArray> deletionVector =
-            submitDeletionVector(file, deletionVectorRoot, engine, ioExecutor);
+            registerDeletionVector(file, deletionVectorRoot, engine, ioBatch);
         deletionVectors.add(deletionVector);
-        readers.add(
-            PreparedIterator.submit(
-                () ->
-                    openFile(
-                        fileType, scanSchema, fileConstantColumns, file, deletionVector, engine),
-                ioExecutor));
+        preparers.add(() -> openFile(fileType, scanSchema, fileConstantColumns, file, engine));
       }
-      return combine(readers);
+      List<CloseableIterator<FilteredColumnarBatch>> preparedReaders =
+          ioBatch.registerIteratorGroup(preparers, deletionVectors);
+      ioBatch.launch();
+      List<CloseableIterator<FilteredColumnarBatch>> readers =
+          new ArrayList<>(preparedReaders.size());
+      for (int ordinal = 0; ordinal < preparedReaders.size(); ordinal++) {
+        readers.add(
+            applyDeletionVector(
+                preparedReaders.get(ordinal), scanSchema, deletionVectors.get(ordinal)));
+      }
+      return ioBatch.own(combine(readers));
     } catch (RuntimeException | Error failure) {
       deletionVectors.forEach(FileScanExecutor::cancel);
-      Utils.closeCloseablesSilently(readers.toArray(new AutoCloseable[0]));
+      Utils.closeCloseablesAndAddSuppressed(failure, ioBatch);
       throw failure;
     }
   }
@@ -216,30 +220,18 @@ final class FileScanExecutor {
       ScanSchema scanSchema,
       List<String> fileConstantColumns,
       ScanFile file,
-      Future<RoaringBitmapArray> deletionVector,
       Engine engine) {
-    try {
-      Optional<FileStatus> knownStatus = file.getKnownFileStatus();
-      FileStatus status =
-          knownStatus.isPresent() ? knownStatus.get() : readFileStatus(file.getPath(), engine);
-      ScanFile scanFile = new ScanFile(status, file.getFileConstants());
-      FileScan scan =
-          newScan(
-              fileType,
-              Collections.singletonList(scanFile),
-              fileConstantColumns,
-              scanSchema.schema);
-      CloseableIterator<FilteredColumnarBatch> reader;
-      if (scan instanceof ScanParquet) {
-        reader = execute((ScanParquet) scan, engine);
-      } else {
-        reader = execute((ScanJson) scan, engine);
-      }
-      return applyDeletionVector(reader, scanSchema, deletionVector);
-    } catch (RuntimeException | Error failure) {
-      cancel(deletionVector);
-      throw failure;
+    Optional<FileStatus> knownStatus = file.getKnownFileStatus();
+    FileStatus status =
+        knownStatus.isPresent() ? knownStatus.get() : readFileStatus(file.getPath(), engine);
+    ScanFile scanFile = new ScanFile(status, file.getFileConstants());
+    FileScan scan =
+        newScan(
+            fileType, Collections.singletonList(scanFile), fileConstantColumns, scanSchema.schema);
+    if (scan instanceof ScanParquet) {
+      return execute((ScanParquet) scan, engine);
     }
+    return execute((ScanJson) scan, engine);
   }
 
   private static FileStatus readFileStatus(String location, Engine engine) {
@@ -251,14 +243,14 @@ final class FileScanExecutor {
     }
   }
 
-  private static Future<RoaringBitmapArray> submitDeletionVector(
-      ScanFile file, Optional<URI> deletionVectorRoot, Engine engine, ExecutorService ioExecutor) {
+  private static Future<RoaringBitmapArray> registerDeletionVector(
+      ScanFile file, Optional<URI> deletionVectorRoot, Engine engine, PreparedIoBatch ioBatch) {
     Optional<DeletionVectorDescriptor> descriptor = file.getDeletionVector();
     if (!descriptor.isPresent()) {
       return null;
     }
     String tableRoot = deletionVectorRoot.map(URI::toString).orElse("");
-    return ioExecutor.submit(
+    return ioBatch.registerTask(
         () -> {
           Tuple2<DeletionVectorDescriptor, RoaringBitmapArray> loaded =
               DeletionVectorUtils.loadNewDvAndBitmap(engine, tableRoot, descriptor.get());
@@ -413,20 +405,10 @@ final class FileScanExecutor {
 
   private static <T> CloseableIterator<T> openPerFile(
       List<ScanFile> files, Function<ScanFile, CloseableIterator<T>> opener) {
-    return openPerFile(files, opener, null);
-  }
-
-  private static <T> CloseableIterator<T> openPerFile(
-      List<ScanFile> files,
-      Function<ScanFile, CloseableIterator<T>> opener,
-      ExecutorService ioExecutor) {
     List<CloseableIterator<T>> readers = new ArrayList<>(files.size());
     try {
       for (ScanFile file : files) {
-        readers.add(
-            ioExecutor == null
-                ? opener.apply(file)
-                : PreparedIterator.submit(() -> opener.apply(file), ioExecutor));
+        readers.add(opener.apply(file));
       }
       return combine(readers);
     } catch (RuntimeException | Error failure) {
@@ -509,292 +491,6 @@ final class FileScanExecutor {
   @FunctionalInterface
   private interface ReaderOpener<T> {
     CloseableIterator<T> open(CloseableIterator<FileStatus> statuses) throws IOException;
-  }
-
-  @FunctionalInterface
-  private interface ReaderPreparer<T> {
-    CloseableIterator<T> prepare();
-  }
-
-  /** Opens a reader asynchronously and keeps one read buffered ahead of the consumer. */
-  private static final class PreparedIterator<T> implements CloseableIterator<T> {
-    private final Object lock = new Object();
-    private final ReaderPreparer<T> preparer;
-    private final ExecutorService executor;
-    private CloseableIterator<T> delegate;
-    private TrackedFutureTask<ReadResult<T>> readAhead;
-    private ReadResult<T> buffered;
-    private Throwable asynchronousCloseFailure;
-    private boolean exhausted;
-    private volatile boolean closed;
-
-    private PreparedIterator(ReaderPreparer<T> preparer, ExecutorService executor) {
-      this.preparer = preparer;
-      this.executor = executor;
-    }
-
-    static <T> PreparedIterator<T> submit(ReaderPreparer<T> preparer, ExecutorService executor) {
-      requireNonNull(preparer, "reader preparer is null");
-      requireNonNull(executor, "ioExecutor is null");
-      PreparedIterator<T> iterator = new PreparedIterator<>(preparer, executor);
-      try {
-        iterator.submitRead();
-        return iterator;
-      } catch (RuntimeException | Error failure) {
-        iterator.closeAfterFailure(failure);
-        throw failure;
-      }
-    }
-
-    @Override
-    public boolean hasNext() {
-      ensureOpen();
-      try {
-        if (buffered == null && !exhausted) {
-          buffered = awaitRead();
-          readAhead = null;
-          exhausted = !buffered.isAvailable();
-        }
-        return !exhausted;
-      } catch (RuntimeException | Error failure) {
-        closeAfterFailure(failure);
-        throw failure;
-      }
-    }
-
-    @Override
-    public T next() {
-      try {
-        if (!hasNext()) {
-          throw new java.util.NoSuchElementException();
-        }
-        T value = buffered.getValue();
-        buffered = null;
-        submitRead();
-        return value;
-      } catch (RuntimeException | Error failure) {
-        closeAfterFailure(failure);
-        throw failure;
-      }
-    }
-
-    @Override
-    public void close() throws IOException {
-      TrackedFutureTask<ReadResult<T>> task;
-      CloseableIterator<T> reader;
-      synchronized (lock) {
-        if (closed) {
-          return;
-        }
-        closed = true;
-        task = readAhead;
-        reader = delegate;
-      }
-
-      if (task != null) {
-        task.cancelTracked();
-      }
-
-      Throwable failure = null;
-      if (reader != null) {
-        try {
-          reader.close();
-        } catch (Throwable closeFailure) {
-          failure = closeFailure;
-        }
-      }
-
-      if (task != null) {
-        task.awaitExit();
-      }
-
-      synchronized (lock) {
-        readAhead = null;
-        delegate = null;
-        if (asynchronousCloseFailure != null) {
-          if (failure == null) {
-            failure = asynchronousCloseFailure;
-          } else if (failure != asynchronousCloseFailure) {
-            failure.addSuppressed(asynchronousCloseFailure);
-          }
-          asynchronousCloseFailure = null;
-        }
-      }
-      throwCloseFailure(failure);
-    }
-
-    private void submitRead() {
-      TrackedFutureTask<ReadResult<T>> task =
-          new TrackedFutureTask<>(
-              () -> {
-                CloseableIterator<T> reader = openReader();
-                if (!reader.hasNext()) {
-                  return ReadResult.empty();
-                }
-                return ReadResult.available(requireNonNull(reader.next(), "reader batch is null"));
-              });
-      synchronized (lock) {
-        ensureOpen();
-        readAhead = task;
-        try {
-          executor.execute(task);
-        } catch (RuntimeException | Error failure) {
-          readAhead = null;
-          throw failure;
-        }
-      }
-    }
-
-    private CloseableIterator<T> openReader() throws IOException {
-      CloseableIterator<T> existing;
-      synchronized (lock) {
-        existing = delegate;
-      }
-      if (existing != null) {
-        return existing;
-      }
-
-      CloseableIterator<T> opened = requireNonNull(preparer.prepare(), "file reader is null");
-      synchronized (lock) {
-        if (!closed) {
-          delegate = opened;
-          return opened;
-        }
-      }
-
-      try {
-        opened.close();
-      } catch (Throwable closeFailure) {
-        synchronized (lock) {
-          asynchronousCloseFailure = closeFailure;
-        }
-      }
-      throw new CancellationException("Plan file reader was closed while opening");
-    }
-
-    private ReadResult<T> awaitRead() {
-      try {
-        return readAhead.get();
-      } catch (InterruptedException failure) {
-        Thread.currentThread().interrupt();
-        throw new KernelEngineException("await a plan file read", failure);
-      } catch (ExecutionException failure) {
-        Throwable cause = failure.getCause();
-        if (cause instanceof RuntimeException) {
-          throw (RuntimeException) cause;
-        }
-        if (cause instanceof Error) {
-          throw (Error) cause;
-        }
-        throw new KernelEngineException("prefetch a plan file", cause);
-      } catch (CancellationException failure) {
-        throw new KernelEngineException("await a cancelled plan file read", failure);
-      }
-    }
-
-    private void closeAfterFailure(Throwable failure) {
-      Utils.closeCloseablesAndAddSuppressed(failure, this);
-    }
-
-    private void ensureOpen() {
-      if (closed) {
-        throw new IllegalStateException("Plan file reader is closed");
-      }
-    }
-
-    private static void throwCloseFailure(Throwable failure) throws IOException {
-      if (failure instanceof IOException) {
-        throw (IOException) failure;
-      }
-      if (failure instanceof RuntimeException) {
-        throw (RuntimeException) failure;
-      }
-      if (failure instanceof Error) {
-        throw (Error) failure;
-      }
-      if (failure != null) {
-        throw new IOException("Failed to close plan file reader", failure);
-      }
-    }
-  }
-
-  private static final class ReadResult<T> {
-    private final T value;
-
-    private ReadResult(T value) {
-      this.value = value;
-    }
-
-    private static <T> ReadResult<T> empty() {
-      return new ReadResult<>(null);
-    }
-
-    private static <T> ReadResult<T> available(T value) {
-      return new ReadResult<>(value);
-    }
-
-    private boolean isAvailable() {
-      return value != null;
-    }
-
-    private T getValue() {
-      return value;
-    }
-  }
-
-  /** Future whose exit latch distinguishes queued cancellation from a running read unwinding. */
-  private static final class TrackedFutureTask<T> extends FutureTask<T> {
-    private final CountDownLatch exited = new CountDownLatch(1);
-    private boolean entered;
-    private boolean cancelledBeforeRun;
-
-    private TrackedFutureTask(Callable<T> callable) {
-      super(callable);
-    }
-
-    @Override
-    public void run() {
-      synchronized (this) {
-        if (cancelledBeforeRun) {
-          return;
-        }
-        entered = true;
-      }
-      try {
-        super.run();
-      } finally {
-        exited.countDown();
-      }
-    }
-
-    private void cancelTracked() {
-      boolean queued;
-      synchronized (this) {
-        queued = !entered;
-        if (queued) {
-          cancelledBeforeRun = true;
-        }
-        cancel(true);
-      }
-      if (queued) {
-        exited.countDown();
-      }
-    }
-
-    private void awaitExit() {
-      boolean interrupted = false;
-      while (true) {
-        try {
-          exited.await();
-          break;
-        } catch (InterruptedException failure) {
-          interrupted = true;
-        }
-      }
-      if (interrupted) {
-        Thread.currentThread().interrupt();
-      }
-    }
   }
 
   private static final class DeletionVectorIterator
