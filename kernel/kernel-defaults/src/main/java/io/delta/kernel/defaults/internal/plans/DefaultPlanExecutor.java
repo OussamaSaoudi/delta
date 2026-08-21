@@ -20,6 +20,7 @@ import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.data.FilteredColumnarBatch;
 import io.delta.kernel.engine.Engine;
+import io.delta.kernel.internal.plans.Aggregate;
 import io.delta.kernel.internal.plans.OperatorVisitor;
 import io.delta.kernel.internal.plans.Plan;
 import io.delta.kernel.internal.plans.PlanNode;
@@ -52,6 +53,11 @@ public final class DefaultPlanExecutor
   public static CloseableIterator<FilteredColumnarBatch> execute(Plan plan, Engine engine) {
     DefaultPlanExecutor executor = new DefaultPlanExecutor(plan, engine);
     return executor.compile(plan.getNodes().size() - 1).open();
+  }
+
+  @Override
+  public BatchOperator visit(Aggregate aggregate) {
+    return (inputs, schemas) -> AggregateExecutor.execute(aggregate, schemas.get(0), inputs.get(0));
   }
 
   @Override

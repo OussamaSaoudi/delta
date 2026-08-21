@@ -24,6 +24,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.UnaryOperator;
 
 /** Fluent builder for an immutable {@link Plan}. */
 public final class PlanBuilder {
@@ -60,6 +61,16 @@ public final class PlanBuilder {
     return source(new Values(schema, rows));
   }
 
+  /** Applies an aggregate. */
+  public PlanBuilder aggregate(Aggregate aggregate) {
+    return unary(requireNonNull(aggregate, "aggregate is null"));
+  }
+
+  /** Applies an ungrouped aggregate, inferring this builder's output schema. */
+  public PlanBuilder aggregateUngrouped(UnaryOperator<AggregateBuilder> aggregates) {
+    return aggregate(Aggregate.ungrouped(root.outputSchema), aggregates);
+  }
+
   /** Unordered bag union of one or more builders with the same output schema. */
   public static PlanBuilder unionAll(List<PlanBuilder> inputs) {
     requireNonNull(inputs, "inputs is null");
@@ -82,6 +93,16 @@ public final class PlanBuilder {
 
   private static PlanBuilder source(Operator operator) {
     return new PlanBuilder(operator, Collections.emptyList());
+  }
+
+  private PlanBuilder unary(Operator operator) {
+    return new PlanBuilder(operator, Collections.singletonList(root));
+  }
+
+  private PlanBuilder aggregate(
+      AggregateBuilder builder, UnaryOperator<AggregateBuilder> aggregates) {
+    UnaryOperator<AggregateBuilder> transform = requireNonNull(aggregates, "aggregates is null");
+    return aggregate(requireNonNull(transform.apply(builder), "aggregates returned null").build());
   }
 
   private static int emit(

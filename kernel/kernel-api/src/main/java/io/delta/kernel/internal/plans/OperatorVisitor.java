@@ -17,6 +17,8 @@ package io.delta.kernel.internal.plans;
 
 /** Type-safe dispatch over declarative plan operators. */
 public interface OperatorVisitor<T> {
+  T visit(Aggregate aggregate);
+
   T visit(ScanJson scan);
 
   T visit(ScanParquet scan);
