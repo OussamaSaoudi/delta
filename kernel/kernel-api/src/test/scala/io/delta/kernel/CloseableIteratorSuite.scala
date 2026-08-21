@@ -17,7 +17,6 @@
 package io.delta.kernel
 
 import scala.collection.JavaConverters._
-import scala.util.Using
 
 import io.delta.kernel.internal.util.Utils
 import io.delta.kernel.utils.CloseableIterator
@@ -50,12 +49,15 @@ class CloseableIteratorSuite extends AnyFunSuite {
    */
   private class TrackingCloseableIterator(
       elems: Seq[Int],
-      onClose: () => Unit) extends CloseableIterator[Int] {
+      onClose: () => Unit,
+      hasNextFailure: Option[RuntimeException] = None,
+      closeFailure: Option[RuntimeException] = None) extends CloseableIterator[Int] {
     private val iter = elems.iterator
     private var closed = false
 
     override def hasNext(): Boolean = {
       assert(!closed)
+      hasNextFailure.foreach(throw _)
       iter.hasNext
     }
     override def next(): Int = iter.next()
@@ -63,6 +65,7 @@ class CloseableIteratorSuite extends AnyFunSuite {
       if (!closed) {
         onClose()
         closed = true
+        closeFailure.foreach(throw _)
       }
     }
   }
@@ -288,11 +291,8 @@ class CloseableIteratorSuite extends AnyFunSuite {
       (throw new RuntimeException("Error in mapper")): CloseableIterator[Int]
     }
 
-    // Use scala's equivalent of java's try-with-resources
     val exception = intercept[RuntimeException] {
-      Using.resource(result) { r =>
-        r.hasNext
-      }
+      result.hasNext
     }
     assert(exception.getMessage === "Error in mapper")
     assert(outerClosed === true)
@@ -316,24 +316,49 @@ class CloseableIteratorSuite extends AnyFunSuite {
       }): CloseableIterator[Int]
     }
 
-    // Use scala's equivalent of java's try-with-resources
     val exception = intercept[RuntimeException] {
-      Using.resource(result) { r =>
-        // First inner iterator
-        assert(r.next() === 1)
-        assert(r.next() === 10)
+      // First inner iterator
+      assert(result.next() === 1)
+      assert(result.next() === 10)
 
-        // Second inner iterator
-        assert(r.next() === 2)
+      // Second inner iterator
+      assert(result.next() === 2)
 
-        // Second inner iterator -- throws on next value (20)
-        r.next()
-      }
+      // Second inner iterator -- throws on next value (20)
+      result.next()
     }
     assert(exception.getMessage === "Error reading value 20")
 
     assert(outerClosed === true)
     assert(innerClosedCount === 2) // Both inner iterators that were created should be closed
+  }
+
+  test("combine -- closes both inputs and suppresses close failures after a read failure") {
+    var leftClosed = 0
+    var rightClosed = 0
+    val readFailure = new IllegalStateException("read failed")
+    val leftCloseFailure = new IllegalStateException("left close failed")
+    val rightCloseFailure = new IllegalStateException("right close failed")
+    val left = new TrackingCloseableIterator(
+      Seq.empty,
+      () => leftClosed += 1,
+      hasNextFailure = Some(readFailure),
+      closeFailure = Some(leftCloseFailure))
+    val right = new TrackingCloseableIterator(
+      Seq(1),
+      () => rightClosed += 1,
+      closeFailure = Some(rightCloseFailure))
+
+    val combined = left.combine(right)
+    val thrown = intercept[IllegalStateException](combined.hasNext)
+
+    assert(thrown eq readFailure)
+    assert(thrown.getSuppressed.toSeq === Seq(leftCloseFailure, rightCloseFailure))
+    assert(leftClosed === 1)
+    assert(rightClosed === 1)
+    combined.close()
+    assert(leftClosed === 1)
+    assert(rightClosed === 1)
   }
 
   test("flatMap -- mapper returns null") {
