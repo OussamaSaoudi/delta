@@ -19,6 +19,7 @@ import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.data.Row;
 import io.delta.kernel.expressions.Column;
+import io.delta.kernel.expressions.Expression;
 import io.delta.kernel.expressions.Predicate;
 import io.delta.kernel.types.StructType;
 import java.util.ArrayList;
@@ -83,6 +84,11 @@ public final class PlanBuilder {
   /** Keeps rows for which {@code predicate} evaluates to true. */
   public PlanBuilder filter(Predicate predicate) {
     return unary(new Filter(predicate));
+  }
+
+  /** Projects rows through a struct expression into {@code schema}. */
+  public PlanBuilder project(Expression expression, StructType schema) {
+    return unary(new Project(expression, schema));
   }
 
   /** Keeps rows whose {@code probeKeys} occur in {@code build}. */

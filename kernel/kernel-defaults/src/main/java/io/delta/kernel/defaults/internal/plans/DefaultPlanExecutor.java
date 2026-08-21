@@ -25,6 +25,7 @@ import io.delta.kernel.internal.plans.Filter;
 import io.delta.kernel.internal.plans.OperatorVisitor;
 import io.delta.kernel.internal.plans.Plan;
 import io.delta.kernel.internal.plans.PlanNode;
+import io.delta.kernel.internal.plans.Project;
 import io.delta.kernel.internal.plans.ScanJson;
 import io.delta.kernel.internal.plans.ScanParquet;
 import io.delta.kernel.internal.plans.SemiJoin;
@@ -65,6 +66,11 @@ public final class DefaultPlanExecutor
   @Override
   public BatchOperator visit(Filter filter) {
     return (inputs, schemas) -> FilterExecutor.execute(filter, schemas.get(0), inputs.get(0));
+  }
+
+  @Override
+  public BatchOperator visit(Project project) {
+    return (inputs, schemas) -> ProjectExecutor.execute(project, schemas.get(0), inputs.get(0));
   }
 
   @Override

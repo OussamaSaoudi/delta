@@ -21,6 +21,8 @@ public interface OperatorVisitor<T> {
 
   T visit(Filter filter);
 
+  T visit(Project project);
+
   T visit(ScanJson scan);
 
   T visit(ScanParquet scan);
