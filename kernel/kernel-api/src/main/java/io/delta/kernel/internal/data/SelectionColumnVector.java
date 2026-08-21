@@ -26,10 +26,23 @@ public class SelectionColumnVector implements ColumnVector {
 
   private final RoaringBitmapArray bitmap;
   private final ColumnVector rowIndices;
+  private final boolean ownsRowIndices;
 
   public SelectionColumnVector(RoaringBitmapArray bitmap, ColumnVector rowIndices) {
+    this(bitmap, rowIndices, true);
+  }
+
+  private SelectionColumnVector(
+      RoaringBitmapArray bitmap, ColumnVector rowIndices, boolean ownsRowIndices) {
     this.bitmap = bitmap;
     this.rowIndices = rowIndices;
+    this.ownsRowIndices = ownsRowIndices;
+  }
+
+  /** Creates a selection that borrows a row-index vector retained in the output data. */
+  public static SelectionColumnVector borrowing(
+      RoaringBitmapArray bitmap, ColumnVector rowIndices) {
+    return new SelectionColumnVector(bitmap, rowIndices, false);
   }
 
   @Override
@@ -44,7 +57,9 @@ public class SelectionColumnVector implements ColumnVector {
 
   @Override
   public void close() {
-    rowIndices.close();
+    if (ownsRowIndices) {
+      rowIndices.close();
+    }
   }
 
   @Override
