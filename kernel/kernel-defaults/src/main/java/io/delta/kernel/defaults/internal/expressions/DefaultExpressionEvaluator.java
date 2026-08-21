@@ -31,6 +31,7 @@ import io.delta.kernel.defaults.internal.data.vector.DefaultConstantVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultViewVector;
 import io.delta.kernel.engine.ExpressionHandler;
 import io.delta.kernel.expressions.*;
+import io.delta.kernel.internal.util.ColumnBinding;
 import io.delta.kernel.internal.util.GeometryUtils;
 import io.delta.kernel.internal.util.Utils;
 import io.delta.kernel.types.*;
@@ -44,6 +45,7 @@ import java.util.stream.Collectors;
  */
 public class DefaultExpressionEvaluator implements ExpressionEvaluator {
   private final Expression expression;
+  private final Map<Column, ColumnBinding> columnBindings;
 
   /**
    * Create a {@link DefaultExpressionEvaluator} instance bound to the given expression and
@@ -64,16 +66,30 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       throw unsupportedExpressionException(expression, reason);
     }
     this.expression = transformResult.expression;
+    Map<Column, ColumnBinding> bindings = new HashMap<>();
+    bindColumns(inputSchema, this.expression, bindings);
+    this.columnBindings = Collections.unmodifiableMap(bindings);
   }
 
   @Override
   public ColumnVector eval(ColumnarBatch input) {
-    return new ExpressionEvalVisitor(input).visit(expression);
+    return new ExpressionEvalVisitor(input, columnBindings).visit(expression);
   }
 
   @Override
   public void close() {
     /* nothing to close */
+  }
+
+  private static void bindColumns(
+      StructType schema, Expression expression, Map<Column, ColumnBinding> bindings) {
+    if (expression instanceof Column) {
+      Column column = (Column) expression;
+      bindings.computeIfAbsent(column, key -> ColumnBinding.resolve(schema, key));
+    }
+    for (Expression child : expression.getChildren()) {
+      bindColumns(schema, child, bindings);
+    }
   }
 
   /** Encapsulates the result of {@link ExpressionTransformer} */
@@ -459,9 +475,11 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
    */
   private static class ExpressionEvalVisitor extends ExpressionVisitor<ColumnVector> {
     private final ColumnarBatch input;
+    private final Map<Column, ColumnBinding> columnBindings;
 
-    ExpressionEvalVisitor(ColumnarBatch input) {
+    ExpressionEvalVisitor(ColumnarBatch input, Map<Column, ColumnBinding> columnBindings) {
       this.input = input;
+      this.columnBindings = columnBindings;
     }
 
     /*
@@ -610,23 +628,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     ColumnVector visitColumn(Column column) {
-      String[] names = column.getNames();
-      DataType currentType = input.getSchema();
-      ColumnVector columnVector = null;
-      for (int level = 0; level < names.length; level++) {
-        assertColumnExists(currentType instanceof StructType, input.getSchema(), column);
-        StructType structSchema = ((StructType) currentType);
-        int ordinal = structSchema.indexOf(names[level]);
-        assertColumnExists(ordinal != -1, input.getSchema(), column);
-        currentType = structSchema.at(ordinal).getDataType();
-
-        if (level == 0) {
-          columnVector = input.getColumnVector(ordinal);
-        } else {
-          columnVector = columnVector.getChild(ordinal);
-        }
-      }
-      assertColumnExists(columnVector != null, input.getSchema(), column);
+      ColumnVector columnVector = columnBindings.get(column).getVector(input);
       return new DefaultViewVector(columnVector, 0, columnVector.getSize());
     }
 
