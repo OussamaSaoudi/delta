@@ -18,33 +18,86 @@ package io.delta.kernel.internal.plans;
 import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.data.Row;
+import io.delta.kernel.internal.actions.DeletionVectorDescriptor;
 import io.delta.kernel.internal.data.GenericRow;
 import io.delta.kernel.types.StructType;
 import io.delta.kernel.utils.FileStatus;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.Collections;
+import java.util.Optional;
 
-/** One file to scan and the constant values broadcast over rows read from that file. */
+/** One file to scan, its known metadata, broadcast constants, and deletion vector. */
 public final class ScanFile {
   private static final Row NO_CONSTANTS =
       GenericRow.fromValues(new StructType(), Collections.emptyList());
 
-  private final FileStatus fileStatus;
+  private final String path;
+  private final Optional<FileStatus> knownFileStatus;
   private final Row fileConstants;
+  private final Optional<DeletionVectorDescriptor> deletionVector;
 
   public ScanFile(FileStatus fileStatus) {
-    this(fileStatus, NO_CONSTANTS);
+    this(fileStatus, NO_CONSTANTS, Optional.empty());
   }
 
   public ScanFile(FileStatus fileStatus, Row fileConstants) {
-    this.fileStatus = requireNonNull(fileStatus, "fileStatus is null");
+    this(fileStatus, fileConstants, Optional.empty());
+  }
+
+  public ScanFile(
+      FileStatus fileStatus, Row fileConstants, Optional<DeletionVectorDescriptor> deletionVector) {
+    requireNonNull(fileStatus, "fileStatus is null");
+    this.path = validatePath(fileStatus.getPath());
+    if (fileStatus.getSize() < 0) {
+      throw new IllegalArgumentException("Scan file size must be non-negative");
+    }
+    this.knownFileStatus = Optional.of(fileStatus);
     this.fileConstants = requireNonNull(fileConstants, "fileConstants is null");
+    this.deletionVector = requireNonNull(deletionVector, "deletionVector is null");
+  }
+
+  public ScanFile(
+      String path, Row fileConstants, Optional<DeletionVectorDescriptor> deletionVector) {
+    this.path = validatePath(path);
+    this.knownFileStatus = Optional.empty();
+    this.fileConstants = requireNonNull(fileConstants, "fileConstants is null");
+    this.deletionVector = requireNonNull(deletionVector, "deletionVector is null");
+  }
+
+  private static String validatePath(String path) {
+    requireNonNull(path, "scan file path is null");
+    if (path.isEmpty()) {
+      throw new IllegalArgumentException("Scan file path is empty");
+    }
+    try {
+      if (!new URI(path).isAbsolute()) {
+        throw new IllegalArgumentException("Scan file path is not an absolute URI: " + path);
+      }
+    } catch (URISyntaxException failure) {
+      throw new IllegalArgumentException("Scan file path is not a valid URI: " + path, failure);
+    }
+    return path;
   }
 
   public FileStatus getFileStatus() {
-    return fileStatus;
+    return knownFileStatus.orElseThrow(
+        () -> new IllegalStateException("Scan file status is unresolved for " + path));
+  }
+
+  public String getPath() {
+    return path;
+  }
+
+  public Optional<FileStatus> getKnownFileStatus() {
+    return knownFileStatus;
   }
 
   public Row getFileConstants() {
     return fileConstants;
+  }
+
+  public Optional<DeletionVectorDescriptor> getDeletionVector() {
+    return deletionVector;
   }
 }

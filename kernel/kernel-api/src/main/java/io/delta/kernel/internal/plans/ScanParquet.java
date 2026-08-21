@@ -16,12 +16,22 @@
 package io.delta.kernel.internal.plans;
 
 import io.delta.kernel.types.StructType;
+import java.net.URI;
 import java.util.List;
+import java.util.Optional;
 
 /** Reads Parquet files into rows matching a declared output schema. */
 public final class ScanParquet extends FileScan {
   public ScanParquet(List<ScanFile> files, List<String> fileConstantColumns, StructType schema) {
     super(files, fileConstantColumns, schema);
+  }
+
+  public ScanParquet(
+      List<ScanFile> files,
+      List<String> fileConstantColumns,
+      StructType schema,
+      Optional<URI> deletionVectorRoot) {
+    super(files, fileConstantColumns, schema, deletionVectorRoot);
   }
 
   @Override

@@ -16,11 +16,13 @@
 package io.delta.kernel.internal.plans
 
 import java.lang.{Long => LongJ}
+import java.net.URI
 import java.util
 
 import scala.jdk.CollectionConverters._
 
 import io.delta.kernel.data.Row
+import io.delta.kernel.internal.actions.DeletionVectorDescriptor
 import io.delta.kernel.internal.data.GenericRow
 import io.delta.kernel.types._
 import io.delta.kernel.utils.FileStatus
@@ -52,6 +54,64 @@ class FileScanSuite extends AnyFunSuite {
     assert(scan.getFiles.get(1).getFileConstants.getString(0) === "b")
     assert(PlanBuilder.scanParquet(scan.getFiles, scan.getFileConstantColumns, schema)
       .build().getOutputSchema === schema)
+  }
+
+  test("ScanFile represents known and unresolved file metadata") {
+    val deletionVector = new DeletionVectorDescriptor(
+      DeletionVectorDescriptor.INLINE_DV_MARKER,
+      "",
+      util.Optional.empty[Integer](),
+      0,
+      0)
+    val known = new ScanFile(
+      FileStatus.of("file:///table/known", 10, 20),
+      constants("a"),
+      util.Optional.of(deletionVector))
+    val unresolved = new ScanFile(
+      "file:///table/unresolved",
+      constants("b"),
+      util.Optional.of(deletionVector))
+
+    assert(known.getPath === "file:///table/known")
+    assert(known.getKnownFileStatus.get.getSize === 10)
+    assert(unresolved.getPath === "file:///table/unresolved")
+    assert(unresolved.getKnownFileStatus.isEmpty)
+    assertThrows[IllegalStateException](unresolved.getFileStatus)
+    assert(unresolved.getDeletionVector.get eq deletionVector)
+  }
+
+  test("FileScan retains a shared deletion-vector root") {
+    val root = URI.create("file:///table")
+    val deletionVector = new DeletionVectorDescriptor(
+      DeletionVectorDescriptor.PATH_DV_MARKER,
+      "file:///table/dv.bin",
+      util.Optional.of(Int.box(1)),
+      1,
+      1)
+    val scanFile = new ScanFile(
+      FileStatus.of("file:///table/data"),
+      constants("a"),
+      util.Optional.of(deletionVector))
+    val scan = new ScanParquet(
+      Seq(scanFile).asJava,
+      Seq("part").asJava,
+      schema,
+      util.Optional.of(root))
+
+    assert(scan.getDeletionVectorRoot.get === root)
+    assertThrows[IllegalArgumentException] {
+      new ScanParquet(
+        util.Collections.emptyList(),
+        util.Collections.emptyList(),
+        schema,
+        util.Optional.of(URI.create("relative")))
+    }
+    assertThrows[IllegalArgumentException] {
+      new ScanParquet(
+        Seq(scanFile).asJava,
+        Seq("part").asJava,
+        schema)
+    }
   }
 
   test("Parquet scan defensively copies collections") {

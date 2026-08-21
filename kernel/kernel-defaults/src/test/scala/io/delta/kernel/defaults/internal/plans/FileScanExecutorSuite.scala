@@ -25,9 +25,10 @@ import io.delta.kernel.data.{ColumnarBatch, Row}
 import io.delta.kernel.defaults.internal.data.DefaultRowBasedColumnarBatch
 import io.delta.kernel.engine.FileReadResult
 import io.delta.kernel.expressions.Predicate
+import io.delta.kernel.internal.actions.DeletionVectorDescriptor
 import io.delta.kernel.internal.data.GenericRow
 import io.delta.kernel.internal.plans.{PlanBuilder, ScanFile}
-import io.delta.kernel.test.{BaseMockJsonHandler, BaseMockParquetHandler}
+import io.delta.kernel.test.{BaseMockFileSystemClient, BaseMockJsonHandler, BaseMockParquetHandler}
 import io.delta.kernel.types._
 import io.delta.kernel.utils.{CloseableIterator, FileStatus}
 
@@ -78,6 +79,60 @@ class FileScanExecutorSuite extends AnyFunSuite with PlanExecutionSuiteBase {
     val output = iterator.next().getData
     iterator.close()
     assert(output.getColumnVector(0) eq input.getColumnVector(0))
+  }
+
+  test("scan resolves missing file status through Kernel Java") {
+    val path = "file:///table/unresolved"
+    val scanFile = new ScanFile(path, row(constantsSchema, "a"), Optional.empty())
+    val handler = new ParquetReads(Map(path -> Seq(batch(1))))
+    var requestedPath: String = null
+    val fileSystem = new BaseMockFileSystemClient {
+      override def getFileStatus(location: String): FileStatus = {
+        requestedPath = location
+        FileStatus.of(location, 10, 20)
+      }
+    }
+
+    checkRows(
+      PlanBuilder.scanParquet(Seq(scanFile).asJava, Seq("part").asJava, outputSchema),
+      mockEngine(fileSystemClient = fileSystem, parquetHandler = handler),
+      Seq(row(outputSchema, LongJ.valueOf(1), "a")))
+
+    assert(requestedPath === path)
+  }
+
+  test("scan applies deletion vectors through an internal row-index column") {
+    val path = "file:///table/with-dv"
+    val deletionVector = new DeletionVectorDescriptor(
+      DeletionVectorDescriptor.INLINE_DV_MARKER,
+      "",
+      Optional.empty(),
+      0,
+      0)
+    val scanFile = new ScanFile(
+      FileStatus.of(path),
+      row(constantsSchema, "a"),
+      Optional.of(deletionVector))
+    val privateReadSchema = readSchema.add(
+      StructField.createMetadataColumn(
+        "__delta_kernel_scan_row_index",
+        MetadataColumnSpec.ROW_INDEX))
+    val input = new DefaultRowBasedColumnarBatch(
+      privateReadSchema,
+      Seq(
+        row(privateReadSchema, LongJ.valueOf(1), LongJ.valueOf(0)),
+        row(privateReadSchema, LongJ.valueOf(2), LongJ.valueOf(1))).asJava)
+    val handler = new ParquetReads(Map(path -> Seq(input)))
+    val batches = DefaultPlanExecutor.execute(
+      PlanBuilder.scanParquet(Seq(scanFile).asJava, Seq("part").asJava, outputSchema).build(),
+      mockEngine(parquetHandler = handler))
+
+    val result = batches.next()
+    assert(result.getData.getSchema === outputSchema)
+    assert(result.getSelectionVector.isPresent)
+    assert(result.isSelected(0))
+    assert(result.isSelected(1))
+    batches.close()
   }
 
   test("JSON scans files in order and resets row indices for each file") {

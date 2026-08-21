@@ -17,12 +17,15 @@ package io.delta.kernel.internal.plans;
 
 import static java.util.Objects.requireNonNull;
 
+import io.delta.kernel.internal.actions.DeletionVectorDescriptor;
 import io.delta.kernel.types.StructField;
 import io.delta.kernel.types.StructType;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 /** Common immutable payload for Parquet and JSON scan source operators. */
@@ -30,11 +33,25 @@ public abstract class FileScan implements Operator {
   private final List<ScanFile> files;
   private final List<String> fileConstantColumns;
   private final StructType schema;
+  private final Optional<URI> deletionVectorRoot;
 
   protected FileScan(List<ScanFile> files, List<String> fileConstantColumns, StructType schema) {
+    this(files, fileConstantColumns, schema, Optional.empty());
+  }
+
+  protected FileScan(
+      List<ScanFile> files,
+      List<String> fileConstantColumns,
+      StructType schema,
+      Optional<URI> deletionVectorRoot) {
     requireNonNull(files, "files is null");
     requireNonNull(fileConstantColumns, "fileConstantColumns is null");
     this.schema = requireNonNull(schema, "schema is null");
+    this.deletionVectorRoot = requireNonNull(deletionVectorRoot, "deletionVectorRoot is null");
+    if (this.deletionVectorRoot.isPresent() && !this.deletionVectorRoot.get().isAbsolute()) {
+      throw new IllegalArgumentException(
+          "Deletion vector root is not an absolute URI: " + this.deletionVectorRoot.get());
+    }
 
     List<String> copiedNames = new ArrayList<>(fileConstantColumns.size());
     StructType constantsSchema = buildConstantsSchema(fileConstantColumns, copiedNames);
@@ -45,6 +62,11 @@ public abstract class FileScan implements Operator {
           file.getFileConstants(),
           constantsSchema,
           String.format("Scan file %s constants", fileIndex));
+      if (file.getDeletionVector().filter(DeletionVectorDescriptor::isOnDisk).isPresent()
+          && !this.deletionVectorRoot.isPresent()) {
+        throw new IllegalArgumentException(
+            "Deletion vector root is required for on-disk deletion vectors");
+      }
       copiedFiles.add(file);
     }
     this.files = Collections.unmodifiableList(copiedFiles);
@@ -86,6 +108,10 @@ public abstract class FileScan implements Operator {
 
   public StructType getSchema() {
     return schema;
+  }
+
+  public Optional<URI> getDeletionVectorRoot() {
+    return deletionVectorRoot;
   }
 
   @Override

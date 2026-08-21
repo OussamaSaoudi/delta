@@ -22,12 +22,14 @@ import io.delta.kernel.expressions.Column;
 import io.delta.kernel.expressions.Expression;
 import io.delta.kernel.expressions.Predicate;
 import io.delta.kernel.types.StructType;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.UnaryOperator;
 
 /** Fluent builder for an immutable {@link Plan}. */
@@ -54,10 +56,26 @@ public final class PlanBuilder {
     return source(new ScanParquet(files, fileConstantColumns, schema));
   }
 
+  public static PlanBuilder scanParquet(
+      List<ScanFile> files,
+      List<String> fileConstantColumns,
+      StructType schema,
+      Optional<URI> deletionVectorRoot) {
+    return source(new ScanParquet(files, fileConstantColumns, schema, deletionVectorRoot));
+  }
+
   /** A newline-delimited JSON scan source. */
   public static PlanBuilder scanJson(
       List<ScanFile> files, List<String> fileConstantColumns, StructType schema) {
     return source(new ScanJson(files, fileConstantColumns, schema));
+  }
+
+  public static PlanBuilder scanJson(
+      List<ScanFile> files,
+      List<String> fileConstantColumns,
+      StructType schema,
+      Optional<URI> deletionVectorRoot) {
+    return source(new ScanJson(files, fileConstantColumns, schema, deletionVectorRoot));
   }
 
   /** An inline row source. Empty rows remain a present, runnable source. */

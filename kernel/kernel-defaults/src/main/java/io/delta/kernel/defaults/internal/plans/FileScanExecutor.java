@@ -25,6 +25,10 @@ import io.delta.kernel.defaults.internal.data.vector.DefaultLongVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultSubFieldVector;
 import io.delta.kernel.engine.Engine;
 import io.delta.kernel.engine.FileReadResult;
+import io.delta.kernel.internal.actions.DeletionVectorDescriptor;
+import io.delta.kernel.internal.data.SelectionColumnVector;
+import io.delta.kernel.internal.deletionvectors.DeletionVectorUtils;
+import io.delta.kernel.internal.deletionvectors.RoaringBitmapArray;
 import io.delta.kernel.internal.plans.FileScan;
 import io.delta.kernel.internal.plans.ScanFile;
 import io.delta.kernel.internal.plans.ScanJson;
@@ -38,6 +42,7 @@ import io.delta.kernel.utils.CloseableIterator;
 import io.delta.kernel.utils.FileStatus;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -45,26 +50,48 @@ import java.util.Optional;
 
 /** Executes ordered file scans through the existing Kernel Java handlers. */
 final class FileScanExecutor {
+  private static final String PRIVATE_ROW_INDEX = "__delta_kernel_scan_row_index";
+
   private FileScanExecutor() {}
 
   static CloseableIterator<FilteredColumnarBatch> execute(ScanParquet scan, Engine engine) {
     requireNonNull(scan, "scan is null");
     requireNonNull(engine, "engine is null");
-    StructType readSchema = readSchema(scan, false);
+    StructType outputSchema = outputSchema(scan);
+    StructType readSchema = readSchema(scan, outputSchema, false);
+    boolean dropRowIndex = requiresPrivateRowIndex(scan);
     return scanFiles(scan)
         .flatMap(
-            file ->
-                openParquet(file, readSchema, engine)
-                    .map(
-                        result ->
-                            filtered(splice(scan, file, result.getData(), 0, false, readSchema))));
+            file -> {
+              RoaringBitmapArray bitmap = loadDeletionVector(scan, file, engine);
+              return openParquet(file, readSchema, engine)
+                  .map(
+                      result ->
+                          finishBatch(
+                              file,
+                              bitmap,
+                              splice(
+                                  outputSchema,
+                                  scan.getFileConstantColumns(),
+                                  file,
+                                  result.getData(),
+                                  0,
+                                  false,
+                                  readSchema),
+                              dropRowIndex));
+            });
   }
 
   static CloseableIterator<FilteredColumnarBatch> execute(ScanJson scan, Engine engine) {
     requireNonNull(scan, "scan is null");
     requireNonNull(engine, "engine is null");
-    StructType readSchema = readSchema(scan, true);
-    return scanFiles(scan).flatMap(file -> openJson(scan, file, readSchema, engine));
+    StructType outputSchema = outputSchema(scan);
+    StructType readSchema = readSchema(scan, outputSchema, true);
+    boolean dropRowIndex = requiresPrivateRowIndex(scan);
+    return scanFiles(scan)
+        .flatMap(
+            file ->
+                openJson(scan, file, outputSchema, readSchema, dropRowIndex, engine));
   }
 
   private static CloseableIterator<FileReadResult> openParquet(
@@ -72,6 +99,7 @@ final class FileScanExecutor {
     return openReader(
         file,
         "Parquet",
+        engine,
         statuses ->
             engine
                 .getParquetHandler()
@@ -79,26 +107,45 @@ final class FileScanExecutor {
   }
 
   private static CloseableIterator<FilteredColumnarBatch> openJson(
-      ScanJson scan, ScanFile file, StructType readSchema, Engine engine) {
+      ScanJson scan,
+      ScanFile file,
+      StructType outputSchema,
+      StructType readSchema,
+      boolean dropRowIndex,
+      Engine engine) {
     CloseableIterator<ColumnarBatch> reader =
         openReader(
             file,
             "JSON",
+            engine,
             statuses ->
                 engine.getJsonHandler().readJsonFiles(statuses, readSchema, Optional.empty()));
     long[] nextRowIndex = {0};
+    RoaringBitmapArray bitmap = loadDeletionVector(scan, file, engine);
     return reader.map(
         batch -> {
           long rowIndex = nextRowIndex[0];
           nextRowIndex[0] = Math.addExact(rowIndex, batch.getSize());
-          return filtered(splice(scan, file, batch, rowIndex, true, readSchema));
+          return finishBatch(
+              file,
+              bitmap,
+              splice(
+                  outputSchema,
+                  scan.getFileConstantColumns(),
+                  file,
+                  batch,
+                  rowIndex,
+                  true,
+                  readSchema),
+              dropRowIndex);
         });
   }
 
   private static <T> CloseableIterator<T> openReader(
-      ScanFile file, String format, ReaderOpener<T> opener) {
+      ScanFile file, String format, Engine engine, ReaderOpener<T> opener) {
+    FileStatus fileStatus = resolveFileStatus(file, engine);
     CloseableIterator<FileStatus> status =
-        toCloseableIterator(Collections.singleton(file.getFileStatus()).iterator());
+        toCloseableIterator(Collections.singleton(fileStatus).iterator());
     try {
       return requireNonNull(opener.open(status), format + " reader is null");
     } catch (IOException failure) {
@@ -110,9 +157,73 @@ final class FileScanExecutor {
     }
   }
 
-  private static StructType readSchema(FileScan scan, boolean json) {
+  private static FileStatus resolveFileStatus(ScanFile file, Engine engine) {
+    if (file.getKnownFileStatus().isPresent()) {
+      return file.getKnownFileStatus().get();
+    }
+    try {
+      return engine.getFileSystemClient().getFileStatus(file.getPath());
+    } catch (IOException failure) {
+      throw new UncheckedIOException("Failed to stat scan file " + file.getPath(), failure);
+    }
+  }
+
+  private static StructType outputSchema(FileScan scan) {
+    if (!requiresPrivateRowIndex(scan)) {
+      return scan.getSchema();
+    }
+    return scan.getSchema().add(
+        StructField.createMetadataColumn(PRIVATE_ROW_INDEX, MetadataColumnSpec.ROW_INDEX));
+  }
+
+  private static boolean requiresPrivateRowIndex(FileScan scan) {
+    return scan.getSchema().indexOf(MetadataColumnSpec.ROW_INDEX) < 0
+        && scan.getFiles().stream().anyMatch(file -> file.getDeletionVector().isPresent());
+  }
+
+  private static RoaringBitmapArray loadDeletionVector(
+      FileScan scan, ScanFile file, Engine engine) {
+    if (!file.getDeletionVector().isPresent()) {
+      return null;
+    }
+    Optional<String> root = scan.getDeletionVectorRoot().map(URI::toString);
+    DeletionVectorDescriptor deletionVector = file.getDeletionVector().get();
+    return DeletionVectorUtils.loadNewDvAndBitmap(engine, root, deletionVector)._2;
+  }
+
+  private static FilteredColumnarBatch finishBatch(
+      ScanFile file,
+      RoaringBitmapArray bitmap,
+      ColumnarBatch batch,
+      boolean dropRowIndex) {
+    int rowIndexOrdinal = batch.getSchema().indexOf(MetadataColumnSpec.ROW_INDEX);
+    if (bitmap == null) {
+      if (!dropRowIndex) {
+        return filtered(batch);
+      }
+      ColumnVector rowIndices = batch.getColumnVector(rowIndexOrdinal);
+      ColumnarBatch output = batch.withDeletedColumnAt(rowIndexOrdinal);
+      rowIndices.close();
+      return filtered(output);
+    }
+    if (rowIndexOrdinal < 0) {
+      throw new IllegalArgumentException(
+          "Row index column is absent while applying deletion vector for " + file.getPath());
+    }
+
+    ColumnVector rowIndices = batch.getColumnVector(rowIndexOrdinal);
+    ColumnarBatch output = dropRowIndex ? batch.withDeletedColumnAt(rowIndexOrdinal) : batch;
+    SelectionColumnVector selection =
+        dropRowIndex
+            ? new SelectionColumnVector(bitmap, rowIndices)
+            : SelectionColumnVector.borrowing(bitmap, rowIndices);
+    return new FilteredColumnarBatch(output, Optional.of(selection));
+  }
+
+  private static StructType readSchema(
+      FileScan scan, StructType outputSchema, boolean json) {
     List<StructField> fields = new ArrayList<>();
-    for (StructField field : scan.getSchema().fields()) {
+    for (StructField field : outputSchema.fields()) {
       if (scan.getFileConstantColumns().contains(field.getName())) {
         continue;
       }
@@ -129,7 +240,8 @@ final class FileScanExecutor {
   }
 
   private static ColumnarBatch splice(
-      FileScan scan,
+      StructType outputSchema,
+      List<String> fileConstantColumns,
       ScanFile file,
       ColumnarBatch batch,
       long jsonRowIndex,
@@ -142,9 +254,9 @@ final class FileScanExecutor {
     }
 
     ColumnarBatch output = batch;
-    for (int ordinal = 0; ordinal < scan.getSchema().length(); ordinal++) {
-      StructField field = scan.getSchema().at(ordinal);
-      int constant = scan.getFileConstantColumns().indexOf(field.getName());
+    for (int ordinal = 0; ordinal < outputSchema.length(); ordinal++) {
+      StructField field = outputSchema.at(ordinal);
+      int constant = fileConstantColumns.indexOf(field.getName());
       if (constant >= 0) {
         ColumnVector vector =
             new DefaultSubFieldVector(
