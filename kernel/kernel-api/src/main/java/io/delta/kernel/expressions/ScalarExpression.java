@@ -50,6 +50,25 @@ import java.util.stream.Collectors;
  *             If either of the expressions is null, returns null.
  *         <li>Since Version: 4.1.0
  *       </ul>
+ *   <li>Name: <code>SUBTRACT</code>
+ *       <ul>
+ *         <li>Semantic: <code>SUBTRACT(expr1, expr2)</code>. Subtract the second numeric expression
+ *             from the first. If either expression is null, returns null.
+ *         <li>Since Version: 4.1.0
+ *       </ul>
+ *   <li>Name: <code>MULTIPLY</code>
+ *       <ul>
+ *         <li>Semantic: <code>MULTIPLY(expr1, expr2)</code>. Return the product of two numeric
+ *             expressions. If either expression is null, returns null.
+ *         <li>Since Version: 4.1.0
+ *       </ul>
+ *   <li>Name: <code>DIVIDE</code>
+ *       <ul>
+ *         <li>Semantic: <code>DIVIDE(expr1, expr2)</code>. Divide the first numeric expression by
+ *             the second. Integral division truncates toward zero and fails on a zero divisor;
+ *             floating-point division follows IEEE 754. If either expression is null, returns null.
+ *         <li>Since Version: 4.1.0
+ *       </ul>
  *   <li>Name: <code>TIMEADD</code>
  *       <ul>
  *         <li>Semantic: <code>TIMEADD(colExpr, milliseconds)</code>. Add the specified number of

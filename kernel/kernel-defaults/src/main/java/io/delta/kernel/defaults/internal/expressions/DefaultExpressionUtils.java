@@ -37,6 +37,12 @@ import java.util.stream.Collectors;
 
 /** Utility methods used by the default expression evaluator. */
 class DefaultExpressionUtils {
+  private enum ArithmeticOperation {
+    ADD,
+    SUBTRACT,
+    MULTIPLY,
+    DIVIDE
+  }
 
   static final Comparator<BigDecimal> BIGDECIMAL_COMPARATOR = Comparator.naturalOrder();
   static final Comparator<byte[]> BINARY_COMPARTOR =
@@ -388,21 +394,6 @@ class DefaultExpressionUtils {
     };
   }
 
-  /** Represents an arithmetic operator that can be applied to two numeric values. */
-  public interface ArithmeticOperator {
-    byte apply(byte a, byte b);
-
-    short apply(short a, short b);
-
-    int apply(int a, int b);
-
-    long apply(long a, long b);
-
-    float apply(float a, float b);
-
-    double apply(double a, double b);
-  }
-
   /**
    * Creates a column vector that lazily evaluates an arithmetic operation between two column
    * vectors.
@@ -411,16 +402,16 @@ class DefaultExpressionUtils {
    *
    * @param left the left operand column vector
    * @param right the right operand column vector
-   * @param operator the arithmetic operator to apply
+   * @param operation the arithmetic operation to apply
    * @return a new column vector representing the result of the arithmetic operation
    */
-  static ColumnVector arithmeticVector(
-      ColumnVector left, ColumnVector right, ArithmeticOperator operator) {
+  static ColumnVector arithmeticVector(ColumnVector left, ColumnVector right, String operation) {
     checkArgument(
         left.getSize() == right.getSize(), "Left and right operand have different vector sizes.");
     checkArgument(
         left.getDataType().equals(right.getDataType()),
         "Left and right operand have different data types.");
+    ArithmeticOperation arithmeticOperation = ArithmeticOperation.valueOf(operation);
     return new ColumnVector() {
       @Override
       public DataType getDataType() {
@@ -444,34 +435,123 @@ class DefaultExpressionUtils {
 
       @Override
       public byte getByte(int rowId) {
-        return operator.apply(left.getByte(rowId), right.getByte(rowId));
+        return evalByte(arithmeticOperation, left.getByte(rowId), right.getByte(rowId));
       }
 
       @Override
       public short getShort(int rowId) {
-        return operator.apply(left.getShort(rowId), right.getShort(rowId));
+        return evalShort(arithmeticOperation, left.getShort(rowId), right.getShort(rowId));
       }
 
       @Override
       public int getInt(int rowId) {
-        return operator.apply(left.getInt(rowId), right.getInt(rowId));
+        return evalInt(arithmeticOperation, left.getInt(rowId), right.getInt(rowId));
       }
 
       @Override
       public long getLong(int rowId) {
-        return operator.apply(left.getLong(rowId), right.getLong(rowId));
+        return evalLong(arithmeticOperation, left.getLong(rowId), right.getLong(rowId));
       }
 
       @Override
       public float getFloat(int rowId) {
-        return operator.apply(left.getFloat(rowId), right.getFloat(rowId));
+        return evalFloat(arithmeticOperation, left.getFloat(rowId), right.getFloat(rowId));
       }
 
       @Override
       public double getDouble(int rowId) {
-        return operator.apply(left.getDouble(rowId), right.getDouble(rowId));
+        return evalDouble(arithmeticOperation, left.getDouble(rowId), right.getDouble(rowId));
       }
     };
+  }
+
+  private static byte evalByte(ArithmeticOperation operation, byte left, byte right) {
+    int result = evalInt(operation, left, right);
+    if (result < Byte.MIN_VALUE || result > Byte.MAX_VALUE) {
+      throw arithmeticOverflow(operation, ByteType.BYTE);
+    }
+    return (byte) result;
+  }
+
+  private static short evalShort(ArithmeticOperation operation, short left, short right) {
+    int result = evalInt(operation, left, right);
+    if (result < Short.MIN_VALUE || result > Short.MAX_VALUE) {
+      throw arithmeticOverflow(operation, ShortType.SHORT);
+    }
+    return (short) result;
+  }
+
+  private static int evalInt(ArithmeticOperation operation, int left, int right) {
+    switch (operation) {
+      case ADD:
+        return Math.addExact(left, right);
+      case SUBTRACT:
+        return Math.subtractExact(left, right);
+      case MULTIPLY:
+        return Math.multiplyExact(left, right);
+      case DIVIDE:
+        if (left == Integer.MIN_VALUE && right == -1) {
+          throw arithmeticOverflow(operation, IntegerType.INTEGER);
+        }
+        return left / right;
+      default:
+        throw new IllegalStateException("Unexpected arithmetic operation: " + operation);
+    }
+  }
+
+  private static long evalLong(ArithmeticOperation operation, long left, long right) {
+    switch (operation) {
+      case ADD:
+        return Math.addExact(left, right);
+      case SUBTRACT:
+        return Math.subtractExact(left, right);
+      case MULTIPLY:
+        return Math.multiplyExact(left, right);
+      case DIVIDE:
+        if (left == Long.MIN_VALUE && right == -1) {
+          throw arithmeticOverflow(operation, LongType.LONG);
+        }
+        return left / right;
+      default:
+        throw new IllegalStateException("Unexpected arithmetic operation: " + operation);
+    }
+  }
+
+  private static float evalFloat(ArithmeticOperation operation, float left, float right) {
+    switch (operation) {
+      case ADD:
+        return left + right;
+      case SUBTRACT:
+        return left - right;
+      case MULTIPLY:
+        return left * right;
+      case DIVIDE:
+        return left / right;
+      default:
+        throw new IllegalStateException("Unexpected arithmetic operation: " + operation);
+    }
+  }
+
+  private static double evalDouble(ArithmeticOperation operation, double left, double right) {
+    switch (operation) {
+      case ADD:
+        return left + right;
+      case SUBTRACT:
+        return left - right;
+      case MULTIPLY:
+        return left * right;
+      case DIVIDE:
+        return left / right;
+      default:
+        throw new IllegalStateException("Unexpected arithmetic operation: " + operation);
+    }
+  }
+
+  private static ArithmeticException arithmeticOverflow(
+      ArithmeticOperation operation, DataType dataType) {
+    return new ArithmeticException(
+        String.format(
+            "Arithmetic overflow while evaluating %s for %s values", operation, dataType));
   }
 
   /**
