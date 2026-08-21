@@ -23,6 +23,7 @@ import io.delta.kernel.engine.Engine;
 import io.delta.kernel.internal.plans.OperatorVisitor;
 import io.delta.kernel.internal.plans.Plan;
 import io.delta.kernel.internal.plans.PlanNode;
+import io.delta.kernel.internal.plans.Values;
 import io.delta.kernel.utils.CloseableIterator;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -46,6 +47,11 @@ public final class DefaultPlanExecutor
     requireNonNull(engine, "engine is null");
     DefaultPlanExecutor executor = new DefaultPlanExecutor(plan);
     return executor.compile(plan.getNodes().size() - 1).open();
+  }
+
+  @Override
+  public BatchOperator visit(Values values) {
+    return inputs -> ValuesExecutor.execute(values);
   }
 
   private ExecutionNode compile(int nodeIndex) {

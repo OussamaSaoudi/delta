@@ -17,6 +17,7 @@ package io.delta.kernel.internal.plans;
 
 import static java.util.Objects.requireNonNull;
 
+import io.delta.kernel.data.Row;
 import io.delta.kernel.types.StructType;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -42,11 +43,20 @@ public final class PlanBuilder {
             operator, Collections.unmodifiableList(new ArrayList<>(inputs)), outputSchema);
   }
 
+  /** An inline row source. Empty rows remain a present, runnable source. */
+  public static PlanBuilder values(StructType schema, List<? extends Row> rows) {
+    return source(new Values(schema, rows));
+  }
+
   /** Builds a topologically ordered plan containing the nodes reachable from this builder. */
   public Plan build() {
     List<PlanNode> nodes = new ArrayList<>();
     emit(root, nodes, new IdentityHashMap<>());
     return new Plan(nodes);
+  }
+
+  private static PlanBuilder source(Operator operator) {
+    return new PlanBuilder(operator, Collections.emptyList());
   }
 
   private static int emit(

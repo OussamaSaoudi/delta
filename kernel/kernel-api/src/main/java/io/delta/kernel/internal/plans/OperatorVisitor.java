@@ -17,4 +17,5 @@ package io.delta.kernel.internal.plans;
 
 /** Type-safe dispatch over declarative plan operators. */
 public interface OperatorVisitor<T> {
+  T visit(Values values);
 }
