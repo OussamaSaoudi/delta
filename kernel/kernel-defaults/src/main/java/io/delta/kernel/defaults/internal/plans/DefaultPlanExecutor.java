@@ -23,6 +23,7 @@ import io.delta.kernel.engine.Engine;
 import io.delta.kernel.internal.plans.OperatorVisitor;
 import io.delta.kernel.internal.plans.Plan;
 import io.delta.kernel.internal.plans.PlanNode;
+import io.delta.kernel.internal.plans.ScanJson;
 import io.delta.kernel.internal.plans.ScanParquet;
 import io.delta.kernel.internal.plans.UnionAll;
 import io.delta.kernel.internal.plans.Values;
@@ -54,6 +55,11 @@ public final class DefaultPlanExecutor
 
   @Override
   public BatchOperator visit(ScanParquet scan) {
+    return inputs -> FileScanExecutor.execute(scan, engine);
+  }
+
+  @Override
+  public BatchOperator visit(ScanJson scan) {
     return inputs -> FileScanExecutor.execute(scan, engine);
   }
 

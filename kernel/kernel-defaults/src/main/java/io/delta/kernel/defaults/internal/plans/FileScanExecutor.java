@@ -21,13 +21,17 @@ import static java.util.Objects.requireNonNull;
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.ColumnarBatch;
 import io.delta.kernel.data.FilteredColumnarBatch;
+import io.delta.kernel.defaults.internal.data.vector.DefaultLongVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultSubFieldVector;
 import io.delta.kernel.engine.Engine;
 import io.delta.kernel.engine.FileReadResult;
 import io.delta.kernel.internal.plans.FileScan;
 import io.delta.kernel.internal.plans.ScanFile;
+import io.delta.kernel.internal.plans.ScanJson;
 import io.delta.kernel.internal.plans.ScanParquet;
 import io.delta.kernel.internal.util.Utils;
+import io.delta.kernel.types.LongType;
+import io.delta.kernel.types.MetadataColumnSpec;
 import io.delta.kernel.types.StructField;
 import io.delta.kernel.types.StructType;
 import io.delta.kernel.utils.CloseableIterator;
@@ -39,21 +43,28 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 
-/** Executes ordered Parquet scans through the existing Kernel Java handler. */
+/** Executes ordered file scans through the existing Kernel Java handlers. */
 final class FileScanExecutor {
   private FileScanExecutor() {}
 
   static CloseableIterator<FilteredColumnarBatch> execute(ScanParquet scan, Engine engine) {
     requireNonNull(scan, "scan is null");
     requireNonNull(engine, "engine is null");
-    StructType readSchema = readSchema(scan);
+    StructType readSchema = readSchema(scan, false);
     return scanFiles(scan)
         .flatMap(
             file ->
                 openParquet(file, readSchema, engine)
                     .map(
                         result ->
-                            filtered(splice(scan, file, result.getData(), readSchema))));
+                            filtered(splice(scan, file, result.getData(), 0, false, readSchema))));
+  }
+
+  static CloseableIterator<FilteredColumnarBatch> execute(ScanJson scan, Engine engine) {
+    requireNonNull(scan, "scan is null");
+    requireNonNull(engine, "engine is null");
+    StructType readSchema = readSchema(scan, true);
+    return scanFiles(scan).flatMap(file -> openJson(scan, file, readSchema, engine));
   }
 
   private static CloseableIterator<FileReadResult> openParquet(
@@ -65,6 +76,23 @@ final class FileScanExecutor {
             engine
                 .getParquetHandler()
                 .readParquetFiles(statuses, readSchema, Optional.empty()));
+  }
+
+  private static CloseableIterator<FilteredColumnarBatch> openJson(
+      ScanJson scan, ScanFile file, StructType readSchema, Engine engine) {
+    CloseableIterator<ColumnarBatch> reader =
+        openReader(
+            file,
+            "JSON",
+            statuses ->
+                engine.getJsonHandler().readJsonFiles(statuses, readSchema, Optional.empty()));
+    long[] nextRowIndex = {0};
+    return reader.map(
+        batch -> {
+          long rowIndex = nextRowIndex[0];
+          nextRowIndex[0] = Math.addExact(rowIndex, batch.getSize());
+          return filtered(splice(scan, file, batch, rowIndex, true, readSchema));
+        });
   }
 
   private static <T> CloseableIterator<T> openReader(
@@ -82,10 +110,17 @@ final class FileScanExecutor {
     }
   }
 
-  private static StructType readSchema(FileScan scan) {
+  private static StructType readSchema(FileScan scan, boolean json) {
     List<StructField> fields = new ArrayList<>();
     for (StructField field : scan.getSchema().fields()) {
       if (scan.getFileConstantColumns().contains(field.getName())) {
+        continue;
+      }
+      if (json && field.isMetadataColumn()) {
+        if (field.getMetadataColumnSpec() != MetadataColumnSpec.ROW_INDEX) {
+          throw new IllegalArgumentException(
+              "Unsupported JSON scan metadata column `" + field.getName() + "`");
+        }
         continue;
       }
       fields.add(field);
@@ -96,7 +131,10 @@ final class FileScanExecutor {
   private static ColumnarBatch splice(
       FileScan scan,
       ScanFile file,
-      ColumnarBatch batch, StructType expectedReadSchema) {
+      ColumnarBatch batch,
+      long jsonRowIndex,
+      boolean json,
+      StructType expectedReadSchema) {
     requireNonNull(batch, "reader batch is null");
     if (!expectedReadSchema.equals(batch.getSchema())) {
       throw new IllegalArgumentException(
@@ -115,6 +153,16 @@ final class FileScanExecutor {
                 constant,
                 ignored -> file.getFileConstants());
         output = output.withNewColumn(ordinal, field, vector);
+      } else if (json && field.isMetadataColumn()) {
+        long[] values = new long[batch.getSize()];
+        for (int row = 0; row < values.length; row++) {
+          values[row] = Math.addExact(jsonRowIndex, row);
+        }
+        output =
+            output.withNewColumn(
+                ordinal,
+                field,
+                new DefaultLongVector(LongType.LONG, values.length, Optional.empty(), values));
       }
     }
     return output;

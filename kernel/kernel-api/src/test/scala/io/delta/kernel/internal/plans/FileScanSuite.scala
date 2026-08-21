@@ -109,4 +109,14 @@ class FileScanSuite extends AnyFunSuite {
     }
     assert(error.getMessage.contains("requires no inputs"))
   }
+
+  test("JSON scan builder retains its source format") {
+    val plan = PlanBuilder.scanJson(
+      Seq(file("file:///table/data")).asJava,
+      Seq("part").asJava,
+      schema).build()
+
+    assert(plan.getNodes.get(0).getOperator.isInstanceOf[ScanJson])
+    assert(plan.getOutputSchema === schema)
+  }
 }

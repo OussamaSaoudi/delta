@@ -49,6 +49,12 @@ public final class PlanBuilder {
     return source(new ScanParquet(files, fileConstantColumns, schema));
   }
 
+  /** A newline-delimited JSON scan source. */
+  public static PlanBuilder scanJson(
+      List<ScanFile> files, List<String> fileConstantColumns, StructType schema) {
+    return source(new ScanJson(files, fileConstantColumns, schema));
+  }
+
   /** An inline row source. Empty rows remain a present, runnable source. */
   public static PlanBuilder values(StructType schema, List<? extends Row> rows) {
     return source(new Values(schema, rows));

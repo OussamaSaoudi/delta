@@ -27,7 +27,7 @@ import io.delta.kernel.engine.FileReadResult
 import io.delta.kernel.expressions.Predicate
 import io.delta.kernel.internal.data.GenericRow
 import io.delta.kernel.internal.plans.{PlanBuilder, ScanFile}
-import io.delta.kernel.test.BaseMockParquetHandler
+import io.delta.kernel.test.{BaseMockJsonHandler, BaseMockParquetHandler}
 import io.delta.kernel.types._
 import io.delta.kernel.utils.{CloseableIterator, FileStatus}
 
@@ -80,6 +80,28 @@ class FileScanExecutorSuite extends AnyFunSuite with PlanExecutionSuiteBase {
     assert(output.getColumnVector(0) eq input.getColumnVector(0))
   }
 
+  test("JSON scans files in order and resets row indices for each file") {
+    val rowIndex = StructField.createMetadataColumn("index", MetadataColumnSpec.ROW_INDEX)
+    val schema = readSchema.add(rowIndex)
+    val files = Seq(
+      new ScanFile(FileStatus.of("file:///table/a")),
+      new ScanFile(FileStatus.of("file:///table/b")))
+    val handler = new JsonReads(Map(
+      files(0).getFileStatus.getPath -> Seq(batch(10, 11), batch(12)),
+      files(1).getFileStatus.getPath -> Seq(batch(20))))
+
+    checkRows(
+      PlanBuilder.scanJson(files.asJava, Seq.empty[String].asJava, schema),
+      mockEngine(jsonHandler = handler),
+      Seq(row(schema, LongJ.valueOf(10), LongJ.valueOf(0)),
+        row(schema, LongJ.valueOf(11), LongJ.valueOf(1)),
+        row(schema, LongJ.valueOf(12), LongJ.valueOf(2)),
+        row(schema, LongJ.valueOf(20), LongJ.valueOf(0))))
+
+    assert(handler.files === files.map(_.getFileStatus.getPath))
+    assert(handler.schemas.forall(_ === readSchema))
+  }
+
   private class ParquetReads(outputs: Map[String, Seq[ColumnarBatch]])
       extends BaseMockParquetHandler {
     val files = ArrayBuffer.empty[String]
@@ -93,6 +115,21 @@ class FileScanExecutorSuite extends AnyFunSuite with PlanExecutionSuiteBase {
       files += file.getPath
       schemas += schema
       closeable(outputs(file.getPath).map(new FileReadResult(_, file.getPath)))
+    }
+  }
+
+  private class JsonReads(outputs: Map[String, Seq[ColumnarBatch]]) extends BaseMockJsonHandler {
+    val files = ArrayBuffer.empty[String]
+    val schemas = ArrayBuffer.empty[StructType]
+
+    override def readJsonFiles(
+        input: CloseableIterator[FileStatus],
+        schema: StructType,
+        predicate: Optional[Predicate]): CloseableIterator[ColumnarBatch] = {
+      val file = input.next()
+      files += file.getPath
+      schemas += schema
+      closeable(outputs(file.getPath))
     }
   }
 
