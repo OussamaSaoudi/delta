@@ -147,4 +147,26 @@ class DataTypeSuite extends AnyFunSuite {
       assert(dt1.isWriteCompatible(dt2) == expected)
     }
   }
+
+  test("equal data types have equal hashes") {
+    val metadata1 =
+      FieldMetadata.builder().putLongArray("ids", Array[java.lang.Long](1L, 2L)).build()
+    val metadata2 =
+      FieldMetadata.builder().putLongArray("ids", Array[java.lang.Long](1L, 2L)).build()
+    val dataTypes = Seq(
+      (IntegerType.INTEGER, IntegerType.INTEGER),
+      (new DecimalType(10, 2), new DecimalType(10, 2)),
+      (new ArrayType(LongType.LONG, true), new ArrayType(LongType.LONG, true)),
+      (
+        new MapType(StringType.STRING, new DecimalType(10, 2), true),
+        new MapType(StringType.STRING, new DecimalType(10, 2), true)),
+      (
+        new StructType().add("value", LongType.LONG, false, metadata1),
+        new StructType().add("value", LongType.LONG, false, metadata2)))
+
+    dataTypes.foreach { case (left, right) =>
+      assert(left == right)
+      assert(left.hashCode() == right.hashCode())
+    }
+  }
 }

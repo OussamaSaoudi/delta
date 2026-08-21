@@ -174,25 +174,28 @@ public final class FieldMetadata {
     if (o == null || getClass() != o.getClass()) return false;
     FieldMetadata other = (FieldMetadata) o;
     if (this.metadata.size() != other.metadata.size()) return false;
-    return this.metadata.entrySet().stream()
-        .allMatch(
-            e -> {
-              Object value = e.getValue();
-              Object otherValue = other.metadata.get(e.getKey());
-              return Objects.deepEquals(value, otherValue);
-            });
+    for (Map.Entry<String, Object> entry : metadata.entrySet()) {
+      String key = entry.getKey();
+      if (!other.metadata.containsKey(key)
+          || !Objects.deepEquals(entry.getValue(), other.metadata.get(key))) {
+        return false;
+      }
+    }
+    return true;
   }
 
   @Override
   public int hashCode() {
-    return metadata.entrySet().stream()
-        .mapToInt(
-            entry ->
-                (entry.getValue().getClass().isArray()
-                    ? (entry.getKey() == null ? 0 : entry.getKey().hashCode())
-                        ^ Arrays.hashCode((Object[]) entry.getValue())
-                    : entry.hashCode()))
-        .sum();
+    int hash = 0;
+    for (Map.Entry<String, Object> entry : metadata.entrySet()) {
+      Object value = entry.getValue();
+      int valueHash =
+          value != null && value.getClass().isArray()
+              ? Arrays.hashCode((Object[]) value)
+              : Objects.hashCode(value);
+      hash += Objects.hashCode(entry.getKey()) ^ valueHash;
+    }
+    return hash;
   }
 
   /** @return a new {@link FieldMetadata.Builder} */
