@@ -48,6 +48,19 @@ public final class PlanBuilder {
     return source(new Values(schema, rows));
   }
 
+  /** Unordered bag union of one or more builders with the same output schema. */
+  public static PlanBuilder unionAll(List<PlanBuilder> inputs) {
+    requireNonNull(inputs, "inputs is null");
+    List<BuilderNode> roots = new ArrayList<>(inputs.size());
+    for (PlanBuilder input : inputs) {
+      roots.add(requireNonNull(input, "input builder is null").root);
+    }
+    if (inputs.size() == 1) {
+      return inputs.get(0);
+    }
+    return new PlanBuilder(UnionAll.UNION_ALL, roots);
+  }
+
   /** Builds a topologically ordered plan containing the nodes reachable from this builder. */
   public Plan build() {
     List<PlanNode> nodes = new ArrayList<>();

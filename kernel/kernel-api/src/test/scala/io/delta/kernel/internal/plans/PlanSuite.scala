@@ -22,7 +22,7 @@ import scala.jdk.CollectionConverters._
 
 import io.delta.kernel.data.Row
 import io.delta.kernel.internal.data.GenericRow
-import io.delta.kernel.types.{LongType, StringType, StructType}
+import io.delta.kernel.types.{IntegerType, LongType, StringType, StructType}
 
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -46,14 +46,22 @@ class PlanSuite extends AnyFunSuite {
     val source = new Values(schema, mutableRows)
     mutableRows.clear()
 
+    val mutableInputs = new util.ArrayList[IntegerJ]()
+    mutableInputs.add(IntegerJ.valueOf(0))
+    val union = new PlanNode(UnionAll.UNION_ALL, mutableInputs)
+    mutableInputs.clear()
+
     val mutableNodes = new util.ArrayList[PlanNode]()
     mutableNodes.add(node(source))
+    mutableNodes.add(union)
     val plan = new Plan(mutableNodes)
     mutableNodes.clear()
 
     assert(source.getRows.size() === 1)
-    assert(plan.getNodes.size() === 1)
+    assert(union.getInputs.asScala === Seq(0))
+    assert(plan.getNodes.size() === 2)
     assertThrows[UnsupportedOperationException](source.getRows.clear())
+    assertThrows[UnsupportedOperationException](union.getInputs.clear())
     assertThrows[UnsupportedOperationException](plan.getNodes.clear())
   }
 
@@ -89,6 +97,11 @@ class PlanSuite extends AnyFunSuite {
     }
     assert(selfReference.getMessage.contains("inputs must reference an earlier node"))
 
+    val forwardReference = intercept[IllegalArgumentException] {
+      new Plan(Seq(node(UnionAll.UNION_ALL, 1), node(values(1))).asJava)
+    }
+    assert(forwardReference.getMessage.contains("references node 1"))
+
   }
 
   test("Values rejects inputs") {
@@ -96,5 +109,23 @@ class PlanSuite extends AnyFunSuite {
       new Plan(Seq(node(values(1)), node(values(2), 0), node(values(3))).asJava)
     }
     assert(valuesWithInput.getMessage.contains("Values requires no inputs"))
+  }
+
+  test("UnionAll requires inputs with exact schemas") {
+    val emptyUnion = intercept[IllegalArgumentException] {
+      new Plan(Seq(node(UnionAll.UNION_ALL)).asJava)
+    }
+    assert(emptyUnion.getMessage.contains("UnionAll requires at least one input"))
+
+    val otherSchema = new StructType().add("other", IntegerType.INTEGER)
+    val otherRow = GenericRow.fromValues(otherSchema, Seq(IntegerJ.valueOf(1)).asJava)
+    val otherValues = new Values(otherSchema, Seq(otherRow).asJava)
+    val schemaError = intercept[IllegalArgumentException] {
+      new Plan(Seq(
+        node(values(1)),
+        node(otherValues),
+        node(UnionAll.UNION_ALL, 0, 1)).asJava)
+    }
+    assert(schemaError.getMessage.contains("UnionAll input 1 schema differs from input 0"))
   }
 }

@@ -47,6 +47,30 @@ class PlanBuilderSuite extends AnyFunSuite {
     assert(plan.getOutputSchema === schema)
   }
 
+  test("union builds in topological order") {
+    val plan = PlanBuilder.unionAll(Seq(values(1, 2), values(3)).asJava).build()
+
+    assert(plan.getNodes.asScala.map(_.getOperator.getClass) === Seq(
+      classOf[Values], classOf[Values], classOf[UnionAll]))
+    assert(plan.getNodes.asScala.map(_.getInputs.asScala.toSeq) === Seq(
+      Seq.empty, Seq.empty, Seq(0, 1)))
+    assert(plan.getOutputSchema === schema)
+  }
+
+  test("shared inputs are emitted once") {
+    val source = values(1)
+    val plan = PlanBuilder.unionAll(Seq(source, source).asJava).build()
+
+    assert(plan.getNodes.size() === 2)
+    assert(plan.getNodes.get(1).getInputs.asScala === Seq(0, 0))
+  }
+
+  test("single-input union returns its input") {
+    val source = values(1)
+
+    assert(PlanBuilder.unionAll(Seq(source).asJava) eq source)
+  }
+
   test("empty values remains a plan node") {
     val plan = PlanBuilder.values(schema, util.Collections.emptyList[Row]()).build()
 
