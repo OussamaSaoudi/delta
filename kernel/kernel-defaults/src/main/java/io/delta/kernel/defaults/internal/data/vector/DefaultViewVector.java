@@ -22,11 +22,13 @@ import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.MapValue;
 import io.delta.kernel.types.DataType;
 import java.math.BigDecimal;
+import java.util.Arrays;
 
 /** Provides a restricted view on an underlying column vector. */
 public class DefaultViewVector implements ColumnVector {
 
   private final ColumnVector underlyingVector;
+  private final ColumnVector[] nullableParents;
   private final int offset;
   private final int size;
 
@@ -36,7 +38,13 @@ public class DefaultViewVector implements ColumnVector {
    * @param end the row index of the underlyingVector where we want this vector to end (exclusive)
    */
   public DefaultViewVector(ColumnVector underlyingVector, int start, int end) {
+    this(underlyingVector, start, end, new ColumnVector[0]);
+  }
+
+  private DefaultViewVector(
+      ColumnVector underlyingVector, int start, int end, ColumnVector[] nullableParents) {
     this.underlyingVector = underlyingVector;
+    this.nullableParents = nullableParents;
     this.offset = start;
     this.size = end - start;
   }
@@ -59,7 +67,13 @@ public class DefaultViewVector implements ColumnVector {
   @Override
   public boolean isNullAt(int rowId) {
     checkValidRowId(rowId);
-    return underlyingVector.isNullAt(offset + rowId);
+    int sourceRowId = offset + rowId;
+    for (ColumnVector parent : nullableParents) {
+      if (parent.isNullAt(sourceRowId)) {
+        return true;
+      }
+    }
+    return underlyingVector.isNullAt(sourceRowId);
   }
 
   @Override
@@ -136,7 +150,10 @@ public class DefaultViewVector implements ColumnVector {
 
   @Override
   public ColumnVector getChild(int ordinal) {
-    return new DefaultViewVector(underlyingVector.getChild(ordinal), offset, offset + size);
+    ColumnVector[] parents = Arrays.copyOf(nullableParents, nullableParents.length + 1);
+    parents[nullableParents.length] = underlyingVector;
+    return new DefaultViewVector(
+        underlyingVector.getChild(ordinal), offset, offset + size, parents);
   }
 
   private void checkValidRowId(int rowId) {

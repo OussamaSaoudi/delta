@@ -527,6 +527,49 @@ public class PartitionUtils {
   }
 
   /**
+   * Returns whether the data type can be parsed from a serialized partition value.
+   *
+   * @param dataType The partition column data type.
+   */
+  public static boolean isSupportedPartitionValueType(DataType dataType) {
+    return dataType instanceof BooleanType
+        || dataType instanceof ByteType
+        || dataType instanceof ShortType
+        || dataType instanceof IntegerType
+        || dataType instanceof LongType
+        || dataType instanceof FloatType
+        || dataType instanceof DoubleType
+        || dataType instanceof StringType
+        || dataType instanceof BinaryType
+        || dataType instanceof DateType
+        || dataType instanceof DecimalType
+        || dataType instanceof TimestampType
+        || dataType instanceof TimestampNTZType;
+  }
+
+  /**
+   * Parses a serialized partition value with strict boolean validation and UTF-8 binary encoding.
+   *
+   * <p>This is used by plan expressions whose parse errors must propagate. Existing partition
+   * attachment paths retain the legacy behavior of {@link #literalForPartitionValue}.
+   */
+  public static Literal strictLiteralForPartitionValue(DataType dataType, String partitionValue) {
+    if (dataType instanceof BooleanType && partitionValue != null) {
+      if (partitionValue.equalsIgnoreCase("true")) {
+        return Literal.ofBoolean(true);
+      }
+      if (partitionValue.equalsIgnoreCase("false")) {
+        return Literal.ofBoolean(false);
+      }
+      throw new IllegalArgumentException("Invalid boolean partition value: " + partitionValue);
+    }
+    if (dataType instanceof BinaryType && partitionValue != null) {
+      return Literal.ofBinary(partitionValue.getBytes(StandardCharsets.UTF_8));
+    }
+    return literalForPartitionValue(dataType, partitionValue);
+  }
+
+  /**
    * Create a Literal object for the given partition value and data type.
    *
    * @param dataType The data type of the partition value.
