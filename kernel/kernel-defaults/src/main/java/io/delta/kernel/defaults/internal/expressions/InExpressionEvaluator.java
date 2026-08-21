@@ -27,54 +27,10 @@ import io.delta.kernel.internal.util.Utils;
 import io.delta.kernel.internal.util.VectorUtils;
 import io.delta.kernel.types.*;
 import io.delta.kernel.types.CollationIdentifier;
-import java.math.BigDecimal;
 import java.util.*;
-import java.util.function.BiFunction;
 
 /** Utility methods to evaluate {@code IN} expression. */
 public class InExpressionEvaluator {
-
-  private static final Map<Class<? extends DataType>, BiFunction<Object, Object, Integer>>
-      COMPARATORS = createComparatorMap();
-
-  private static Map<Class<? extends DataType>, BiFunction<Object, Object, Integer>>
-      createComparatorMap() {
-    Map<Class<? extends DataType>, BiFunction<Object, Object, Integer>> map = new HashMap<>();
-    map.put(BooleanType.class, (v1, v2) -> Boolean.compare((Boolean) v1, (Boolean) v2));
-    map.put(
-        ByteType.class,
-        (v1, v2) -> Byte.compare(((Number) v1).byteValue(), ((Number) v2).byteValue()));
-    map.put(
-        ShortType.class,
-        (v1, v2) -> Short.compare(((Number) v1).shortValue(), ((Number) v2).shortValue()));
-    map.put(
-        IntegerType.class,
-        (v1, v2) -> Integer.compare(((Number) v1).intValue(), ((Number) v2).intValue()));
-    map.put(
-        DateType.class,
-        (v1, v2) -> Integer.compare(((Number) v1).intValue(), ((Number) v2).intValue()));
-    map.put(
-        LongType.class,
-        (v1, v2) -> Long.compare(((Number) v1).longValue(), ((Number) v2).longValue()));
-    map.put(
-        TimestampType.class,
-        (v1, v2) -> Long.compare(((Number) v1).longValue(), ((Number) v2).longValue()));
-    map.put(
-        TimestampNTZType.class,
-        (v1, v2) -> Long.compare(((Number) v1).longValue(), ((Number) v2).longValue()));
-    map.put(
-        FloatType.class,
-        (v1, v2) -> Float.compare(((Number) v1).floatValue(), ((Number) v2).floatValue()));
-    map.put(
-        DoubleType.class,
-        (v1, v2) -> Double.compare(((Number) v1).doubleValue(), ((Number) v2).doubleValue()));
-    map.put(
-        DecimalType.class,
-        (v1, v2) -> BIGDECIMAL_COMPARATOR.compare((BigDecimal) v1, (BigDecimal) v2));
-    map.put(StringType.class, (v1, v2) -> STRING_COMPARATOR.compare((String) v1, (String) v2));
-    map.put(BinaryType.class, (v1, v2) -> BINARY_COMPARTOR.compare((byte[]) v1, (byte[]) v2));
-    return Collections.unmodifiableMap(map);
-  }
 
   /** Validates and transforms the {@code IN} expression. */
   static In validateAndTransform(
@@ -205,16 +161,7 @@ public class InExpressionEvaluator {
     if (value1 == null || value2 == null) {
       return false;
     }
-    return getComparator(valueType).apply(value1, value2) == 0;
-  }
-
-  private static BiFunction<Object, Object, Integer> getComparator(DataType dataType) {
-    BiFunction<Object, Object, Integer> comparator = COMPARATORS.get(dataType.getClass());
-    if (comparator == null) {
-      throw new UnsupportedOperationException(
-          "No comparator available for data type: " + dataType.getClass().getSimpleName());
-    }
-    return comparator;
+    return DefaultExpressionUtils.compare(valueType, value1, value2) == 0;
   }
 
   /** Column vector implementation for IN expression evaluation. */

@@ -18,6 +18,7 @@ package io.delta.kernel.defaults.internal.expressions;
 import static io.delta.kernel.defaults.internal.DefaultEngineErrors.unsupportedExpressionException;
 import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 import static java.lang.String.format;
+import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
@@ -36,7 +37,7 @@ import java.util.function.IntPredicate;
 import java.util.stream.Collectors;
 
 /** Utility methods used by the default expression evaluator. */
-class DefaultExpressionUtils {
+public final class DefaultExpressionUtils {
   private enum ArithmeticOperation {
     ADD,
     SUBTRACT,
@@ -64,6 +65,57 @@ class DefaultExpressionUtils {
       };
 
   private DefaultExpressionUtils() {}
+
+  public static boolean supportsComparison(DataType type) {
+    return type instanceof BooleanType
+        || type instanceof ByteType
+        || type instanceof ShortType
+        || type instanceof IntegerType
+        || type instanceof DateType
+        || type instanceof LongType
+        || type instanceof TimestampType
+        || type instanceof TimestampNTZType
+        || type instanceof FloatType
+        || type instanceof DoubleType
+        || type instanceof DecimalType
+        || type instanceof StringType
+        || type instanceof GeometryType
+        || type instanceof GeographyType
+        || type instanceof BinaryType;
+  }
+
+  /** Compares two non-null Kernel values using the default expression ordering. */
+  public static int compare(DataType type, Object left, Object right) {
+    requireNonNull(type, "type is null");
+    requireNonNull(left, "left is null");
+    requireNonNull(right, "right is null");
+    if (type instanceof BooleanType) {
+      return Boolean.compare((Boolean) left, (Boolean) right);
+    } else if (type instanceof ByteType) {
+      return Byte.compare(((Number) left).byteValue(), ((Number) right).byteValue());
+    } else if (type instanceof ShortType) {
+      return Short.compare(((Number) left).shortValue(), ((Number) right).shortValue());
+    } else if (type instanceof IntegerType || type instanceof DateType) {
+      return Integer.compare(((Number) left).intValue(), ((Number) right).intValue());
+    } else if (type instanceof LongType
+        || type instanceof TimestampType
+        || type instanceof TimestampNTZType) {
+      return Long.compare(((Number) left).longValue(), ((Number) right).longValue());
+    } else if (type instanceof FloatType) {
+      return Float.compare(((Number) left).floatValue(), ((Number) right).floatValue());
+    } else if (type instanceof DoubleType) {
+      return Double.compare(((Number) left).doubleValue(), ((Number) right).doubleValue());
+    } else if (type instanceof DecimalType) {
+      return BIGDECIMAL_COMPARATOR.compare((BigDecimal) left, (BigDecimal) right);
+    } else if (type instanceof StringType
+        || type instanceof GeometryType
+        || type instanceof GeographyType) {
+      return STRING_COMPARATOR.compare((String) left, (String) right);
+    } else if (type instanceof BinaryType) {
+      return BINARY_COMPARTOR.compare((byte[]) left, (byte[]) right);
+    }
+    throw new UnsupportedOperationException("No comparator available for data type: " + type);
+  }
 
   /**
    * Utility method that calculates the nullability result from given two vectors. Result is null if
