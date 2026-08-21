@@ -25,6 +25,8 @@ public interface OperatorVisitor<T> {
 
   T visit(ScanParquet scan);
 
+  T visit(SemiJoin join);
+
   T visit(Values values);
 
   T visit(UnionAll union);

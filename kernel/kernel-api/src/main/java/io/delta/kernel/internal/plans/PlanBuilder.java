@@ -22,6 +22,7 @@ import io.delta.kernel.expressions.Column;
 import io.delta.kernel.expressions.Predicate;
 import io.delta.kernel.types.StructType;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -84,6 +85,18 @@ public final class PlanBuilder {
     return unary(new Filter(predicate));
   }
 
+  /** Keeps rows whose {@code probeKeys} occur in {@code build}. */
+  public PlanBuilder semiJoin(
+      PlanBuilder build, List<Column> probeKeys, List<Column> buildKeys) {
+    return join(build, false, probeKeys, buildKeys);
+  }
+
+  /** Keeps rows whose {@code probeKeys} do not occur in {@code build}. */
+  public PlanBuilder antiJoin(
+      PlanBuilder build, List<Column> probeKeys, List<Column> buildKeys) {
+    return join(build, true, probeKeys, buildKeys);
+  }
+
   /** Unordered bag union of one or more builders with the same output schema. */
   public static PlanBuilder unionAll(List<PlanBuilder> inputs) {
     requireNonNull(inputs, "inputs is null");
@@ -115,6 +128,13 @@ public final class PlanBuilder {
 
   private PlanBuilder unary(Operator operator) {
     return new PlanBuilder(operator, Collections.singletonList(root));
+  }
+
+  private PlanBuilder join(
+      PlanBuilder build, boolean inverted, List<Column> probeKeys, List<Column> buildKeys) {
+    BuilderNode buildRoot = requireNonNull(build, "build is null").root;
+    return new PlanBuilder(
+        new SemiJoin(inverted, probeKeys, buildKeys), Arrays.asList(root, buildRoot));
   }
 
   private PlanBuilder aggregate(
