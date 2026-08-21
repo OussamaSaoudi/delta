@@ -27,6 +27,7 @@ import io.delta.kernel.internal.plans.ScanJson;
 import io.delta.kernel.internal.plans.ScanParquet;
 import io.delta.kernel.internal.plans.UnionAll;
 import io.delta.kernel.internal.plans.Values;
+import io.delta.kernel.types.StructType;
 import io.delta.kernel.utils.CloseableIterator;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -55,22 +56,22 @@ public final class DefaultPlanExecutor
 
   @Override
   public BatchOperator visit(ScanParquet scan) {
-    return inputs -> FileScanExecutor.execute(scan, engine);
+    return (inputs, schemas) -> FileScanExecutor.execute(scan, engine);
   }
 
   @Override
   public BatchOperator visit(ScanJson scan) {
-    return inputs -> FileScanExecutor.execute(scan, engine);
+    return (inputs, schemas) -> FileScanExecutor.execute(scan, engine);
   }
 
   @Override
   public BatchOperator visit(Values values) {
-    return inputs -> ValuesExecutor.execute(values);
+    return (inputs, schemas) -> ValuesExecutor.execute(values);
   }
 
   @Override
   public BatchOperator visit(UnionAll union) {
-    return UnionAllExecutor::execute;
+    return (inputs, schemas) -> UnionAllExecutor.execute(inputs);
   }
 
   private ExecutionNode compile(int nodeIndex) {
@@ -84,8 +85,17 @@ public final class DefaultPlanExecutor
     for (int inputIndex : node.getInputs()) {
       inputs.add(compile(inputIndex));
     }
-    ExecutionNode execution = new ExecutionNode(
-        nodeIndex, inputs, node.getOperator().accept(this), fanout[nodeIndex] > 1);
+    List<StructType> inputSchemas = new ArrayList<>(node.getInputs().size());
+    for (int inputIndex : node.getInputs()) {
+      inputSchemas.add(plan.getOutputSchema(inputIndex));
+    }
+    ExecutionNode execution =
+        new ExecutionNode(
+            nodeIndex,
+            inputs,
+            inputSchemas,
+            node.getOperator().accept(this),
+            fanout[nodeIndex] > 1);
     compiled[nodeIndex] = execution;
     return execution;
   }
@@ -108,12 +118,13 @@ public final class DefaultPlanExecutor
   @FunctionalInterface
   interface BatchOperator {
     CloseableIterator<FilteredColumnarBatch> open(
-        List<CloseableIterator<FilteredColumnarBatch>> inputs);
+        List<CloseableIterator<FilteredColumnarBatch>> inputs, List<StructType> inputSchemas);
   }
 
   private static final class ExecutionNode {
     private final int nodeIndex;
     private final List<ExecutionNode> inputs;
+    private final List<StructType> inputSchemas;
     private final BatchOperator operator;
     private final boolean replayable;
     private boolean opened;
@@ -122,10 +133,12 @@ public final class DefaultPlanExecutor
     private ExecutionNode(
         int nodeIndex,
         List<ExecutionNode> inputs,
+        List<StructType> inputSchemas,
         BatchOperator operator,
         boolean replayable) {
       this.nodeIndex = nodeIndex;
       this.inputs = Collections.unmodifiableList(new ArrayList<>(inputs));
+      this.inputSchemas = Collections.unmodifiableList(new ArrayList<>(inputSchemas));
       this.operator = requireNonNull(operator, "operator is null");
       this.replayable = replayable;
     }
@@ -150,7 +163,7 @@ public final class DefaultPlanExecutor
         for (ExecutionNode input : inputs) {
           streams.add(input.open());
         }
-        return operator.open(streams);
+        return operator.open(streams, inputSchemas);
       } catch (RuntimeException | Error failure) {
         for (AutoCloseable stream : streams) {
           io.delta.kernel.internal.util.Utils.closeCloseablesAndAddSuppressed(failure, stream);
