@@ -41,7 +41,7 @@ public final class VectorUtils {
 
     List<T> elements = new ArrayList<>();
     for (int i = 0; i < arrayValue.getSize(); i++) {
-      elements.add((T) getValueAsObject(elementVector, dataType, i));
+      elements.add((T) getValueAsJavaObject(elementVector, dataType, i));
     }
     return elements;
   }
@@ -62,8 +62,8 @@ public final class VectorUtils {
     Map<K, V> values = new HashMap<>();
 
     for (int i = 0; i < mapValue.getSize(); i++) {
-      Object key = getValueAsObject(keyVector, keyDataType, i);
-      Object value = getValueAsObject(valueVector, valueDataType, i);
+      Object key = getValueAsJavaObject(keyVector, keyDataType, i);
+      Object value = getValueAsJavaObject(valueVector, valueDataType, i);
       values.put((K) key, (V) value);
     }
     return values;
@@ -131,9 +131,8 @@ public final class VectorUtils {
   }
 
   /**
-   * Gets the value at {@code rowId} from the column vector. The type of the Object returned depends
-   * on the data type of the column vector. For complex types array and map, returns the value as
-   * Java list or Java map. For struct type, returns an {@link Row}.
+   * Gets the Kernel-native value at {@code rowId}. Complex types use the same representations as
+   * {@link Row}: {@link Row}, {@link ArrayValue}, and {@link MapValue}.
    */
   public static Object getValueAsObject(ColumnVector columnVector, DataType dataType, int rowId) {
     if (columnVector.isNullAt(rowId)) {
@@ -147,7 +146,9 @@ public final class VectorUtils {
     } else if (dataType instanceof IntegerType || dataType instanceof DateType) {
       // DateType data is stored internally as the number of days since 1970-01-01
       return columnVector.getInt(rowId);
-    } else if (dataType instanceof LongType || dataType instanceof TimestampType) {
+    } else if (dataType instanceof LongType
+        || dataType instanceof TimestampType
+        || dataType instanceof TimestampNTZType) {
       // TimestampType data is stored internally as the number of microseconds since the unix
       // epoch
       return columnVector.getLong(rowId);
@@ -155,7 +156,9 @@ public final class VectorUtils {
       return columnVector.getFloat(rowId);
     } else if (dataType instanceof DoubleType) {
       return columnVector.getDouble(rowId);
-    } else if (dataType instanceof StringType) {
+    } else if (dataType instanceof StringType
+        || dataType instanceof GeometryType
+        || dataType instanceof GeographyType) {
       return columnVector.getString(rowId);
     } else if (dataType instanceof BinaryType) {
       return columnVector.getBinary(rowId);
@@ -165,11 +168,23 @@ public final class VectorUtils {
     } else if (dataType instanceof DecimalType) {
       return columnVector.getDecimal(rowId);
     } else if (dataType instanceof ArrayType) {
-      return toJavaList(columnVector.getArray(rowId));
+      return columnVector.getArray(rowId);
     } else if (dataType instanceof MapType) {
-      return toJavaMap(columnVector.getMap(rowId));
+      return columnVector.getMap(rowId);
     } else {
       throw new UnsupportedOperationException("unsupported data type");
     }
+  }
+
+  private static Object getValueAsJavaObject(
+      ColumnVector columnVector, DataType dataType, int rowId) {
+    Object value = getValueAsObject(columnVector, dataType, rowId);
+    if (value instanceof ArrayValue) {
+      return toJavaList((ArrayValue) value);
+    }
+    if (value instanceof MapValue) {
+      return toJavaMap((MapValue) value);
+    }
+    return value;
   }
 }

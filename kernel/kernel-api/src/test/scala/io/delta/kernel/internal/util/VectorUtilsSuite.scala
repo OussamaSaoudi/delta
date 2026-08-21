@@ -33,6 +33,20 @@ import org.scalatest.prop.Tables.Table
 
 class VectorUtilsSuite extends AnyFunSuite with VectorTestUtils {
 
+  test("getValueAsObject preserves Kernel-native containers") {
+    val array = VectorUtils.buildArrayValue(List[IntegerJ](1, 2).asJava, IntegerType.INTEGER)
+    val arrayType = new ArrayType(IntegerType.INTEGER, false)
+    val arrayVector = VectorUtils.buildColumnVector(List(array).asJava, arrayType)
+    assert(VectorUtils.getValueAsObject(arrayVector, arrayType, 0) eq array)
+    assert(VectorUtils.toJavaList[IntegerJ](array) == List[IntegerJ](1, 2).asJava)
+
+    val map = VectorUtils.stringStringMapValue(Map("a" -> "b").asJava)
+    val mapType = new MapType(StringType.STRING, StringType.STRING, false)
+    val mapVector = VectorUtils.buildColumnVector(List(map).asJava, mapType)
+    assert(VectorUtils.getValueAsObject(mapVector, mapType, 0) eq map)
+    assert(VectorUtils.toJavaMap[String, String](map) == Map("a" -> "b").asJava)
+  }
+
   Table(
     ("values", "dataType"),
     (List[ByteJ](1.toByte, 2.toByte, 3.toByte, null), ByteType.BYTE),
