@@ -20,9 +20,8 @@ import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
-import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
-import io.delta.kernel.data.MapValue;
+import io.delta.kernel.defaults.internal.data.vector.AbstractDelegatingColumnVector;
 import io.delta.kernel.expressions.Expression;
 import io.delta.kernel.expressions.Literal;
 import io.delta.kernel.expressions.Predicate;
@@ -33,7 +32,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.function.Function;
 import java.util.function.IntPredicate;
-import java.util.stream.Collectors;
 
 /** Utility methods used by the default expression evaluator. */
 public final class DefaultExpressionUtils {
@@ -337,7 +335,8 @@ public final class DefaultExpressionUtils {
    */
   static ColumnVector combinationVector(
       List<ColumnVector> vectors, Function<Integer, Integer> idxToReturn) {
-    return new ColumnVector() {
+    return new AbstractDelegatingColumnVector(
+        vectors.get(0).getSize(), vectors.get(0).getDataType()) {
       // Store the last lookup value to avoid multiple looks up for same rowId.
       // The general pattern is call `isNullAt(rowId)` followed by `getBoolean(rowId)` or
       // some other value accessor. So the cache of one value is enough.
@@ -345,90 +344,18 @@ public final class DefaultExpressionUtils {
       private ColumnVector lastLookupVector = null;
 
       @Override
-      public DataType getDataType() {
-        return vectors.get(0).getDataType();
-      }
-
-      @Override
-      public int getSize() {
-        return vectors.get(0).getSize();
-      }
-
-      @Override
       public void close() {
         Utils.closeCloseables(vectors.toArray(new ColumnVector[0]));
       }
 
       @Override
-      public boolean isNullAt(int rowId) {
-        return getVector(rowId).isNullAt(rowId);
+      protected ColumnVector delegateVector(int rowId) {
+        return getVector(rowId);
       }
 
       @Override
-      public boolean getBoolean(int rowId) {
-        return getVector(rowId).getBoolean(rowId);
-      }
-
-      @Override
-      public byte getByte(int rowId) {
-        return getVector(rowId).getByte(rowId);
-      }
-
-      @Override
-      public short getShort(int rowId) {
-        return getVector(rowId).getShort(rowId);
-      }
-
-      @Override
-      public int getInt(int rowId) {
-        return getVector(rowId).getInt(rowId);
-      }
-
-      @Override
-      public long getLong(int rowId) {
-        return getVector(rowId).getLong(rowId);
-      }
-
-      @Override
-      public float getFloat(int rowId) {
-        return getVector(rowId).getFloat(rowId);
-      }
-
-      @Override
-      public double getDouble(int rowId) {
-        return getVector(rowId).getDouble(rowId);
-      }
-
-      @Override
-      public byte[] getBinary(int rowId) {
-        return getVector(rowId).getBinary(rowId);
-      }
-
-      @Override
-      public String getString(int rowId) {
-        return getVector(rowId).getString(rowId);
-      }
-
-      @Override
-      public BigDecimal getDecimal(int rowId) {
-        return getVector(rowId).getDecimal(rowId);
-      }
-
-      @Override
-      public MapValue getMap(int rowId) {
-        return getVector(rowId).getMap(rowId);
-      }
-
-      @Override
-      public ArrayValue getArray(int rowId) {
-        return getVector(rowId).getArray(rowId);
-      }
-
-      @Override
-      public ColumnVector getChild(int ordinal) {
-        return combinationVector(
-            vectors.stream().map(v -> v.getChild(ordinal)).collect(Collectors.toList()),
-            idxToReturn);
+      protected int delegateRowId(int rowId) {
+        return rowId;
       }
 
       private ColumnVector getVector(int rowId) {
