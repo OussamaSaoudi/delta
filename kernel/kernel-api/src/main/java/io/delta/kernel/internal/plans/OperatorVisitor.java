@@ -19,6 +19,8 @@ package io.delta.kernel.internal.plans;
 public interface OperatorVisitor<T> {
   T visit(Aggregate aggregate);
 
+  T visit(Filter filter);
+
   T visit(ScanJson scan);
 
   T visit(ScanParquet scan);

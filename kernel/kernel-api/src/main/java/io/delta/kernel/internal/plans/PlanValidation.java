@@ -19,6 +19,7 @@ import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.data.Row;
 import io.delta.kernel.expressions.Column;
+import io.delta.kernel.expressions.Expression;
 import io.delta.kernel.types.ArrayType;
 import io.delta.kernel.types.DataType;
 import io.delta.kernel.types.MapType;
@@ -84,6 +85,17 @@ final class PlanValidation {
       throw unresolved(column, context);
     }
     return field;
+  }
+
+  static void validateExpressionReferences(
+      StructType schema, Expression expression, String context) {
+    requireNonNull(expression, "expression is null");
+    if (expression instanceof Column) {
+      resolveField(schema, (Column) expression, context);
+    }
+    for (Expression child : expression.getChildren()) {
+      validateExpressionReferences(schema, child, context);
+    }
   }
 
   static DataType stripFieldMetadata(DataType type) {

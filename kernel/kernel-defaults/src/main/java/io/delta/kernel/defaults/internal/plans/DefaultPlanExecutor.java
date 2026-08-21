@@ -21,6 +21,7 @@ import static java.util.Objects.requireNonNull;
 import io.delta.kernel.data.FilteredColumnarBatch;
 import io.delta.kernel.engine.Engine;
 import io.delta.kernel.internal.plans.Aggregate;
+import io.delta.kernel.internal.plans.Filter;
 import io.delta.kernel.internal.plans.OperatorVisitor;
 import io.delta.kernel.internal.plans.Plan;
 import io.delta.kernel.internal.plans.PlanNode;
@@ -58,6 +59,11 @@ public final class DefaultPlanExecutor
   @Override
   public BatchOperator visit(Aggregate aggregate) {
     return (inputs, schemas) -> AggregateExecutor.execute(aggregate, schemas.get(0), inputs.get(0));
+  }
+
+  @Override
+  public BatchOperator visit(Filter filter) {
+    return (inputs, schemas) -> FilterExecutor.execute(filter, schemas.get(0), inputs.get(0));
   }
 
   @Override

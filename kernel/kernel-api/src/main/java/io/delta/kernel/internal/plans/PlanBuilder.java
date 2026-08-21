@@ -19,6 +19,7 @@ import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.data.Row;
 import io.delta.kernel.expressions.Column;
+import io.delta.kernel.expressions.Predicate;
 import io.delta.kernel.types.StructType;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -76,6 +77,11 @@ public final class PlanBuilder {
   public PlanBuilder aggregateBy(
       List<Column> columns, UnaryOperator<AggregateBuilder> aggregates) {
     return aggregate(Aggregate.groupBy(root.outputSchema, columns), aggregates);
+  }
+
+  /** Keeps rows for which {@code predicate} evaluates to true. */
+  public PlanBuilder filter(Predicate predicate) {
+    return unary(new Filter(predicate));
   }
 
   /** Unordered bag union of one or more builders with the same output schema. */
