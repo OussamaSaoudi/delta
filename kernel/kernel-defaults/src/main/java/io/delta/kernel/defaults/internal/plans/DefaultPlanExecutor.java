@@ -23,6 +23,7 @@ import io.delta.kernel.engine.Engine;
 import io.delta.kernel.internal.plans.OperatorVisitor;
 import io.delta.kernel.internal.plans.Plan;
 import io.delta.kernel.internal.plans.PlanNode;
+import io.delta.kernel.internal.plans.ScanParquet;
 import io.delta.kernel.internal.plans.UnionAll;
 import io.delta.kernel.internal.plans.Values;
 import io.delta.kernel.utils.CloseableIterator;
@@ -34,20 +35,26 @@ import java.util.List;
 public final class DefaultPlanExecutor
     implements OperatorVisitor<DefaultPlanExecutor.BatchOperator> {
   private final Plan plan;
+  private final Engine engine;
   private final ExecutionNode[] compiled;
   private final int[] fanout;
 
-  private DefaultPlanExecutor(Plan plan) {
+  private DefaultPlanExecutor(Plan plan, Engine engine) {
     this.plan = requireNonNull(plan, "plan is null");
+    this.engine = requireNonNull(engine, "engine is null");
     this.compiled = new ExecutionNode[plan.getNodes().size()];
     this.fanout = countFanout(plan);
   }
 
   /** Executes the terminal node of {@code plan}. */
   public static CloseableIterator<FilteredColumnarBatch> execute(Plan plan, Engine engine) {
-    requireNonNull(engine, "engine is null");
-    DefaultPlanExecutor executor = new DefaultPlanExecutor(plan);
+    DefaultPlanExecutor executor = new DefaultPlanExecutor(plan, engine);
     return executor.compile(plan.getNodes().size() - 1).open();
+  }
+
+  @Override
+  public BatchOperator visit(ScanParquet scan) {
+    return inputs -> FileScanExecutor.execute(scan, engine);
   }
 
   @Override

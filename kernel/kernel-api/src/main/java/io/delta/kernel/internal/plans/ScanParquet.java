@@ -15,11 +15,17 @@
  */
 package io.delta.kernel.internal.plans;
 
-/** Type-safe dispatch over declarative plan operators. */
-public interface OperatorVisitor<T> {
-  T visit(ScanParquet scan);
+import io.delta.kernel.types.StructType;
+import java.util.List;
 
-  T visit(Values values);
+/** Reads Parquet files into rows matching a declared output schema. */
+public final class ScanParquet extends FileScan {
+  public ScanParquet(List<ScanFile> files, List<String> fileConstantColumns, StructType schema) {
+    super(files, fileConstantColumns, schema);
+  }
 
-  T visit(UnionAll union);
+  @Override
+  public <T> T accept(OperatorVisitor<T> visitor) {
+    return visitor.visit(this);
+  }
 }

@@ -19,6 +19,7 @@ import scala.jdk.CollectionConverters._
 
 import io.delta.kernel.data.Row
 import io.delta.kernel.defaults.utils.TestRow
+import io.delta.kernel.engine.Engine
 import io.delta.kernel.internal.plans.PlanBuilder
 import io.delta.kernel.internal.util.Utils
 import io.delta.kernel.test.MockEngineUtils
@@ -28,7 +29,11 @@ import org.scalatest.Assertions.assert
 /** Test helpers for executing a fluent plan and checking its logical rows. */
 private[plans] trait PlanExecutionSuiteBase extends MockEngineUtils {
   protected final def checkRows(plan: PlanBuilder, expected: Seq[Row]): Unit = {
-    val batches = DefaultPlanExecutor.execute(plan.build(), mockEngine())
+    checkRows(plan, mockEngine(), expected)
+  }
+
+  protected final def checkRows(plan: PlanBuilder, engine: Engine, expected: Seq[Row]): Unit = {
+    val batches = DefaultPlanExecutor.execute(plan.build(), engine)
     val actual = Utils.intoRows(batches).toInMemoryList.asScala.toSeq
 
     assert(actual.map(_.getSchema) == expected.map(_.getSchema))

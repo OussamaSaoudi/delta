@@ -43,6 +43,12 @@ public final class PlanBuilder {
             operator, Collections.unmodifiableList(new ArrayList<>(inputs)), outputSchema);
   }
 
+  /** A Parquet scan source. */
+  public static PlanBuilder scanParquet(
+      List<ScanFile> files, List<String> fileConstantColumns, StructType schema) {
+    return source(new ScanParquet(files, fileConstantColumns, schema));
+  }
+
   /** An inline row source. Empty rows remain a present, runnable source. */
   public static PlanBuilder values(StructType schema, List<? extends Row> rows) {
     return source(new Values(schema, rows));
