@@ -31,7 +31,9 @@ import io.delta.kernel.expressions._
 import io.delta.kernel.expressions.AlwaysFalse.ALWAYS_FALSE
 import io.delta.kernel.expressions.AlwaysTrue.ALWAYS_TRUE
 import io.delta.kernel.expressions.Literal._
+import io.delta.kernel.internal.data.GenericRow
 import io.delta.kernel.internal.util.InternalUtils
+import io.delta.kernel.internal.util.VectorUtils
 import io.delta.kernel.types._
 import io.delta.kernel.types.CollationIdentifier.SPARK_UTF8_BINARY
 
@@ -93,6 +95,38 @@ class DefaultExpressionEvaluatorSuite extends AnyFunSuite with ExpressionSuiteBa
           }
         }
       }
+    }
+  }
+
+  test("evaluate expression: complex literals") {
+    val arrayType = new ArrayType(IntegerType.INTEGER, false)
+    val array = VectorUtils.buildArrayValue(util.Arrays.asList(1, 2), IntegerType.INTEGER)
+    val mapType = new MapType(StringType.STRING, IntegerType.INTEGER, false)
+    val map = VectorUtils.buildMapValue(
+      util.Arrays.asList("one"),
+      util.Arrays.asList(1),
+      mapType)
+    val structType = new StructType().add("id", IntegerType.INTEGER, false)
+    val row = GenericRow.fromValues(
+      structType,
+      util.Collections.singletonList(Integer.valueOf(7)))
+    val input = zeroColumnBatch(rowCount = 2)
+
+    val arrayVector = evaluator(input.getSchema, Literal.ofArray(array, arrayType), arrayType)
+      .eval(input)
+    val mapVector = evaluator(input.getSchema, Literal.ofMap(map, mapType), mapType).eval(input)
+    val structVector = evaluator(input.getSchema, Literal.ofStruct(row, structType), structType)
+      .eval(input)
+
+    (0 until input.getSize).foreach { rowId =>
+      assert(arrayVector.getArray(rowId).getElements.getInt(1) == 2)
+      assert(mapVector.getMap(rowId).getValues.getInt(0) == 1)
+      assert(structVector.getChild(0).getInt(rowId) == 7)
+    }
+
+    Seq[DataType](arrayType, mapType, structType).foreach { dataType =>
+      val nullVector = evaluator(input.getSchema, Literal.ofNull(dataType), dataType).eval(input)
+      assert((0 until input.getSize).forall(nullVector.isNullAt))
     }
   }
 
@@ -158,14 +192,18 @@ class DefaultExpressionEvaluatorSuite extends AnyFunSuite with ExpressionSuiteBa
 
     val col3Ref = new Column(Array("col1", "col2", "col3"))
     val col3RefResult = evaluator(batchSchema, col3Ref, col3Type).eval(batch)
-    assertTypeAndNullability(col3RefResult, col3Type, col3Nullability);
+    val col3EffectiveNullability = Seq(false, true, true, true, false).toArray
+    assertTypeAndNullability(col3RefResult, col3Type, col3EffectiveNullability)
     Seq.range(0, numRows).foreach { rowId =>
-      assert(col3RefResult.getInt(rowId) === col3Values(rowId))
+      if (!col3RefResult.isNullAt(rowId)) {
+        assert(col3RefResult.getInt(rowId) === col3Values(rowId))
+      }
     }
 
     val col2Ref = new Column(Array("col1", "col2"))
     val col2RefResult = evaluator(batchSchema, col2Ref, col2Type).eval(batch)
-    assertTypeAndNullability(col2RefResult, col2Type, col2Nullability)
+    val col2EffectiveNullability = Seq(false, true, true, true, false).toArray
+    assertTypeAndNullability(col2RefResult, col2Type, col2EffectiveNullability)
 
     val col1Ref = new Column(Array("col1"))
     val col1RefResult = evaluator(batchSchema, col1Ref, col1Type).eval(batch)
