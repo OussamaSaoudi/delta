@@ -40,6 +40,19 @@ import io.delta.kernel.types.CollationIdentifier.SPARK_UTF8_BINARY
 import org.scalatest.funsuite.AnyFunSuite
 
 class DefaultExpressionEvaluatorSuite extends AnyFunSuite with ExpressionSuiteBase {
+  Seq[Expression](
+    new UnknownExpression("future_expression"),
+    new UnknownPredicate("future_predicate"),
+    new OpaqueExpression("engine_expression", util.Collections.emptyList()),
+    new OpaquePredicate("engine_predicate", util.Collections.emptyList())).foreach { expression =>
+    test(s"reject unevaluable expression: $expression") {
+      val error = intercept[UnsupportedOperationException] {
+        evaluator(new StructType(), expression, BooleanType.BOOLEAN)
+      }
+      assert(error.getMessage.contains(expression.toString))
+    }
+  }
+
   test("evaluate expression: literal") {
     val testLiterals = Seq(
       Literal.ofBoolean(true),

@@ -85,7 +85,13 @@ abstract class ExpressionVisitor<R> {
   abstract R visitStGeometryBoxesIntersectOnStats(Predicate predicate);
 
   final R visit(Expression expression) {
-    if (expression instanceof PartitionValueExpression) {
+    if (expression instanceof UnknownExpression
+        || expression instanceof UnknownPredicate
+        || expression instanceof OpaqueExpression
+        || expression instanceof OpaquePredicate) {
+      throw new UnsupportedOperationException(
+          String.format("Expression %s is not supported.", expression));
+    } else if (expression instanceof PartitionValueExpression) {
       return visitPartitionValue((PartitionValueExpression) expression);
     } else if (expression instanceof ScalarExpression) {
       return visitScalarExpression((ScalarExpression) expression);
