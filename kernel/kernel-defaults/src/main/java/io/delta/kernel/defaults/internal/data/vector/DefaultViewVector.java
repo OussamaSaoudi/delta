@@ -16,14 +16,19 @@
 package io.delta.kernel.defaults.internal.data.vector;
 
 import io.delta.kernel.data.ColumnVector;
+import io.delta.kernel.defaults.internal.data.DefaultValueRetainer;
+import io.delta.kernel.types.DataType;
+import io.delta.kernel.types.StructType;
 import java.util.Arrays;
 
 /** Provides a restricted view on an underlying column vector. */
-public class DefaultViewVector extends AbstractDelegatingColumnVector {
+public class DefaultViewVector extends AbstractDelegatingColumnVector
+    implements RetainableColumnVector {
 
   private final ColumnVector underlyingVector;
   private final ColumnVector[] nullableParents;
   private final int offset;
+  private final ColumnVector[] childViews;
 
   /**
    * @param underlyingVector the underlying column vector to read
@@ -40,6 +45,21 @@ public class DefaultViewVector extends AbstractDelegatingColumnVector {
     this.underlyingVector = underlyingVector;
     this.nullableParents = nullableParents;
     this.offset = start;
+    DataType dataType = underlyingVector.getDataType();
+    this.childViews =
+        dataType instanceof StructType ? new ColumnVector[((StructType) dataType).length()] : null;
+  }
+
+  @Override
+  public Object retainValue(int rowId) {
+    checkValidRowId(rowId);
+    int sourceRowId = offset + rowId;
+    for (ColumnVector parent : nullableParents) {
+      if (parent.isNullAt(sourceRowId)) {
+        return null;
+      }
+    }
+    return DefaultValueRetainer.retain(underlyingVector, getDataType(), sourceRowId);
   }
 
   @Override
@@ -56,6 +76,19 @@ public class DefaultViewVector extends AbstractDelegatingColumnVector {
 
   @Override
   public ColumnVector getChild(int ordinal) {
+    if (childViews != null && ordinal >= 0 && ordinal < childViews.length) {
+      ColumnVector child = childViews[ordinal];
+      if (child == null) {
+        child = createChild(ordinal);
+        childViews[ordinal] = child;
+      }
+      return child;
+    }
+    // Delegate invalid ordinals and non-struct access to preserve the underlying error behavior.
+    return createChild(ordinal);
+  }
+
+  private ColumnVector createChild(int ordinal) {
     ColumnVector[] parents = Arrays.copyOf(nullableParents, nullableParents.length + 1);
     parents[nullableParents.length] = underlyingVector;
     return new DefaultViewVector(

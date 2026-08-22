@@ -18,12 +18,8 @@ package io.delta.kernel.defaults.internal.plans;
 import static io.delta.kernel.defaults.internal.expressions.DefaultExpressionUtils.compare;
 import static io.delta.kernel.defaults.internal.expressions.DefaultExpressionUtils.supportsComparison;
 
-import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
-import io.delta.kernel.data.MapValue;
-import io.delta.kernel.internal.data.GenericRow;
-import io.delta.kernel.internal.util.VectorUtils;
-import io.delta.kernel.types.ArrayType;
+import io.delta.kernel.defaults.internal.data.DefaultValueRetainer;
 import io.delta.kernel.types.BinaryType;
 import io.delta.kernel.types.BooleanType;
 import io.delta.kernel.types.ByteType;
@@ -36,10 +32,8 @@ import io.delta.kernel.types.GeographyType;
 import io.delta.kernel.types.GeometryType;
 import io.delta.kernel.types.IntegerType;
 import io.delta.kernel.types.LongType;
-import io.delta.kernel.types.MapType;
 import io.delta.kernel.types.ShortType;
 import io.delta.kernel.types.StringType;
-import io.delta.kernel.types.StructType;
 import io.delta.kernel.types.TimestampNTZType;
 import io.delta.kernel.types.TimestampType;
 import java.util.ArrayList;
@@ -56,35 +50,7 @@ final class PlanValueUtils {
   private PlanValueUtils() {}
 
   static Object materialize(ColumnVector vector, DataType type, int rowId) {
-    if (vector.isNullAt(rowId)) {
-      return null;
-    }
-    if (type instanceof BinaryType) {
-      return vector.getBinary(rowId).clone();
-    }
-    if (type instanceof StructType) {
-      StructType struct = (StructType) type;
-      List<Object> fields = new ArrayList<>(struct.length());
-      for (int index = 0; index < struct.length(); index++) {
-        fields.add(materialize(vector.getChild(index), struct.at(index).getDataType(), rowId));
-      }
-      return GenericRow.fromValues(struct, fields);
-    }
-    if (type instanceof ArrayType) {
-      ArrayType arrayType = (ArrayType) type;
-      List<Object> values =
-          materializeVector(vector.getArray(rowId).getElements(), arrayType.getElementType());
-      return VectorUtils.buildArrayValue(values, arrayType.getElementType());
-    }
-    if (type instanceof MapType) {
-      MapType mapType = (MapType) type;
-      MapValue map = vector.getMap(rowId);
-      return new StableMapValue(
-          materializeVector(map.getKeys(), mapType.getKeyType()),
-          materializeVector(map.getValues(), mapType.getValueType()),
-          mapType);
-    }
-    return VectorUtils.getValueAsObject(vector, type, rowId);
+    return DefaultValueRetainer.retain(vector, type, rowId);
   }
 
   static int hash(ColumnVector vector, DataType type, int rowId) {
@@ -312,38 +278,4 @@ final class PlanValueUtils {
     return new UnsupportedOperationException("Unsupported plan key type " + type);
   }
 
-  private static List<Object> materializeVector(ColumnVector vector, DataType type) {
-    List<Object> values = new ArrayList<>(vector.getSize());
-    for (int index = 0; index < vector.getSize(); index++) {
-      values.add(materialize(vector, type, index));
-    }
-    return values;
-  }
-
-  private static final class StableMapValue implements MapValue {
-    private final List<Object> keys;
-    private final List<Object> values;
-    private final MapType type;
-
-    private StableMapValue(List<Object> keys, List<Object> values, MapType type) {
-      this.keys = keys;
-      this.values = values;
-      this.type = type;
-    }
-
-    @Override
-    public int getSize() {
-      return keys.size();
-    }
-
-    @Override
-    public ColumnVector getKeys() {
-      return VectorUtils.buildColumnVector(keys, type.getKeyType());
-    }
-
-    @Override
-    public ColumnVector getValues() {
-      return VectorUtils.buildColumnVector(values, type.getValueType());
-    }
-  }
 }

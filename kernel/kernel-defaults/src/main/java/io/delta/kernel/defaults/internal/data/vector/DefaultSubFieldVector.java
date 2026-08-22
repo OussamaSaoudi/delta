@@ -22,21 +22,23 @@ import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.MapValue;
 import io.delta.kernel.data.Row;
+import io.delta.kernel.defaults.internal.data.DefaultValueRetainer;
+import io.delta.kernel.defaults.internal.data.RetainableRow;
 import io.delta.kernel.types.DataType;
 import io.delta.kernel.types.StructField;
 import io.delta.kernel.types.StructType;
 import java.math.BigDecimal;
-import java.util.function.Function;
+import java.util.function.IntFunction;
 
 /**
  * {@link ColumnVector} wrapper on top of {@link Row} objects. This wrapper allows referencing any
  * nested level column vector from a set of rows.
  */
-public class DefaultSubFieldVector implements ColumnVector {
+public class DefaultSubFieldVector implements RetainableColumnVector {
   private final int size;
   private final DataType dataType;
   private final int columnOrdinal;
-  private final Function<Integer, Row> rowIdToRowAccessor;
+  private final IntFunction<Row> rowIdToRowAccessor;
 
   /**
    * Create an instance of {@link DefaultSubFieldVector}
@@ -45,10 +47,10 @@ public class DefaultSubFieldVector implements ColumnVector {
    * @param dataType Datatype of the vector
    * @param columnOrdinal Ordinal of the column represented by this vector in the rows returned by
    *     {@link #rowIdToRowAccessor}
-   * @param rowIdToRowAccessor {@link Function} that returns a {@link Row} object for given rowId
+   * @param rowIdToRowAccessor {@link IntFunction} that returns a {@link Row} object for given rowId
    */
   public DefaultSubFieldVector(
-      int size, DataType dataType, int columnOrdinal, Function<Integer, Row> rowIdToRowAccessor) {
+      int size, DataType dataType, int columnOrdinal, IntFunction<Row> rowIdToRowAccessor) {
     checkArgument(size >= 0, "invalid size: %s", size);
     this.size = size;
     checkArgument(columnOrdinal >= 0, "invalid column ordinal: %s", columnOrdinal);
@@ -70,6 +72,16 @@ public class DefaultSubFieldVector implements ColumnVector {
   @Override
   public void close() {
     /* nothing to close */
+  }
+
+  @Override
+  public Object retainValue(int rowId) {
+    assertValidRowId(rowId);
+    Row row = rowIdToRowAccessor.apply(rowId);
+    if (row instanceof RetainableRow) {
+      return ((RetainableRow) row).retainValue(columnOrdinal);
+    }
+    return DefaultValueRetainer.materialize(this, dataType, rowId);
   }
 
   @Override
@@ -169,6 +181,8 @@ public class DefaultSubFieldVector implements ColumnVector {
   }
 
   private void assertValidRowId(int rowId) {
-    checkArgument(rowId < size, "Invalid rowId: %s, max allowed rowId is: %s", rowId, (size - 1));
+    if (rowId >= size) {
+      checkArgument(false, "Invalid rowId: %s, max allowed rowId is: %s", rowId, (size - 1));
+    }
   }
 }
