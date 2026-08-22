@@ -15,23 +15,8 @@
  */
 package io.delta.kernel.internal.plans;
 
-/** Type-safe dispatch over declarative plan operators. */
-public interface OperatorVisitor<T> {
-  T visit(Aggregate aggregate);
-
-  T visit(Filter filter);
-
-  T visit(Load load);
-
-  T visit(Project project);
-
-  T visit(ScanJson scan);
-
-  T visit(ScanParquet scan);
-
-  T visit(SemiJoin join);
-
-  T visit(Values values);
-
-  T visit(UnionAll union);
+/** File formats supported by {@link Load}. */
+public enum FileType {
+  PARQUET,
+  JSON
 }

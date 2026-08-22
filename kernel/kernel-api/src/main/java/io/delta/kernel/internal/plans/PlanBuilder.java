@@ -121,6 +121,11 @@ public final class PlanBuilder {
     return join(build, true, probeKeys, buildKeys);
   }
 
+  /** Reads the files described by this builder's rows. */
+  public PlanBuilder load(Load load) {
+    return unary(requireNonNull(load, "load is null"));
+  }
+
   /** Unordered bag union of one or more builders with the same output schema. */
   public static PlanBuilder unionAll(List<PlanBuilder> inputs) {
     requireNonNull(inputs, "inputs is null");
