@@ -41,7 +41,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
-public class DefaultJsonRow implements Row {
+public class DefaultJsonRow implements RetainableRow {
   private static final ObjectReader JSON_READER =
       new ObjectMapper().reader(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
   private static final ObjectReader SINGLE_OBJECT_JSON_READER =
@@ -66,9 +66,23 @@ public class DefaultJsonRow implements Row {
     }
   }
 
-  /** Decodes one JSON object using the strict semantics used by {@code JsonHandler}. */
+  DefaultJsonRow(Object[] parsedValues, StructType readSchema) {
+    this.readSchema = readSchema;
+    this.parsedValues = parsedValues;
+  }
+
+  /** Decodes one JSON object using strict type and nullability semantics. */
   public static DefaultJsonRow fromJson(String json, StructType readSchema) throws IOException {
+    return fromJsonTree(json, readSchema);
+  }
+
+  static DefaultJsonRow fromJsonTree(String json, StructType readSchema) throws IOException {
     return fromJson(JSON_READER, json, readSchema, false);
+  }
+
+  static DefaultJsonRow fromJsonTreePermissively(String json, StructType readSchema)
+      throws IOException {
+    return fromJson(SINGLE_OBJECT_JSON_READER, json, readSchema, true);
   }
 
   /**
@@ -77,7 +91,7 @@ public class DefaultJsonRow implements Row {
    */
   public static DefaultJsonRow fromJsonPermissively(String json, StructType readSchema)
       throws IOException {
-    return fromJson(SINGLE_OBJECT_JSON_READER, json, readSchema, true);
+    return StrictJsonRowParser.forSchema(readSchema).parsePermissively(json);
   }
 
   private static DefaultJsonRow fromJson(
@@ -98,6 +112,12 @@ public class DefaultJsonRow implements Row {
   @Override
   public boolean isNullAt(int ordinal) {
     return parsedValues[ordinal] == null;
+  }
+
+  @Override
+  public final Object retainValue(int ordinal) {
+    Object value = parsedValues[ordinal];
+    return value instanceof byte[] ? ((byte[]) value).clone() : value;
   }
 
   @Override
@@ -348,17 +368,7 @@ public class DefaultJsonRow implements Row {
         }
         elements[i] = parsedElement;
       }
-      return new ArrayValue() {
-        @Override
-        public int getSize() {
-          return elements.length;
-        }
-
-        @Override
-        public ColumnVector getElements() {
-          return DefaultGenericVector.fromArray(arrayType.getElementType(), elements);
-        }
-      };
+      return arrayValue(arrayType.getElementType(), elements);
     }
 
     if (dataType instanceof MapType) {
@@ -398,22 +408,7 @@ public class DefaultJsonRow implements Row {
         keys.add(keyParsed);
         values.add(valueParsed);
       }
-      return new MapValue() {
-        @Override
-        public int getSize() {
-          return jsonValue.size();
-        }
-
-        @Override
-        public ColumnVector getKeys() {
-          return DefaultGenericVector.fromList(mapType.getKeyType(), keys);
-        }
-
-        @Override
-        public ColumnVector getValues() {
-          return DefaultGenericVector.fromList(mapType.getValueType(), values);
-        }
-      };
+      return mapValue(mapType, keys, values);
     }
 
     if (dataType instanceof GeometryType || dataType instanceof GeographyType) {
@@ -425,7 +420,40 @@ public class DefaultJsonRow implements Row {
         String.format("Unsupported DataType %s for RootNode %s", dataType, jsonValue));
   }
 
-  private static boolean isFailureProneLeaf(DataType dataType) {
+  static ArrayValue arrayValue(DataType elementType, Object[] elements) {
+    return new ArrayValue() {
+      @Override
+      public int getSize() {
+        return elements.length;
+      }
+
+      @Override
+      public ColumnVector getElements() {
+        return DefaultGenericVector.fromArray(elementType, elements);
+      }
+    };
+  }
+
+  static MapValue mapValue(MapType type, List<Object> keys, List<Object> values) {
+    return new MapValue() {
+      @Override
+      public int getSize() {
+        return keys.size();
+      }
+
+      @Override
+      public ColumnVector getKeys() {
+        return DefaultGenericVector.fromList(type.getKeyType(), keys);
+      }
+
+      @Override
+      public ColumnVector getValues() {
+        return DefaultGenericVector.fromList(type.getValueType(), values);
+      }
+    };
+  }
+
+  static boolean isFailureProneLeaf(DataType dataType) {
     return dataType instanceof DecimalType
         || dataType instanceof DateType
         || dataType instanceof TimestampType
