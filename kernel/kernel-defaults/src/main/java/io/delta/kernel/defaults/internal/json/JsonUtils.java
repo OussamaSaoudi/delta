@@ -26,22 +26,35 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.ser.std.StdSerializer;
 import io.delta.kernel.data.*;
 import io.delta.kernel.defaults.internal.data.DefaultJsonRow;
+import io.delta.kernel.internal.util.TimestampUtils;
 import io.delta.kernel.types.*;
 import java.io.IOException;
+import java.io.StringWriter;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.temporal.ChronoField;
 
 /**
  * Utilities method to serialize and deserialize {@link Row} objects with a limited set of data type
  * values.
  *
- * <p>Following are the supported data types: {@code boolean}, {@code byte}, {@code short}, {@code
- * int}, {@code long}, {@code float}, {@code double}, {@code string}, {@code StructType} (containing
- * any of the supported subtypes), {@code ArrayType}, {@code MapType} (only a map with string keys
- * is supported).
+ * <p>The legacy {@link #rowToJson(Row)} path supports {@code boolean}, {@code byte}, {@code short},
+ * {@code int}, {@code long}, {@code float}, {@code double}, {@code string}, {@code StructType},
+ * {@code ArrayType}, and string-keyed {@code MapType}. The declarative-plan {@link
+ * #structVectorToJson(ColumnVector, int)} path supports all Kernel plan value types.
  *
  * <p>At a high-level, the JSON serialization is similar to that of Jackson's {@link ObjectMapper}.
  */
 public class JsonUtils {
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+  private static final DateTimeFormatter TIMESTAMP_NTZ_FORMATTER =
+      new DateTimeFormatterBuilder()
+          .appendPattern("uuuu-MM-dd'T'HH:mm:ss")
+          .appendFraction(ChronoField.NANO_OF_SECOND, 0, 6, true)
+          .toFormatter();
 
   static {
     OBJECT_MAPPER.registerModule(new SimpleModule().addSerializer(Row.class, new RowSerializer()));
@@ -63,6 +76,23 @@ public class JsonUtils {
     } catch (JsonProcessingException ex) {
       throw new RuntimeException("Could not serialize row object to JSON", ex);
     }
+  }
+
+  /**
+   * Converts one non-null struct vector element to JSON using the declarative plan semantics.
+   *
+   * <p>Null struct and map fields are omitted, while null array elements are retained.
+   */
+  public static String structVectorToJson(ColumnVector vector, int rowId) {
+    checkArgument(vector.getDataType() instanceof StructType, "expected a struct vector");
+    checkArgument(!vector.isNullAt(rowId), "expected a non-null struct value");
+    StringWriter output = new StringWriter();
+    try (JsonGenerator generator = OBJECT_MAPPER.getFactory().createGenerator(output)) {
+      RowSerializer.writeStruct(generator, vector, (StructType) vector.getDataType(), rowId, true);
+    } catch (IOException failure) {
+      throw new RuntimeException("Could not serialize struct vector to JSON", failure);
+    }
+    return output.toString();
   }
 
   /**
@@ -104,7 +134,12 @@ public class JsonUtils {
       gen.writeEndObject();
     }
 
-    private void writeStruct(JsonGenerator gen, ColumnVector vector, StructType type, int rowId)
+    private static void writeStruct(
+        JsonGenerator gen,
+        ColumnVector vector,
+        StructType type,
+        int rowId,
+        boolean omitNullMapValues)
         throws IOException {
       gen.writeStartObject();
       for (int columnOrdinal = 0; columnOrdinal < type.length(); columnOrdinal++) {
@@ -112,13 +147,14 @@ public class JsonUtils {
         ColumnVector childVector = vector.getChild(columnOrdinal);
         if (!childVector.isNullAt(rowId)) {
           gen.writeFieldName(field.getName());
-          writeValue(gen, childVector, rowId, field.getDataType());
+          writeValue(gen, childVector, rowId, field.getDataType(), omitNullMapValues);
         }
       }
       gen.writeEndObject();
     }
 
-    private void writeArrayValue(JsonGenerator gen, ArrayValue arrayValue, ArrayType arrayType)
+    private static void writeArrayValue(
+        JsonGenerator gen, ArrayValue arrayValue, ArrayType arrayType, boolean omitNullMapValues)
         throws IOException {
       gen.writeStartArray();
       ColumnVector arrayElems = arrayValue.getElements();
@@ -127,22 +163,27 @@ public class JsonUtils {
           // Jackson serializes the null values in the array, but not in the map
           gen.writeNull();
         } else {
-          writeValue(gen, arrayValue.getElements(), i, arrayType.getElementType());
+          writeValue(
+              gen, arrayValue.getElements(), i, arrayType.getElementType(), omitNullMapValues);
         }
       }
       gen.writeEndArray();
     }
 
-    private void writeMapValue(JsonGenerator gen, MapValue mapValue, MapType mapType)
+    private static void writeMapValue(
+        JsonGenerator gen, MapValue mapValue, MapType mapType, boolean omitNullMapValues)
         throws IOException {
       assertSupportedMapType(mapType);
       gen.writeStartObject();
       ColumnVector keys = mapValue.getKeys();
       ColumnVector values = mapValue.getValues();
       for (int i = 0; i < mapValue.getSize(); i++) {
+        if (omitNullMapValues && values.isNullAt(i)) {
+          continue;
+        }
         gen.writeFieldName(keys.getString(i));
         if (!values.isNullAt(i)) {
-          writeValue(gen, values, i, mapType.getValueType());
+          writeValue(gen, values, i, mapType.getValueType(), omitNullMapValues);
         } else {
           gen.writeNull();
         }
@@ -172,16 +213,17 @@ public class JsonUtils {
       } else if (type instanceof StructType) {
         writeRow(gen, row.getStruct(columnOrdinal), (StructType) type);
       } else if (type instanceof ArrayType) {
-        writeArrayValue(gen, row.getArray(columnOrdinal), (ArrayType) type);
+        writeArrayValue(gen, row.getArray(columnOrdinal), (ArrayType) type, false);
       } else if (type instanceof MapType) {
-        writeMapValue(gen, row.getMap(columnOrdinal), (MapType) type);
+        writeMapValue(gen, row.getMap(columnOrdinal), (MapType) type, false);
       } else {
         // `binary` type is not supported according the Delta Protocol
         throw new UnsupportedOperationException("unsupported data type: " + type);
       }
     }
 
-    private void writeValue(JsonGenerator gen, ColumnVector vector, int rowId, DataType type)
+    private static void writeValue(
+        JsonGenerator gen, ColumnVector vector, int rowId, DataType type, boolean omitNullMapValues)
         throws IOException {
       checkArgument(!vector.isNullAt(rowId), "value should not be null");
       if (type instanceof BooleanType) {
@@ -195,17 +237,41 @@ public class JsonUtils {
       } else if (type instanceof LongType) {
         gen.writeNumber(vector.getLong(rowId));
       } else if (type instanceof FloatType) {
-        gen.writeNumber(vector.getFloat(rowId));
+        float value = vector.getFloat(rowId);
+        if (Float.isFinite(value)) {
+          gen.writeRawValue(formatFloating(value, true));
+        } else {
+          gen.writeNull();
+        }
       } else if (type instanceof DoubleType) {
-        gen.writeNumber(vector.getDouble(rowId));
-      } else if (type instanceof StringType) {
+        double value = vector.getDouble(rowId);
+        if (Double.isFinite(value)) {
+          gen.writeRawValue(formatFloating(value, false));
+        } else {
+          gen.writeNull();
+        }
+      } else if (type instanceof DecimalType) {
+        gen.writeNumber(vector.getDecimal(rowId));
+      } else if (type instanceof StringType
+          || type instanceof GeometryType
+          || type instanceof GeographyType) {
         gen.writeString(vector.getString(rowId));
+      } else if (type instanceof BinaryType) {
+        gen.writeString(encodeHex(vector.getBinary(rowId)));
+      } else if (type instanceof DateType) {
+        gen.writeString(LocalDate.ofEpochDay(vector.getInt(rowId)).toString());
+      } else if (type instanceof TimestampType) {
+        gen.writeString(
+            DateTimeFormatter.ISO_INSTANT.format(
+                TimestampUtils.instantFromEpochMicros(vector.getLong(rowId))));
+      } else if (type instanceof TimestampNTZType) {
+        gen.writeString(formatTimestampNtz(vector.getLong(rowId)));
       } else if (type instanceof StructType) {
-        writeStruct(gen, vector, (StructType) type, rowId);
+        writeStruct(gen, vector, (StructType) type, rowId, omitNullMapValues);
       } else if (type instanceof ArrayType) {
-        writeArrayValue(gen, vector.getArray(rowId), (ArrayType) type);
+        writeArrayValue(gen, vector.getArray(rowId), (ArrayType) type, omitNullMapValues);
       } else if (type instanceof MapType) {
-        writeMapValue(gen, vector.getMap(rowId), (MapType) type);
+        writeMapValue(gen, vector.getMap(rowId), (MapType) type, omitNullMapValues);
       } else {
         throw new UnsupportedOperationException("unsupported data type: " + type);
       }
@@ -216,5 +282,83 @@ public class JsonUtils {
     checkArgument(
         keyType.getKeyType() instanceof StringType,
         "Only STRING type keys are supported in MAP type in JSON serialization");
+  }
+
+  private static String formatTimestampNtz(long micros) {
+    LocalDateTime value =
+        LocalDateTime.ofEpochSecond(
+            Math.floorDiv(micros, 1_000_000L),
+            Math.toIntExact(Math.floorMod(micros, 1_000_000L) * 1_000),
+            ZoneOffset.UTC);
+    return TIMESTAMP_NTZ_FORMATTER.format(value);
+  }
+
+  /** Formats Java's shortest round-tripping digits with Arrow's display thresholds. */
+  private static String formatFloating(double value, boolean singlePrecision) {
+    String javaValue = singlePrecision ? Float.toString((float) value) : Double.toString(value);
+    boolean negative = javaValue.charAt(0) == '-';
+    String unsigned = negative ? javaValue.substring(1) : javaValue;
+    int exponentMarker = Math.max(unsigned.indexOf('E'), unsigned.indexOf('e'));
+    int exponent =
+        exponentMarker < 0 ? 0 : Integer.parseInt(unsigned.substring(exponentMarker + 1));
+    String decimal = exponentMarker < 0 ? unsigned : unsigned.substring(0, exponentMarker);
+    int decimalPoint = decimal.indexOf('.');
+    int point = (decimalPoint < 0 ? decimal.length() : decimalPoint) + exponent;
+    String digits =
+        decimalPoint < 0
+            ? decimal
+            : decimal.substring(0, decimalPoint) + decimal.substring(decimalPoint + 1);
+
+    int leading = 0;
+    while (leading < digits.length() - 1 && digits.charAt(leading) == '0') {
+      leading++;
+    }
+    digits = digits.substring(leading);
+    point -= leading;
+    int trailing = digits.length();
+    while (trailing > 1 && digits.charAt(trailing - 1) == '0') {
+      trailing--;
+    }
+    digits = digits.substring(0, trailing);
+
+    int length = digits.length();
+    int decimalExponent = point - length;
+    int upperFixed = singlePrecision ? 13 : 16;
+    int lowerFixed = singlePrecision ? -6 : -5;
+    StringBuilder result = new StringBuilder();
+    if (negative) {
+      result.append('-');
+    }
+    if (decimalExponent >= 0 && point <= upperFixed) {
+      result.append(digits);
+      for (int index = 0; index < decimalExponent; index++) {
+        result.append('0');
+      }
+      result.append(".0");
+    } else if (point > 0 && point <= upperFixed) {
+      result.append(digits, 0, point).append('.').append(digits.substring(point));
+    } else if (point > lowerFixed && point <= 0) {
+      result.append("0.");
+      for (int index = 0; index < -point; index++) {
+        result.append('0');
+      }
+      result.append(digits);
+    } else {
+      result.append(digits.charAt(0)).append('.');
+      result.append(length > 1 ? digits.substring(1) : "0");
+      result.append('e').append(point - 1);
+    }
+    return result.toString();
+  }
+
+  private static String encodeHex(byte[] bytes) {
+    char[] chars = new char[bytes.length * 2];
+    char[] digits = "0123456789abcdef".toCharArray();
+    for (int index = 0; index < bytes.length; index++) {
+      int value = Byte.toUnsignedInt(bytes[index]);
+      chars[index * 2] = digits[value >>> 4];
+      chars[index * 2 + 1] = digits[value & 0x0f];
+    }
+    return new String(chars);
   }
 }

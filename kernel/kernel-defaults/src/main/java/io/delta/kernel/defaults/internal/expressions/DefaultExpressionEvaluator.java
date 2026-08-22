@@ -53,6 +53,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
   static {
     Map<String, ExpressionKernel> kernels = new HashMap<>();
     register(kernels, ArrayExpressionEvaluator.INSTANCE);
+    register(kernels, ToJsonExpressionEvaluator.INSTANCE);
     EXPRESSION_KERNELS = Collections.unmodifiableMap(kernels);
   }
 
