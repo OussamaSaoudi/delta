@@ -18,7 +18,7 @@ package io.delta.kernel.defaults.internal.plans
 import scala.jdk.CollectionConverters._
 
 import io.delta.kernel.data.Row
-import io.delta.kernel.defaults.utils.TestRow
+import io.delta.kernel.defaults.utils.{ExpressionTestUtils, TestRow}
 import io.delta.kernel.engine.Engine
 import io.delta.kernel.internal.plans.PlanBuilder
 import io.delta.kernel.internal.util.Utils
@@ -27,7 +27,7 @@ import io.delta.kernel.test.MockEngineUtils
 import org.scalatest.Assertions.assert
 
 /** Test helpers for executing a fluent plan and checking its logical rows. */
-private[plans] trait PlanExecutionSuiteBase extends MockEngineUtils {
+private[plans] trait PlanExecutionSuiteBase extends MockEngineUtils with ExpressionTestUtils {
   protected final def checkRows(plan: PlanBuilder, expected: Seq[Row]): Unit = {
     checkRows(plan, mockEngine(), expected)
   }

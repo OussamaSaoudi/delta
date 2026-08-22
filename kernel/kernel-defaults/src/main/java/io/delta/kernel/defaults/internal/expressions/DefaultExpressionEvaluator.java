@@ -48,6 +48,14 @@ import java.util.stream.Collectors;
  * given {@link ColumnarBatch}.
  */
 public class DefaultExpressionEvaluator implements ExpressionEvaluator {
+  private static final Map<String, ExpressionKernel> EXPRESSION_KERNELS;
+
+  static {
+    Map<String, ExpressionKernel> kernels = new HashMap<>();
+    register(kernels, ArrayExpressionEvaluator.INSTANCE);
+    EXPRESSION_KERNELS = Collections.unmodifiableMap(kernels);
+  }
+
   private final Expression expression;
   private final Map<Column, ColumnBinding> columnBindings;
   private final DataType outputType;
@@ -109,6 +117,18 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     }
   }
 
+  private static final class ResolvedKernelExpression extends ScalarExpression {
+    private final ExpressionKernel kernel;
+    private final DataType outputType;
+
+    private ResolvedKernelExpression(
+        ExpressionKernel kernel, List<Expression> children, DataType outputType) {
+      super(kernel.name(), children);
+      this.kernel = kernel;
+      this.outputType = outputType;
+    }
+  }
+
   /**
    * Implementation of {@link ExpressionVisitor} to validate the given expression as follows.
    *
@@ -130,6 +150,12 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     }
 
     ExpressionTransformResult transform(Expression expression, DataType expectedType) {
+      if (expression instanceof ScalarExpression) {
+        ExpressionKernel kernel = kernel((ScalarExpression) expression);
+        if (kernel != null) {
+          return transformKernel((ScalarExpression) expression, expectedType, kernel);
+        }
+      }
       if (expression instanceof StructExpression) {
         return transformStruct((StructExpression) expression, expectedType);
       }
@@ -147,6 +173,26 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
         return transformCoalesce((ScalarExpression) expression, expectedType);
       }
       return visit(expression);
+    }
+
+    private ExpressionTransformResult transformKernel(
+        ScalarExpression expression, DataType expectedType, ExpressionKernel kernel) {
+      List<ExpressionTransformResult> children = new ArrayList<>();
+      for (int index = 0; index < expression.getChildren().size(); index++) {
+        children.add(
+            transform(
+                expression.getChildren().get(index),
+                kernel.expectedChildType(expectedType, index)));
+      }
+      List<DataType> childTypes =
+          children.stream().map(child -> child.outputType).collect(Collectors.toList());
+      DataType outputType = kernel.resolve(expression, childTypes, expectedType);
+      return new ExpressionTransformResult(
+          new ResolvedKernelExpression(
+              kernel,
+              children.stream().map(child -> child.expression).collect(Collectors.toList()),
+              outputType),
+          outputType);
     }
 
     private ExpressionTransformResult transformMapToStruct(
@@ -655,6 +701,16 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
           BooleanType.BOOLEAN);
     }
 
+    @Override
+    ExpressionTransformResult visitExtension(ScalarExpression expression) {
+      ExpressionKernel kernel = kernel(expression);
+      if (kernel == null) {
+        throw new UnsupportedOperationException(
+            String.format("Scalar expression `%s` is not supported.", expression.getName()));
+      }
+      return transformKernel(expression, null, kernel);
+    }
+
     private Predicate validateIsPredicate(
         Expression baseExpression, ExpressionTransformResult result) {
       checkArgument(
@@ -1103,6 +1159,25 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       return new DefaultBooleanVector(numRows, Optional.of(nullability), result);
     }
 
+    @Override
+    ColumnVector visitExtension(ScalarExpression expression) {
+      if (!(expression instanceof ResolvedKernelExpression)) {
+        throw new IllegalStateException(expression.getName() + " expression was not resolved");
+      }
+      ResolvedKernelExpression resolved = (ResolvedKernelExpression) expression;
+      List<ColumnVector> children = new ArrayList<>(expression.getChildren().size());
+      try {
+        for (Expression child : expression.getChildren()) {
+          children.add(visit(child));
+        }
+        return resolved.kernel.eval(
+            expression, children, resolved.outputType, input.getSize());
+      } catch (RuntimeException | Error failure) {
+        Utils.closeCloseablesAndAddSuppressed(failure, children.toArray(new ColumnVector[0]));
+        throw failure;
+      }
+    }
+
     private static boolean boxesIntersect(
         double[] lMin, double[] lMax, double[] rMin, double[] rMax) {
       return lMax[0] >= rMin[0] && rMax[0] >= lMin[0] && lMax[1] >= rMin[1] && rMax[1] >= lMin[1];
@@ -1151,5 +1226,14 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       throw new IllegalArgumentException(
           format("%s doesn't exist in input data schema: %s", column, schema));
     }
+  }
+
+  private static void register(
+      Map<String, ExpressionKernel> kernels, ExpressionKernel kernel) {
+    kernels.put(kernel.name(), kernel);
+  }
+
+  private static ExpressionKernel kernel(ScalarExpression expression) {
+    return EXPRESSION_KERNELS.get(expression.getName().toUpperCase(Locale.ENGLISH));
   }
 }

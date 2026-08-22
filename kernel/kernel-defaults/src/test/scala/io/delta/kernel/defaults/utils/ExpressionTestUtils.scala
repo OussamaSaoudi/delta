@@ -22,6 +22,16 @@ import io.delta.kernel.expressions._
 /** Useful helper functions for creating expressions in tests */
 trait ExpressionTestUtils {
 
+  def scalar(name: String, children: Expression*): ScalarExpression =
+    new ScalarExpression(name, children.asJava)
+
+  def struct(children: Expression*): StructExpression =
+    new StructExpression(children.asJava)
+
+  def array(children: Expression*): ScalarExpression = scalar("ARRAY", children: _*)
+
+  def toJson(child: Expression): ScalarExpression = scalar("TO_JSON", child)
+
   def eq(left: Expression, right: Expression): Predicate = predicate("=", left, right)
   def equals(e1: Expression, e2: Expression): Predicate = eq(e1, e2)
 

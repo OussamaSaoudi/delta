@@ -84,6 +84,8 @@ abstract class ExpressionVisitor<R> {
 
   abstract R visitStGeometryBoxesIntersectOnStats(Predicate predicate);
 
+  abstract R visitExtension(ScalarExpression expression);
+
   final R visit(Expression expression) {
     if (expression instanceof UnknownExpression
         || expression instanceof UnknownPredicate
@@ -175,8 +177,7 @@ abstract class ExpressionVisitor<R> {
         return visitStGeometryBoxesIntersectOnStats(
             createPredicate(name, children, collationIdentifier));
       default:
-        throw new UnsupportedOperationException(
-            String.format("Scalar expression `%s` is not supported.", name));
+        return visitExtension(expression);
     }
   }
 
