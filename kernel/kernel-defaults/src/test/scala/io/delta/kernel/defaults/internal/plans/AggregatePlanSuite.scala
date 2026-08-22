@@ -15,7 +15,7 @@
  */
 package io.delta.kernel.defaults.internal.plans
 
-import java.lang.{Integer => IntegerJ}
+import java.lang.{Double => DoubleJ, Integer => IntegerJ}
 import java.util
 
 import scala.jdk.CollectionConverters._
@@ -74,6 +74,57 @@ class AggregatePlanSuite extends AnyFunSuite with PlanExecutionSuiteBase {
     val input = PlanBuilder.values(schema, util.Collections.emptyList[Row]())
 
     checkRows(input.aggregate(aggregate), Seq(row(aggregate.getSchema, null, null)))
+  }
+
+  test("group rows across batches with null-safe keys") {
+    val schema = new StructType()
+      .add("group", StringType.STRING)
+      .add("score", IntegerType.INTEGER)
+      .add("value", StringType.STRING)
+      .add("order", IntegerType.INTEGER)
+    val first = PlanBuilder.values(schema, Seq(
+      row(schema, "a", IntegerJ.valueOf(5), "five", IntegerJ.valueOf(5)),
+      row(schema, null, IntegerJ.valueOf(2), "two", IntegerJ.valueOf(2))).asJava)
+    val second = PlanBuilder.values(schema, Seq(
+      row(schema, "a", IntegerJ.valueOf(8), "eight", IntegerJ.valueOf(8)),
+      row(schema, null, IntegerJ.valueOf(1), "one", IntegerJ.valueOf(1))).asJava)
+    val plan = PlanBuilder.unionAll(Seq(first, second).asJava).aggregateBy(
+      Seq(column("group")).asJava,
+      _.aggregateAs(Agg.min(column("score")), "least")
+        .aggregateAs(Agg.max(column("score")), "greatest")
+        .aggregateAs(Agg.minNonNullBy(column("value"), column("order")), "earliest")
+        .aggregateAs(Agg.maxNonNullBy(column("value"), column("order")), "latest"))
+    val outputSchema = plan.getOutputSchema
+
+    checkRowsUnordered(plan, Seq(
+      row(outputSchema, "a", IntegerJ.valueOf(5), IntegerJ.valueOf(8), "five", "eight"),
+      row(outputSchema, null, IntegerJ.valueOf(1), IntegerJ.valueOf(2), "one", "two")))
+  }
+
+  test("grouping normalizes signed zero and compares binary by contents") {
+    val numberSchema = new StructType()
+      .add("group", DoubleType.DOUBLE)
+      .add("value", IntegerType.INTEGER)
+    val numbers = Seq(
+      row(numberSchema, DoubleJ.valueOf(-0.0d), IntegerJ.valueOf(1)),
+      row(numberSchema, DoubleJ.valueOf(0.0d), IntegerJ.valueOf(2)))
+    val numberPlan = PlanBuilder.values(numberSchema, numbers.asJava)
+      .aggregateBy(Seq(column("group")).asJava, _.max(column("value")))
+    val numberOutput = numberPlan.getOutputSchema
+
+    checkRows(numberPlan, Seq(row(numberOutput, DoubleJ.valueOf(-0.0d), IntegerJ.valueOf(2))))
+
+    val binarySchema = new StructType()
+      .add("group", BinaryType.BINARY)
+      .add("value", IntegerType.INTEGER)
+    val binaries = Seq(
+      row(binarySchema, Array[Byte](1, 2), IntegerJ.valueOf(1)),
+      row(binarySchema, Array[Byte](1, 2), IntegerJ.valueOf(2)))
+    val binaryPlan = PlanBuilder.values(binarySchema, binaries.asJava)
+      .aggregateBy(Seq(column("group")).asJava, _.max(column("value")))
+    val binaryOutput = binaryPlan.getOutputSchema
+
+    checkRows(binaryPlan, Seq(row(binaryOutput, Array[Byte](1, 2), IntegerJ.valueOf(2))))
   }
 
   test("non-null-by ignores null operands") {

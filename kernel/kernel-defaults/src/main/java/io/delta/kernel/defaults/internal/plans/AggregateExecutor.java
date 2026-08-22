@@ -23,13 +23,11 @@ import static java.util.Objects.requireNonNull;
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.FilteredColumnarBatch;
 import io.delta.kernel.data.Row;
-import io.delta.kernel.defaults.internal.DefaultKernelUtils;
 import io.delta.kernel.defaults.internal.data.DefaultRowBasedColumnarBatch;
-import io.delta.kernel.defaults.internal.expressions.DefaultExpressionEvaluator;
-import io.delta.kernel.expressions.ExpressionEvaluator;
 import io.delta.kernel.internal.data.GenericRow;
 import io.delta.kernel.internal.plans.Agg;
 import io.delta.kernel.internal.plans.Aggregate;
+import io.delta.kernel.internal.util.ColumnBinding;
 import io.delta.kernel.internal.util.Utils;
 import io.delta.kernel.internal.util.VectorUtils;
 import io.delta.kernel.types.DataType;
@@ -46,10 +44,12 @@ final class AggregateExecutor {
 
   static CloseableIterator<FilteredColumnarBatch> execute(
       Aggregate aggregate, StructType inputSchema, CloseableIterator<FilteredColumnarBatch> input) {
+    if (!requireNonNull(aggregate, "aggregate is null").getGroupBy().isEmpty()) {
+      return GroupedAggregateExecutor.execute(aggregate, inputSchema, input);
+    }
     StructType outputSchema =
-        requireNonNull(aggregate, "aggregate is null")
-            .getOutputSchema(
-                Collections.singletonList(requireNonNull(inputSchema, "inputSchema is null")));
+        aggregate.getOutputSchema(
+            Collections.singletonList(requireNonNull(inputSchema, "inputSchema is null")));
     requireNonNull(input, "input is null");
     List<BoundAgg> aggs = bind(aggregate, inputSchema, outputSchema);
 
@@ -72,9 +72,10 @@ final class AggregateExecutor {
         values.add(agg.result());
       }
     } finally {
-      List<AutoCloseable> closeables = new ArrayList<>(aggs);
-      closeables.add(input);
-      Utils.closeCloseables(closeables.toArray(new AutoCloseable[0]));
+      Utils.closeCloseables(input);
+      for (BoundAgg agg : aggs) {
+        agg.close();
+      }
     }
 
     Row row = GenericRow.fromValues(outputSchema, values);
@@ -93,7 +94,7 @@ final class AggregateExecutor {
       DataType valueType = outputSchema.at(index).getDataType();
       DataType keyType =
           agg.getKey()
-              .map(column -> DefaultKernelUtils.getDataType(inputSchema, column))
+              .map(column -> ColumnBinding.resolve(inputSchema, column).getDataType())
               .orElse(valueType);
       if (!supportsComparison(keyType)) {
         throw new UnsupportedOperationException(
@@ -104,20 +105,18 @@ final class AggregateExecutor {
     return result;
   }
 
-  private static final class BoundAgg implements AutoCloseable {
-    private final ExpressionEvaluator value;
-    private final Optional<ExpressionEvaluator> key;
+  private static final class BoundAgg {
+    private final ColumnBinding value;
+    private final Optional<ColumnBinding> key;
     private final DataType valueType;
     private final DataType keyType;
     private final boolean minimum;
-    private ColumnVector winningValues;
-    private ColumnVector winningKeys;
-    private int winningRow = -1;
+    private Object winningValue;
+    private ColumnVector winningKey;
 
     private BoundAgg(Agg agg, StructType inputSchema, DataType valueType, DataType keyType) {
-      this.value = new DefaultExpressionEvaluator(inputSchema, agg.getValue(), valueType);
-      this.key =
-          agg.getKey().map(column -> new DefaultExpressionEvaluator(inputSchema, column, keyType));
+      this.value = ColumnBinding.resolve(inputSchema, agg.getValue());
+      this.key = agg.getKey().map(column -> ColumnBinding.resolve(inputSchema, column));
       this.valueType = valueType;
       this.keyType = keyType;
       this.minimum =
@@ -126,35 +125,24 @@ final class AggregateExecutor {
     }
 
     private void update(FilteredColumnarBatch batch) {
-      ColumnVector values = value.eval(batch.getData());
-      ColumnVector keys = null;
-      boolean retained = false;
-      try {
-        keys = key.isPresent() ? key.get().eval(batch.getData()) : values;
-        int candidate = -1;
-        for (int rowId = 0; rowId < batch.getData().getSize(); rowId++) {
-          if (!batch.isSelected(rowId)
-              || values.isNullAt(rowId)
-              || keys.isNullAt(rowId)) {
-            continue;
-          }
-          if (candidate < 0 || better(compare(keyType, keys, rowId, keys, candidate))) {
-            candidate = rowId;
-          }
+      ColumnVector values = value.getVector(batch.getData());
+      ColumnVector keys = key.isPresent() ? key.get().getVector(batch.getData()) : values;
+      int candidate = -1;
+      for (int rowId = 0; rowId < batch.getData().getSize(); rowId++) {
+        if (!batch.isSelected(rowId) || values.isNullAt(rowId) || keys.isNullAt(rowId)) {
+          continue;
         }
-        if (candidate >= 0
-            && (winningRow < 0
-                || better(compare(keyType, keys, candidate, winningKeys, winningRow)))) {
-          closeWinner();
-          winningValues = values;
-          winningKeys = keys;
-          winningRow = candidate;
-          retained = true;
+        if (candidate < 0 || better(compare(keyType, keys, rowId, keys, candidate))) {
+          candidate = rowId;
         }
-      } finally {
-        if (!retained) {
-          closeVectors(values, keys);
-        }
+      }
+      if (candidate >= 0
+          && (winningKey == null || better(compare(keyType, keys, candidate, winningKey, 0)))) {
+        Object keyValue = PlanValueUtils.materialize(keys, keyType, candidate);
+        Utils.closeCloseables(winningKey);
+        winningKey =
+            VectorUtils.buildColumnVector(Collections.singletonList(keyValue), keyType);
+        winningValue = PlanValueUtils.materialize(values, valueType, candidate);
       }
     }
 
@@ -163,37 +151,12 @@ final class AggregateExecutor {
     }
 
     private Object result() {
-      return winningRow < 0
-          ? null
-          : VectorUtils.getValueAsObject(winningValues, valueType, winningRow);
+      return winningValue;
     }
 
-    private void closeWinner() {
-      closeVectors(winningValues, winningKeys);
-      winningValues = null;
-      winningKeys = null;
-      winningRow = -1;
-    }
-
-    private static void closeVectors(ColumnVector values, ColumnVector keys) {
-      if (values == null) {
-        return;
-      }
-      if (keys != null && keys != values) {
-        Utils.closeCloseables(values, keys);
-      } else {
-        values.close();
-      }
-    }
-
-    @Override
-    public void close() {
-      closeWinner();
-      if (key.isPresent()) {
-        Utils.closeCloseables(value, key.get());
-      } else {
-        value.close();
-      }
+    private void close() {
+      Utils.closeCloseables(winningKey);
+      winningKey = null;
     }
   }
 }

@@ -18,6 +18,7 @@ package io.delta.kernel.internal.plans;
 import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.data.Row;
+import io.delta.kernel.expressions.Column;
 import io.delta.kernel.types.StructType;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -71,6 +72,12 @@ public final class PlanBuilder {
     return aggregate(Aggregate.ungrouped(root.outputSchema), aggregates);
   }
 
+  /** Applies an aggregate grouped by {@code columns}, inferring the output schema. */
+  public PlanBuilder aggregateBy(
+      List<Column> columns, UnaryOperator<AggregateBuilder> aggregates) {
+    return aggregate(Aggregate.groupBy(root.outputSchema, columns), aggregates);
+  }
+
   /** Unordered bag union of one or more builders with the same output schema. */
   public static PlanBuilder unionAll(List<PlanBuilder> inputs) {
     requireNonNull(inputs, "inputs is null");
@@ -89,6 +96,11 @@ public final class PlanBuilder {
     List<PlanNode> nodes = new ArrayList<>();
     emit(root, nodes, new IdentityHashMap<>());
     return new Plan(nodes);
+  }
+
+  /** Returns the schema produced by this builder. */
+  public StructType getOutputSchema() {
+    return root.outputSchema;
   }
 
   private static PlanBuilder source(Operator operator) {

@@ -17,6 +17,7 @@ package io.delta.kernel.internal.plans;
 
 import static java.util.Objects.requireNonNull;
 
+import io.delta.kernel.expressions.Column;
 import io.delta.kernel.types.StructField;
 import io.delta.kernel.types.StructType;
 import java.util.ArrayList;
@@ -27,17 +28,24 @@ import java.util.Set;
 
 /** Groups input rows and computes aggregate columns. */
 public final class Aggregate implements Operator {
+  private final List<Column> groupBy;
   private final List<Agg> aggs;
   private final StructType schema;
 
-  Aggregate(List<Agg> aggs, StructType schema) {
+  Aggregate(List<Column> groupBy, List<Agg> aggs, StructType schema) {
+    this.groupBy = PlanValidation.immutableCopy(groupBy, "grouping column is null");
     this.aggs = PlanValidation.immutableCopy(aggs, "agg is null");
     this.schema = requireNonNull(schema, "schema is null");
   }
 
   /** Starts a global aggregate over {@code inputSchema}. */
   public static AggregateBuilder ungrouped(StructType inputSchema) {
-    return new AggregateBuilder(inputSchema);
+    return groupBy(inputSchema, java.util.Collections.emptyList());
+  }
+
+  /** Starts an aggregate grouped by {@code columns}. */
+  public static AggregateBuilder groupBy(StructType inputSchema, List<Column> columns) {
+    return new AggregateBuilder(inputSchema, columns);
   }
 
   static void validateUniqueNames(List<StructField> fields) {
@@ -54,8 +62,11 @@ public final class Aggregate implements Operator {
   public StructType getOutputSchema(List<StructType> inputSchemas) {
     StructType input = PlanValidation.requireUnaryInput(inputSchemas, "Aggregate");
     List<StructField> actualFields = new ArrayList<>(schema.length());
+    for (Column column : groupBy) {
+      actualFields.add(PlanValidation.resolveField(input, column, "Aggregate grouping column"));
+    }
     for (int index = 0; index < aggs.size(); index++) {
-      String outputName = schema.at(index).getName();
+      String outputName = schema.at(groupBy.size() + index).getName();
       actualFields.add(aggs.get(index).outputField(input, outputName));
     }
     StructType actualSchema = new StructType(actualFields);
@@ -71,6 +82,10 @@ public final class Aggregate implements Operator {
 
   public List<Agg> getAggs() {
     return aggs;
+  }
+
+  public List<Column> getGroupBy() {
+    return groupBy;
   }
 
   public StructType getSchema() {

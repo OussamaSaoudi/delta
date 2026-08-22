@@ -40,6 +40,17 @@ private[plans] trait PlanExecutionSuiteBase extends MockEngineUtils {
     assert(actual.map(logicalRow) == expected.map(logicalRow))
   }
 
+  protected final def checkRowsUnordered(plan: PlanBuilder, expected: Seq[Row]): Unit = {
+    val batches = DefaultPlanExecutor.execute(plan.build(), mockEngine())
+    val actual = Utils.intoRows(batches).toInMemoryList.asScala.toSeq
+
+    assert(actual.map(_.getSchema) == expected.map(_.getSchema))
+    def counts(rows: Seq[Row]) = rows.map(logicalRow).groupBy(identity).map {
+      case (value, copies) => value -> copies.size
+    }
+    assert(counts(actual) == counts(expected))
+  }
+
   private def logicalRow(row: Row): Seq[Any] = TestRow(row).toSeq.map(logicalValue)
 
   private def logicalValue(value: Any): Any = value match {

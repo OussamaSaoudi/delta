@@ -26,11 +26,13 @@ import java.util.List;
 /** Derives an {@link Aggregate} output schema from its input columns. */
 public final class AggregateBuilder {
   private final StructType inputSchema;
+  private final List<Column> groupBy;
   private final List<Agg> aggs = new ArrayList<>();
   private final List<String> aliases = new ArrayList<>();
 
-  AggregateBuilder(StructType inputSchema) {
+  AggregateBuilder(StructType inputSchema, List<Column> groupBy) {
     this.inputSchema = requireNonNull(inputSchema, "inputSchema is null");
+    this.groupBy = PlanValidation.immutableCopy(groupBy, "grouping column is null");
   }
 
   /** Adds an aggregate using its value column's leaf name as the output name. */
@@ -65,11 +67,14 @@ public final class AggregateBuilder {
 
   /** Resolves all input columns and constructs the immutable aggregate payload. */
   public Aggregate build() {
-    List<StructField> fields = new ArrayList<>(aggs.size());
+    List<StructField> fields = new ArrayList<>(groupBy.size() + aggs.size());
+    for (Column column : groupBy) {
+      fields.add(PlanValidation.resolveField(inputSchema, column, "Aggregate grouping column"));
+    }
     for (int index = 0; index < aggs.size(); index++) {
       fields.add(aggs.get(index).outputField(inputSchema, aliases.get(index)));
     }
     Aggregate.validateUniqueNames(fields);
-    return new Aggregate(aggs, new StructType(fields));
+    return new Aggregate(groupBy, aggs, new StructType(fields));
   }
 }
