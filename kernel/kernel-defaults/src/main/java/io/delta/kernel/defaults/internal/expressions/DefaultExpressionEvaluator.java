@@ -27,10 +27,9 @@ import static java.util.stream.Collectors.toList;
 
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.ColumnarBatch;
-import io.delta.kernel.defaults.internal.data.DefaultJsonRow;
+import io.delta.kernel.defaults.internal.data.DefaultJsonBatchParser;
 import io.delta.kernel.defaults.internal.data.vector.DefaultBooleanVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultConstantVector;
-import io.delta.kernel.defaults.internal.data.vector.DefaultGenericVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultViewVector;
 import io.delta.kernel.engine.ExpressionHandler;
 import io.delta.kernel.expressions.*;
@@ -794,7 +793,10 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
             "Struct expression expects a StructType output, but got %s",
             expectedType);
         return StructExpressionEvaluator.eval(
-            (StructExpression) expression, (StructType) expectedType, input.getSize(), this::eval);
+            (StructExpression) expression,
+            (StructType) expectedType,
+            input.getSize(),
+            this::eval);
       }
       return visit(expression);
     }
@@ -978,12 +980,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
           jsonVector.getSize());
 
       try {
-        List<Object> rows = new ArrayList<>(jsonVector.getSize());
-        for (int rowId = 0; rowId < jsonVector.getSize(); rowId++) {
-          String json = jsonVector.isNullAt(rowId) ? "{}" : jsonVector.getString(rowId);
-          rows.add(DefaultJsonRow.fromJsonPermissively(json, parseJson.getOutputSchema()));
-        }
-        return DefaultGenericVector.fromList(parseJson.getOutputSchema(), rows);
+        return DefaultJsonBatchParser.parse(jsonVector, parseJson.getOutputSchema());
       } catch (IOException | RuntimeException ignored) {
         return new DefaultConstantVector(parseJson.getOutputSchema(), jsonVector.getSize(), null);
       } finally {
@@ -1052,16 +1049,16 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     ColumnVector visitCoalesce(ScalarExpression coalesce) {
       List<ColumnVector> childResults =
           coalesce.getChildren().stream().map(this::visit).collect(Collectors.toList());
-      return DefaultExpressionUtils.combinationVector(
-          childResults,
-          rowId -> {
-            for (int idx = 0; idx < childResults.size(); idx++) {
-              if (!childResults.get(idx).isNullAt(rowId)) {
-                return idx;
-              }
-            }
-            return 0; // If all are null then any idx suffices
-          });
+      int[] selectedChildren = new int[input.getSize()];
+      for (int rowId = 0; rowId < selectedChildren.length; rowId++) {
+        for (int childIndex = 0; childIndex < childResults.size(); childIndex++) {
+          if (!childResults.get(childIndex).isNullAt(rowId)) {
+            selectedChildren[rowId] = childIndex;
+            break;
+          }
+        }
+      }
+      return DefaultExpressionUtils.combinationVector(childResults, selectedChildren);
     }
 
     @Override

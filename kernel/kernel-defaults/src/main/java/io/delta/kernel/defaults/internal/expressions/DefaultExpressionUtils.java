@@ -30,7 +30,6 @@ import io.delta.kernel.types.*;
 import java.math.BigDecimal;
 import java.util.Comparator;
 import java.util.List;
-import java.util.function.Function;
 import java.util.function.IntPredicate;
 
 /** Utility methods used by the default expression evaluator. */
@@ -72,7 +71,6 @@ public final class DefaultExpressionUtils {
     }
     return Integer.compare(left.length() - leftOffset, right.length() - rightOffset);
   }
-
   public static boolean supportsComparison(DataType type) {
     return type instanceof BooleanType
         || type instanceof ByteType
@@ -155,7 +153,6 @@ public final class DefaultExpressionUtils {
     }
     throw new UnsupportedOperationException("No comparator available for data type: " + type);
   }
-
   /**
    * Utility method that calculates the nullability result from given two vectors. Result is null if
    * at least one side is a null.
@@ -174,9 +171,7 @@ public final class DefaultExpressionUtils {
    * accessors.
    */
   static ColumnVector booleanWrapperVector(
-      ColumnVector childVector,
-      Function<Integer, Boolean> valueAccessor,
-      Function<Integer, Boolean> nullabilityAccessor) {
+      ColumnVector childVector, IntPredicate valueAccessor, IntPredicate nullabilityAccessor) {
 
     return new ColumnVector() {
 
@@ -197,12 +192,12 @@ public final class DefaultExpressionUtils {
 
       @Override
       public boolean isNullAt(int rowId) {
-        return nullabilityAccessor.apply(rowId);
+        return nullabilityAccessor.test(rowId);
       }
 
       @Override
       public boolean getBoolean(int rowId) {
-        return valueAccessor.apply(rowId);
+        return valueAccessor.test(rowId);
       }
     };
   }
@@ -327,25 +322,22 @@ public final class DefaultExpressionUtils {
   }
 
   /**
-   * Combines a list of column vectors into one column vector based on the resolution of idxToReturn
+   * Combines a list of column vectors using the precomputed selected child for each row.
    *
    * @param vectors List of ColumnVectors of the same data type with length >= 1
-   * @param idxToReturn Function that takes in a rowId and returns the index of the column vector to
-   *     use as the return value
+   * @param selectedChildren index of the vector to use for each row
    */
-  static ColumnVector combinationVector(
-      List<ColumnVector> vectors, Function<Integer, Integer> idxToReturn) {
+  static ColumnVector combinationVector(List<ColumnVector> vectors, int[] selectedChildren) {
     return new AbstractDelegatingColumnVector(
         vectors.get(0).getSize(), vectors.get(0).getDataType()) {
-      // Store the last lookup value to avoid multiple looks up for same rowId.
-      // The general pattern is call `isNullAt(rowId)` followed by `getBoolean(rowId)` or
-      // some other value accessor. So the cache of one value is enough.
-      private int lastLookupRowId = -1;
-      private ColumnVector lastLookupVector = null;
+      private boolean closed;
 
       @Override
       public void close() {
-        Utils.closeCloseables(vectors.toArray(new ColumnVector[0]));
+        if (!closed) {
+          closed = true;
+          Utils.closeCloseables(vectors.toArray(new ColumnVector[0]));
+        }
       }
 
       @Override
@@ -359,12 +351,7 @@ public final class DefaultExpressionUtils {
       }
 
       private ColumnVector getVector(int rowId) {
-        if (rowId == lastLookupRowId) {
-          return lastLookupVector;
-        }
-        lastLookupRowId = rowId;
-        lastLookupVector = vectors.get(idxToReturn.apply(rowId));
-        return lastLookupVector;
+        return vectors.get(selectedChildren[rowId]);
       }
     };
   }

@@ -17,28 +17,18 @@ package io.delta.kernel.defaults.internal.expressions
 
 import java.math.{BigDecimal => JBigDecimal}
 
-import io.delta.kernel.data.{ColumnarBatch, ColumnVector}
-import io.delta.kernel.defaults.internal.data.DefaultColumnarBatch
-import io.delta.kernel.defaults.internal.data.vector.DefaultGenericVector
+import io.delta.kernel.data.ColumnarBatch
+import io.delta.kernel.defaults.internal.data.vector.DefaultStructVector
 import io.delta.kernel.expressions.{Column, Expression, ParseJson}
 import io.delta.kernel.types._
 
 import org.scalatest.funsuite.AnyFunSuite
 
-class ParseJsonExpressionEvaluatorSuite extends AnyFunSuite {
+class ParseJsonExpressionEvaluatorSuite extends AnyFunSuite with ExpressionSuiteBase {
   private val inputSchema = new StructType().add("json", StringType.STRING, true)
 
   private def jsonBatch(values: Seq[String]): ColumnarBatch =
-    new DefaultColumnarBatch(
-      values.size,
-      inputSchema,
-      Array(DefaultGenericVector.fromArray(StringType.STRING, values.toArray[AnyRef])))
-
-  private def evaluate(
-      input: ColumnarBatch,
-      expression: Expression,
-      outputType: DataType): ColumnVector =
-    new DefaultExpressionEvaluator(input.getSchema, expression, outputType).eval(input)
+    batch(inputSchema, values.size, vector(StringType.STRING, values: _*))
 
   test("parses Kernel-native primitive and complex values") {
     val nestedType = new StructType().add("x", IntegerType.INTEGER, true)
@@ -58,6 +48,8 @@ class ParseJsonExpressionEvaluatorSuite extends AnyFunSuite {
     val result = evaluate(input, new ParseJson(new Column("json"), outputSchema), outputSchema)
 
     assert(result.getDataType == outputSchema)
+    assert(result.isInstanceOf[DefaultStructVector])
+    assert(result.getChild(2).isInstanceOf[DefaultStructVector])
     assert((0 until 3).forall(rowId => !result.isNullAt(rowId)))
     assert(result.getChild(0).getLong(0) == 1L)
     assert(result.getChild(1).getString(0) == "one")
@@ -80,7 +72,10 @@ class ParseJsonExpressionEvaluatorSuite extends AnyFunSuite {
 
     assert(result.getDataType == outputSchema)
     assert(result.getSize == 0)
+    assert(result.isInstanceOf[DefaultStructVector])
     assert(result.getChild(0).getSize == 0)
+    result.close()
+    result.close()
   }
 
   Seq[(String, StructType, Seq[String])](
@@ -136,12 +131,14 @@ class ParseJsonExpressionEvaluatorSuite extends AnyFunSuite {
       """{"stats":{"date":"bad","timestamp":"bad","timestampNtz":"bad",""" +
         """"decimal":"999999.00","id":2}}""",
       """{"stats":{"date":"1970-01-03","timestamp":"1970-01-01T00:00:03Z",""" +
-        """"timestampNtz":"1970-01-01T00:00:04","decimal":"12.345","id":3}}"""))
+        """"timestampNtz":"1970-01-01T00:00:04","decimal":"12.345","id":3}}""",
+      """{"stats":{"date":"1970-01-04","timestamp":"+48690-07-02T22:50:38.211Z",""" +
+        """"timestampNtz":"1970-01-01T00:00:05","decimal":"13.50","id":4}}"""))
 
     val result = evaluate(input, new ParseJson(new Column("json"), outputSchema), outputSchema)
     val stats = result.getChild(0)
 
-    assert((0 until 3).forall(rowId => !result.isNullAt(rowId) && !stats.isNullAt(rowId)))
+    assert((0 until 4).forall(rowId => !result.isNullAt(rowId) && !stats.isNullAt(rowId)))
     assert(stats.getChild(0).getInt(0) == 1)
     assert(stats.getChild(1).getLong(0) == 1000000L)
     assert(stats.getChild(2).getLong(0) == 2000000L)
@@ -152,6 +149,79 @@ class ParseJsonExpressionEvaluatorSuite extends AnyFunSuite {
     assert(stats.getChild(1).getLong(2) == 3000000L)
     assert(stats.getChild(2).getLong(2) == 4000000L)
     assert(stats.getChild(3).getDecimal(2) == new JBigDecimal("12.35"))
+    assert(stats.getChild(0).getInt(3) == 3)
+    assert(stats.getChild(1).isNullAt(3))
+    assert(stats.getChild(2).getLong(3) == 5000000L)
+    assert(stats.getChild(3).getDecimal(3) == new JBigDecimal("13.50"))
+    assert(stats.getChild(4).getLong(3) == 4L)
+    result.close()
+    result.close()
+  }
+
+  test("duplicate schema names retain the existing tree-decoder fallback") {
+    val outputSchema = new StructType()
+      .add("value", IntegerType.INTEGER, true)
+      .add("value", IntegerType.INTEGER, true)
+    val result = evaluate(
+      jsonBatch(Seq("""{"value":7}""")),
+      new ParseJson(new Column("json"), outputSchema),
+      outputSchema)
+
+    assert(result.getChild(0).getInt(0) == 7)
+    assert(result.getChild(1).getInt(0) == 7)
+    result.close()
+  }
+
+  Seq[(String, DataType, String)](
+    ("array", new ArrayType(LongType.LONG, true), """[1,"bad"]"""),
+    ("map", new MapType(StringType.STRING, LongType.LONG, true), """{"a":"bad"}""")).foreach {
+    case (name, fieldType, value) =>
+      test(s"invalid $name children fail the containing value") {
+        val outputSchema = new StructType().add("value", fieldType, true)
+        val result = evaluate(
+          jsonBatch(Seq(s"""{"value":$value}""")),
+          new ParseJson(new Column("json"), outputSchema),
+          outputSchema)
+
+        assert(result.isNullAt(0))
+        assert(result.getChild(0).isNullAt(0))
+        result.close()
+      }
+  }
+
+  test("streaming parser preserves rightmost duplicate fields") {
+    val nested = new StructType().add("x", IntegerType.INTEGER, false)
+    val outputSchema = new StructType()
+      .add("value", IntegerType.INTEGER, false)
+      .add("nested", nested, false)
+    val valid = evaluate(
+      jsonBatch(Seq(
+        """{"value":"bad","value":7,"nested":{"x":"bad"},"nested":{"x":2}}""")),
+      new ParseJson(new Column("json"), outputSchema),
+      outputSchema)
+
+    assert(valid.getChild(0).getInt(0) == 7)
+    assert(valid.getChild(1).getChild(0).getInt(0) == 2)
+    valid.close()
+
+    val invalid = evaluate(
+      jsonBatch(Seq("""{"value":7,"value":"bad","nested":{"x":2}}""")),
+      new ParseJson(new Column("json"), outputSchema),
+      outputSchema)
+    assert(invalid.isNullAt(0))
+    invalid.close()
+  }
+
+  test("streaming parser isolates JSON row boundaries") {
+    val outputSchema = new StructType().add("value", IntegerType.INTEGER, true)
+    val result = evaluate(
+      jsonBatch(Seq(
+        """{"value":1}],[{"value":2}""",
+        """{"value":3}""")),
+      new ParseJson(new Column("json"), outputSchema),
+      outputSchema)
+
+    assert((0 until result.getSize).forall(result.isNullAt))
     result.close()
   }
 
