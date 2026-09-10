@@ -101,7 +101,9 @@ public class PartitionUtils {
             wrapEngineException(
                 () ->
                     expressionHandler.getEvaluator(
-                        finalDataBatch.getSchema(), partitionValue, structField.getDataType()),
+                        finalDataBatch.getSchema(),
+                        new StructExpression(Collections.singletonList(partitionValue)),
+                        new StructType(Collections.singletonList(structField))),
                 "Get the expression evaluator for partition column %s with type=%s and value=%s",
                 physicalName,
                 structField.getDataType(),
@@ -109,7 +111,11 @@ public class PartitionUtils {
 
         ColumnVector partitionVector =
             wrapEngineException(
-                () -> evaluator.eval(finalDataBatch),
+                () ->
+                    evaluator
+                        .eval(new FilteredColumnarBatch(finalDataBatch, Optional.empty()))
+                        .getData()
+                        .getColumnVector(0),
                 "Evaluating the partition value expression %s",
                 partitionValue);
         dataBatch = dataBatch.withNewColumn(colIdx, structField, partitionVector);

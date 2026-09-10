@@ -21,8 +21,8 @@ import scala.jdk.CollectionConverters._
 
 import io.delta.kernel.data.Row
 import io.delta.kernel.internal.data.GenericRow
-import io.delta.kernel.internal.plans.PlanBuilder
 import io.delta.kernel.internal.util.VectorUtils
+import io.delta.kernel.plans.{Project, Values}
 import io.delta.kernel.types.{ArrayType, IntegerType, StringType, StructType}
 
 import org.scalatest.funsuite.AnyFunSuite
@@ -48,20 +48,25 @@ class ToJsonPlanSuite extends AnyFunSuite with PlanExecutionSuiteBase {
         IntegerType.INTEGER),
       row(nestedType, IntegerJ.valueOf(7)))
     val input = Seq(row(inputSchema, value), row(inputSchema, null))
-    val plan = PlanBuilder.values(inputSchema, input.asJava)
-      .project(struct(toJson(col("value"))), outputSchema)
+    val plan = new Project(
+      new Values(inputSchema, input.asJava),
+      struct(toJson(col("value"))),
+      outputSchema)
 
-    checkRows(plan, Seq(
-      row(outputSchema, "{\"values\":[1,null,2],\"nested\":{\"id\":7}}"),
-      row(outputSchema, null)))
+    checkRows(
+      plan,
+      Seq(
+        row(outputSchema, "{\"values\":[1,null,2],\"nested\":{\"id\":7}}"),
+        row(outputSchema, null)))
   }
 
   test("reject TO_JSON over non-struct input while binding the plan") {
     val schema = new StructType().add("value", IntegerType.INTEGER)
-    val input = PlanBuilder.values(schema, Seq.empty[Row].asJava)
+    val input = new Values(schema, Seq.empty[Row].asJava)
+    val plan = new Project(input, struct(toJson(col("value"))), outputSchema)
 
     val error = intercept[UnsupportedOperationException] {
-      input.project(struct(toJson(col("value"))), outputSchema)
+      checkRows(plan, Seq.empty)
     }
     assert(error.getMessage.contains("requires exactly one struct input"))
   }

@@ -23,6 +23,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -69,6 +70,25 @@ public final class StructPatch implements Expression {
 
     public boolean isOptional() {
       return optional;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (this == other) {
+        return true;
+      }
+      if (!(other instanceof FieldTransform)) {
+        return false;
+      }
+      FieldTransform that = (FieldTransform) other;
+      return replace == that.replace
+          && optional == that.optional
+          && expressions.equals(that.expressions);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(expressions, replace, optional);
     }
   }
 
@@ -120,6 +140,27 @@ public final class StructPatch implements Expression {
   @Override
   public List<Expression> getChildren() {
     return children;
+  }
+
+  @Override
+  public boolean equals(Object other) {
+    if (this == other) {
+      return true;
+    }
+    if (!(other instanceof StructPatch)) {
+      return false;
+    }
+    StructPatch that = (StructPatch) other;
+    return inputPath.equals(that.inputPath)
+        && fieldTransforms.equals(that.fieldTransforms)
+        && prependedFields.equals(that.prependedFields)
+        && appendedFields.equals(that.appendedFields);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(
+        StructPatch.class, inputPath, fieldTransforms, prependedFields, appendedFields);
   }
 
   private static List<Expression> immutableExpressions(List<Expression> expressions, String name) {

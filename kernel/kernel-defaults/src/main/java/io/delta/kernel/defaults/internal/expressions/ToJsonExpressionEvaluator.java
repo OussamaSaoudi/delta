@@ -42,8 +42,7 @@ final class ToJsonExpressionEvaluator implements ExpressionKernel {
   public DataType resolve(
       ScalarExpression expression, List<DataType> childTypes, DataType expectedType) {
     if (childTypes.size() != 1 || !(childTypes.get(0) instanceof StructType)) {
-      throw unsupportedExpressionException(
-          expression, "TO_JSON requires exactly one struct input");
+      throw unsupportedExpressionException(expression, "TO_JSON requires exactly one struct input");
     }
     if (expectedType != null && !StringType.STRING.equals(expectedType)) {
       throw unsupportedExpressionException(
@@ -54,10 +53,7 @@ final class ToJsonExpressionEvaluator implements ExpressionKernel {
 
   @Override
   public ColumnVector eval(
-      ScalarExpression expression,
-      List<ColumnVector> children,
-      DataType outputType,
-      int rowCount) {
+      ScalarExpression expression, List<ColumnVector> children, DataType outputType, int rowCount) {
     ColumnVector input = children.get(0);
     checkArgument(input.getDataType() instanceof StructType, "TO_JSON requires a struct input");
     checkArgument(input.getSize() == rowCount, "TO_JSON input size mismatch");

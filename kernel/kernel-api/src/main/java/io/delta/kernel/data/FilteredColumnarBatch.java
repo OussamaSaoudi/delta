@@ -38,19 +38,35 @@ import java.util.Optional;
  */
 @Evolving
 public class FilteredColumnarBatch {
+  /** How long the data reachable from a returned batch remains valid. */
+  public enum Lifetime {
+    /** Valid only until the producing iterator or evaluator advances or closes. */
+    BORROWED,
+
+    /** Immutable, concurrently readable, and valid while reachable. */
+    OWNED
+  }
+
   private final ColumnarBatch data;
   private final Optional<ColumnVector> selectionVector;
   private final Optional<String> filePath;
   private final Optional<Integer> preComputedNumSelectedRows;
+  private final Lifetime lifetime;
 
   // TODO: use static factory for constructors
   public FilteredColumnarBatch(ColumnarBatch data, Optional<ColumnVector> selectionVector) {
+    this(data, selectionVector, Lifetime.BORROWED);
+  }
+
+  public FilteredColumnarBatch(
+      ColumnarBatch data, Optional<ColumnVector> selectionVector, Lifetime lifetime) {
     this.data = requireNonNull(data, "data is null");
     this.selectionVector = requireNonNull(selectionVector, "selectionVector is null");
     validateSelectionVector(data, selectionVector);
     this.filePath = Optional.empty();
     this.preComputedNumSelectedRows =
         !selectionVector.isPresent() ? Optional.of(data.getSize()) : Optional.empty();
+    this.lifetime = requireNonNull(lifetime, "lifetime is null");
   }
 
   public FilteredColumnarBatch(
@@ -58,6 +74,15 @@ public class FilteredColumnarBatch {
       Optional<ColumnVector> selectionVector,
       String filePath,
       int preComputedNumSelectedRows) {
+    this(data, selectionVector, filePath, preComputedNumSelectedRows, Lifetime.BORROWED);
+  }
+
+  public FilteredColumnarBatch(
+      ColumnarBatch data,
+      Optional<ColumnVector> selectionVector,
+      String filePath,
+      int preComputedNumSelectedRows,
+      Lifetime lifetime) {
     this.data = requireNonNull(data, "data is null");
     this.selectionVector = requireNonNull(selectionVector, "selectionVector is null");
     validateSelectionVector(data, selectionVector);
@@ -71,19 +96,22 @@ public class FilteredColumnarBatch {
             + "must be no less than 0 and no larger than batch size.");
     this.filePath = Optional.of(requireNonNull(filePath, "filePath is null"));
     this.preComputedNumSelectedRows = Optional.of(preComputedNumSelectedRows);
+    this.lifetime = requireNonNull(lifetime, "lifetime is null");
   }
 
   private FilteredColumnarBatch(
       ColumnarBatch data,
       Optional<ColumnVector> selectionVector,
       Optional<String> filePath,
-      Optional<Integer> preComputedNumSelectedRows) {
+      Optional<Integer> preComputedNumSelectedRows,
+      Lifetime lifetime) {
     this.data = requireNonNull(data, "data is null");
     this.selectionVector = requireNonNull(selectionVector, "selectionVector is null");
     validateSelectionVector(data, selectionVector);
     this.filePath = requireNonNull(filePath, "filePath is null");
     this.preComputedNumSelectedRows =
         requireNonNull(preComputedNumSelectedRows, "preComputedNumSelectedRows is null");
+    this.lifetime = requireNonNull(lifetime, "lifetime is null");
   }
 
   /**
@@ -119,6 +147,11 @@ public class FilteredColumnarBatch {
     return selectionVector;
   }
 
+  /** Returns the lifetime of this batch and all data reachable from it. */
+  public Lifetime getLifetime() {
+    return lifetime;
+  }
+
   /** Returns whether the row at {@code rowId} is selected by this batch. */
   public boolean isSelected(int rowId) {
     checkArgument(rowId >= 0 && rowId < data.getSize(), "Invalid rowId: %s", rowId);
@@ -140,7 +173,49 @@ public class FilteredColumnarBatch {
         replacement.getSize(),
         data.getSize());
     return new FilteredColumnarBatch(
-        replacement, selectionVector, filePath, preComputedNumSelectedRows);
+        replacement, selectionVector, filePath, preComputedNumSelectedRows, lifetime);
+  }
+
+  /** Returns a replacement-data batch with an explicitly declared result lifetime. */
+  public FilteredColumnarBatch withData(ColumnarBatch replacement, Lifetime resultLifetime) {
+    requireNonNull(replacement, "replacement is null");
+    checkArgument(
+        replacement.getSize() == data.getSize(),
+        "Replacement batch size %s does not match existing batch size %s",
+        replacement.getSize(),
+        data.getSize());
+    return new FilteredColumnarBatch(
+        replacement,
+        selectionVector,
+        filePath,
+        preComputedNumSelectedRows,
+        requireNonNull(resultLifetime, "resultLifetime is null"));
+  }
+
+  /**
+   * Returns a batch over owned replacements while preserving this batch's file and row-count
+   * metadata.
+   *
+   * <p>This is the retention counterpart to {@link #withData(ColumnarBatch, Lifetime)}. Both the
+   * physical rows and selection are replaced so an owned copy preserves the original batch shape
+   * without borrowing either vector.
+   */
+  public FilteredColumnarBatch withDataAndSelection(
+      ColumnarBatch replacement,
+      Optional<ColumnVector> replacementSelection,
+      Lifetime resultLifetime) {
+    requireNonNull(replacement, "replacement is null");
+    checkArgument(
+        replacement.getSize() == data.getSize(),
+        "Replacement batch size %s does not match existing batch size %s",
+        replacement.getSize(),
+        data.getSize());
+    return new FilteredColumnarBatch(
+        replacement,
+        requireNonNull(replacementSelection, "replacementSelection is null"),
+        filePath,
+        preComputedNumSelectedRows,
+        requireNonNull(resultLifetime, "resultLifetime is null"));
   }
 
   /**
@@ -151,10 +226,21 @@ public class FilteredColumnarBatch {
    * borrowed, lazy view; closing it does not close either input vector.
    */
   public FilteredColumnarBatch withSelectionVector(ColumnVector additionalSelectionVector) {
+    return withSelectionVector(additionalSelectionVector, Lifetime.BORROWED);
+  }
+
+  /** Returns an intersected selection with an explicitly declared result lifetime. */
+  public FilteredColumnarBatch withSelectionVector(
+      ColumnVector additionalSelectionVector, Lifetime resultLifetime) {
     requireNonNull(additionalSelectionVector, "additionalSelectionVector is null");
     validateSelectionVector(data, Optional.of(additionalSelectionVector));
     ColumnVector combined = new CombinedSelectionVector(selectionVector, additionalSelectionVector);
-    return new FilteredColumnarBatch(data, Optional.of(combined), filePath, Optional.empty());
+    return new FilteredColumnarBatch(
+        data,
+        Optional.of(combined),
+        filePath,
+        Optional.empty(),
+        requireNonNull(resultLifetime, "resultLifetime is null"));
   }
 
   /**

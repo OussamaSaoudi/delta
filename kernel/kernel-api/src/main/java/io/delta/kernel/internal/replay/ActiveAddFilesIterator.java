@@ -31,13 +31,14 @@ import io.delta.kernel.data.FilteredColumnarBatch;
 import io.delta.kernel.engine.Engine;
 import io.delta.kernel.expressions.ExpressionEvaluator;
 import io.delta.kernel.expressions.Literal;
+import io.delta.kernel.expressions.StructExpression;
 import io.delta.kernel.internal.InternalScanFileUtils;
 import io.delta.kernel.internal.actions.DeletionVectorDescriptor;
 import io.delta.kernel.internal.fs.Path;
 import io.delta.kernel.internal.metrics.ScanMetrics;
 import io.delta.kernel.internal.replay.LogReplayUtils.UniqueFileActionTuple;
 import io.delta.kernel.internal.util.Utils;
-import io.delta.kernel.types.StringType;
+import io.delta.kernel.types.StructType;
 import io.delta.kernel.utils.CloseableIterator;
 import java.io.IOException;
 import java.net.URI;
@@ -119,7 +120,7 @@ public class ActiveAddFilesIterator implements CloseableIterator<FilteredColumna
   @Override
   public void close() throws IOException {
     closed = true;
-    Utils.closeCloseables(iter);
+    Utils.closeCloseables(iter, tableRootVectorGenerator);
 
     // Log the metrics of the log replay of actions that are consumed so far. If the iterator
     // is closed before consuming all the actions, the metrics will be partial.
@@ -254,13 +255,21 @@ public class ActiveAddFilesIterator implements CloseableIterator<FilteredColumna
                       .getExpressionHandler()
                       .getEvaluator(
                           finalScanAddFiles.getSchema(),
-                          Literal.ofString(tableRoot.toUri().toString()),
-                          StringType.STRING),
+                          new StructExpression(
+                              Collections.singletonList(
+                                  Literal.ofString(tableRoot.toUri().toString()))),
+                          new StructType(
+                              Collections.singletonList(
+                                  InternalScanFileUtils.TABLE_ROOT_STRUCT_FIELD))),
               "Get the expression evaluator for the table root");
     }
     ColumnVector tableRootVector =
         wrapEngineException(
-            () -> tableRootVectorGenerator.eval(finalScanAddFiles),
+            () ->
+                tableRootVectorGenerator
+                    .eval(new FilteredColumnarBatch(finalScanAddFiles, Optional.empty()))
+                    .getData()
+                    .getColumnVector(0),
             "Evaluating the table root expression");
     scanAddFiles =
         scanAddFiles.withNewColumn(

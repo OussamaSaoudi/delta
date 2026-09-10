@@ -20,6 +20,7 @@ import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.annotation.Evolving;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Converts a {@code map<string, string>} expression into a struct supplied as the evaluator's
@@ -53,5 +54,17 @@ public final class MapToStruct implements Expression {
   @Override
   public String toString() {
     return String.format("MAP_TO_STRUCT(%s)", mapExpression);
+  }
+
+  @Override
+  public boolean equals(Object other) {
+    return this == other
+        || (other instanceof MapToStruct
+            && mapExpression.equals(((MapToStruct) other).mapExpression));
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(MapToStruct.class, mapExpression);
   }
 }

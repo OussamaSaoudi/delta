@@ -233,6 +233,7 @@ lazy val connectClient = (project in file("spark-connect/client"))
         // (io.delta.kernel.defaults.engine.DefaultEngine), so add the packaged kernel jars.
         val kernelJars = Seq(
           (kernelApi / Compile / packageBin).value,
+          (kernelExec / Compile / packageBin).value,
           (kernelDefaults / Compile / packageBin).value)
         // Create symlinks for all dependencies (filter to only JAR files)
         (serverClassPath.map(_.data).filter(_.isFile) ++ kernelJars).distinct.foreach { jarFile =>
@@ -492,6 +493,7 @@ lazy val sparkV2 = {
     case Some(v) => Seq(
       libraryDependencies ++= Seq(
         "io.delta" % "delta-kernel-api" % v,
+        "io.delta" % "delta-kernel-exec" % v,
         "io.delta" % "delta-kernel-defaults" % v,
         "io.delta" % "delta-kernel-unitycatalog" % v,
         // sparkV2 tests depend on UC test helpers (InMemoryUCClient,
@@ -645,6 +647,7 @@ lazy val spark = (project in file("spark-unified"))
 
       val kernelDeps = Seq(
         kernelDependencyNode("delta-kernel-api"),
+        kernelDependencyNode("delta-kernel-exec"),
         kernelDependencyNode("delta-kernel-defaults"),
         kernelDependencyNode("delta-kernel-unitycatalog")
       )
@@ -1135,8 +1138,46 @@ lazy val kernelApi = (project in file("kernel/kernel-api"))
     unidocSourceFilePatterns := Seq(SourceFilePattern("io/delta/kernel/")),
   ).configureUnidoc(docTitle = "Delta Kernel")
 
+lazy val kernelExec = (project in file("kernel/kernel-exec"))
+  .enablePlugins(ScalafmtPlugin)
+  .settings(
+    name := "delta-kernel-exec",
+    commonSettings,
+    scalaStyleSettings,
+    javaOnlyReleaseSettings,
+    javafmtCheckSettings,
+    scalafmtCheckSettings,
+
+    Compile / classDirectory := target.value / "scala-2.13" / "kernel-exec-classes",
+
+    Test / javaOptions ++= Seq("-ea"),
+
+    libraryDependencies ++= Seq(
+      "com.google.protobuf" % "protobuf-java" % protoVersion,
+      "org.scalatest" %% "scalatest" % scalaTestVersion % "test"
+    ),
+    PB.protocVersion := protoVersion,
+    Compile / PB.targets := Seq(PB.gens.java -> (Compile / sourceManaged).value),
+
+    // Generated protobuf Java is compiled but not formatted or checked as handwritten source.
+    Compile / javafmt / sourceDirectories := (Compile / unmanagedSourceDirectories).value,
+
+    // Compile only against the shaded kernel-api JAR.
+    Compile / unmanagedJars += (kernelApi / Compile / packageBin).value,
+    Test / unmanagedJars += (kernelApi / Compile / packageBin).value,
+
+    Compile / compile := (Compile / compile).dependsOn(kernelApi / Compile / packageBin).value,
+    Test / test := (Test / test).dependsOn(kernelApi / Compile / packageBin).value,
+    Test / unmanagedJars += (kernelApi / Test / packageBin).value,
+
+    MultiShardMultiJVMTestParallelization.settings,
+    javaCheckstyleSettings("dev/kernel-checkstyle.xml", checkManagedSources = false),
+    unidocSourceFilePatterns += SourceFilePattern("io/delta/kernel/"),
+  ).configureUnidoc(docTitle = "Delta Kernel Execution")
+
 lazy val kernelDefaults = (project in file("kernel/kernel-defaults"))
   .enablePlugins(ScalafmtPlugin)
+  .dependsOn(kernelExec)
   .dependsOn(storage)
   .dependsOn(storage % "test->test") // Required for InMemoryCommitCoordinator for tests
   .dependsOn(goldenTables % "test")
@@ -1797,7 +1838,7 @@ lazy val icebergGroup = {
 }
 
 lazy val kernelGroup = project
-  .aggregate(kernelApi, kernelDefaults, kernelBenchmarks)
+  .aggregate(kernelApi, kernelExec, kernelDefaults, kernelBenchmarks)
   .settings(
     // crossScalaVersions must be set to Nil on the aggregating project
     crossScalaVersions := Nil,
@@ -1805,6 +1846,7 @@ lazy val kernelGroup = project
     publish / skip := true,
     unidocSourceFilePatterns := {
       (kernelApi / unidocSourceFilePatterns).value.scopeToProject(kernelApi) ++
+      (kernelExec / unidocSourceFilePatterns).value.scopeToProject(kernelExec) ++
       (kernelDefaults / unidocSourceFilePatterns).value.scopeToProject(kernelDefaults)
     }
   ).configureUnidoc(docTitle = "Delta Kernel")

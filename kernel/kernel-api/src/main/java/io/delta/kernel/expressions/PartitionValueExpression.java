@@ -22,6 +22,7 @@ import io.delta.kernel.annotation.Evolving;
 import io.delta.kernel.types.DataType;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Expression to decode the serialized partition value into partition type value according the <a
@@ -75,5 +76,23 @@ public class PartitionValueExpression implements Expression {
   @Override
   public String toString() {
     return format("partition_value(%s, %s)", serializedPartitionValue, partitionValueType);
+  }
+
+  @Override
+  public boolean equals(Object other) {
+    if (this == other) {
+      return true;
+    }
+    if (other == null || getClass() != other.getClass()) {
+      return false;
+    }
+    PartitionValueExpression that = (PartitionValueExpression) other;
+    return partitionValueType.equals(that.partitionValueType)
+        && serializedPartitionValue.equals(that.serializedPartitionValue);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(getClass(), partitionValueType, serializedPartitionValue);
   }
 }

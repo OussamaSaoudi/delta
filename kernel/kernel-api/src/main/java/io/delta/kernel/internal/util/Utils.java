@@ -91,30 +91,35 @@ public class Utils {
 
   /**
    * Close the given one or more {@link AutoCloseable}s. {@link AutoCloseable#close()} will be
-   * called on all given non-null closeables. Will throw unchecked {@link RuntimeException} if an
-   * error occurs while closing. If multiple closeables causes exceptions in closing, the exceptions
-   * will be added as suppressed to the main exception that is thrown.
+   * called on all given non-null closeables. The first failure is thrown after every close is
+   * attempted; later failures are added as suppressed exceptions.
    *
    * @param closeables
    */
   public static void closeCloseables(AutoCloseable... closeables) {
-    RuntimeException exception = null;
+    Throwable failure = null;
     for (AutoCloseable closeable : closeables) {
       if (closeable == null) {
         continue;
       }
       try {
         closeable.close();
-      } catch (Exception ex) {
-        if (exception == null) {
-          exception = new RuntimeException(ex);
-        } else {
-          exception.addSuppressed(ex);
+      } catch (Throwable closeFailure) {
+        if (failure == null) {
+          failure = closeFailure;
+        } else if (closeFailure != failure) {
+          failure.addSuppressed(closeFailure);
         }
       }
     }
-    if (exception != null) {
-      throw exception;
+    if (failure instanceof RuntimeException) {
+      throw (RuntimeException) failure;
+    }
+    if (failure instanceof Error) {
+      throw (Error) failure;
+    }
+    if (failure != null) {
+      throw new RuntimeException(failure);
     }
   }
 

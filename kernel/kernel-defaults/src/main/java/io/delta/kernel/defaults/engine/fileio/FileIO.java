@@ -42,6 +42,27 @@ public interface FileIO {
   CloseableIterator<FileStatus> listFrom(String filePath) throws IOException;
 
   /**
+   * Recursively list files whose fully qualified paths are lexicographically greater than the given
+   * path, using unsigned UTF-8 byte ordering.
+   *
+   * <p>A path ending in {@code /} is treated as a directory and lists all files below it.
+   * Otherwise, the listing is rooted at the path's parent directory. Results must be strictly
+   * greater than the input path and sorted by full path.
+   *
+   * <p>The default preserves compatibility with existing {@link FileIO} implementations. File IO
+   * implementations used for plan-based execution must override it.
+   *
+   * @param filePath Fully qualified file offset or directory path
+   * @return Closeable iterator of recursively listed files. The caller must close the iterator.
+   * @throws FileNotFoundException if the directory to list does not exist
+   * @throws IOException for any other IO error
+   * @throws UnsupportedOperationException if recursive listing is not implemented
+   */
+  default CloseableIterator<FileStatus> listFromRecursively(String filePath) throws IOException {
+    throw new UnsupportedOperationException("Recursive file listing is not supported");
+  }
+
+  /**
    * Get the metadata of the file at the given path.
    *
    * @param path Fully qualified path to the file.
@@ -87,6 +108,24 @@ public interface FileIO {
    * @return {@link OutputFile} instance which can be used to write to the file.
    */
   OutputFile newOutputFile(String path);
+
+  /**
+   * Write raw bytes to a file.
+   *
+   * <p>If {@code overwrite} is false, the implementation must atomically fail instead of replacing
+   * a file that already exists. The default preserves compatibility with existing implementations;
+   * file IO used for plan-based storage execution must override it.
+   *
+   * @param path fully qualified path to write
+   * @param data bytes to write
+   * @param overwrite whether an existing file may be replaced
+   * @throws java.nio.file.FileAlreadyExistsException if the file exists and overwrite is false
+   * @throws IOException for any other I/O error
+   * @throws UnsupportedOperationException if raw byte writes are not implemented
+   */
+  default void writeBytes(String path, byte[] data, boolean overwrite) throws IOException {
+    throw new UnsupportedOperationException("Raw byte writes are not supported");
+  }
 
   /**
    * Delete the file at given path.

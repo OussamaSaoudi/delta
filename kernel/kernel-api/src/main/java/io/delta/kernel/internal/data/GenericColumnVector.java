@@ -21,16 +21,18 @@ import io.delta.kernel.data.*;
 import io.delta.kernel.types.*;
 import java.math.BigDecimal;
 import java.util.List;
-import java.util.stream.Collectors;
 
 /** A generic implementation of {@link ColumnVector} that wraps a list of values. */
 public class GenericColumnVector implements ColumnVector {
   private final List<?> values;
   private final DataType dataType;
+  private final ColumnVector[] children;
 
   public GenericColumnVector(List<?> values, DataType dataType) {
     this.values = values;
     this.dataType = dataType;
+    this.children =
+        dataType instanceof StructType ? new ColumnVector[((StructType) dataType).length()] : null;
   }
 
   @Override
@@ -135,12 +137,13 @@ public class GenericColumnVector implements ColumnVector {
   @Override
   public ColumnVector getChild(int ordinal) {
     checkArgument(dataType instanceof StructType);
-    checkArgument(ordinal < ((StructType) dataType).length());
-
-    DataType childDatatype = ((StructType) dataType).at(ordinal).getDataType();
-    List<?> childValues = extractChildValues(ordinal, childDatatype);
-
-    return new GenericColumnVector(childValues, childDatatype);
+    checkArgument(ordinal >= 0 && ordinal < children.length);
+    if (children[ordinal] == null) {
+      DataType childType = ((StructType) dataType).at(ordinal).getDataType();
+      children[ordinal] =
+          new RowBackedColumnVector(values.size(), childType, ordinal, this::structAt);
+    }
+    return children[ordinal];
   }
 
   private void validateRowId(int rowId) {
@@ -155,78 +158,10 @@ public class GenericColumnVector implements ColumnVector {
     return value;
   }
 
-  private List<?> extractChildValues(int ordinal, DataType childDatatype) {
-    return values.stream()
-        .map(e -> extractChildValue(e, ordinal, childDatatype))
-        .collect(Collectors.toList());
-  }
-
-  private Object extractChildValue(Object element, int ordinal, DataType childDatatype) {
-    // A null struct has null children at every ordinal.
-    if (element == null) {
-      return null;
-    }
-    checkArgument(element instanceof Row);
-    Row row = (Row) element;
-
-    if (row.isNullAt(ordinal)) {
-      return null;
-    }
-
-    return extractTypedValue(row, ordinal, childDatatype);
-  }
-
-  private Object extractTypedValue(Row row, int ordinal, DataType childDatatype) {
-    // Primitive Types
-    if (childDatatype instanceof BooleanType) {
-      return row.getBoolean(ordinal);
-    }
-    if (childDatatype instanceof ByteType) {
-      return row.getByte(ordinal);
-    }
-    if (childDatatype instanceof ShortType) {
-      return row.getShort(ordinal);
-    }
-    if (childDatatype instanceof IntegerType || childDatatype instanceof DateType) {
-      return row.getInt(ordinal);
-    }
-    if (childDatatype instanceof LongType
-        || childDatatype instanceof TimestampType
-        || childDatatype instanceof TimestampNTZType) {
-      return row.getLong(ordinal);
-    }
-    if (childDatatype instanceof FloatType) {
-      return row.getFloat(ordinal);
-    }
-    if (childDatatype instanceof DoubleType) {
-      return row.getDouble(ordinal);
-    }
-
-    // Complex Types
-    if (childDatatype instanceof StringType
-        || childDatatype instanceof GeometryType
-        || childDatatype instanceof GeographyType) {
-      return row.getString(ordinal);
-    }
-    if (childDatatype instanceof BinaryType) {
-      return row.getBinary(ordinal);
-    }
-    if (childDatatype instanceof DecimalType) {
-      return row.getDecimal(ordinal);
-    }
-
-    // Nested Types
-    if (childDatatype instanceof StructType) {
-      return row.getStruct(ordinal);
-    }
-    if (childDatatype instanceof ArrayType) {
-      return row.getArray(ordinal);
-    }
-    if (childDatatype instanceof MapType) {
-      return row.getMap(ordinal);
-    }
-
-    throw new UnsupportedOperationException(
-        String.format("Unsupported data type: %s", childDatatype.getClass().getSimpleName()));
+  private Row structAt(int rowId) {
+    validateRowId(rowId);
+    Object value = values.get(rowId);
+    checkArgument(value == null || value instanceof Row);
+    return (Row) value;
   }
 }

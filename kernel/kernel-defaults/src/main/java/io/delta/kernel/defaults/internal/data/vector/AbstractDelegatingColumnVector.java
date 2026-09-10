@@ -136,7 +136,9 @@ public abstract class AbstractDelegatingColumnVector implements ColumnVector {
   }
 
   protected void checkValidRowId(int rowId) {
-    checkArgument(rowId >= 0 && rowId < size, "Invalid rowId %s for size %s", rowId, size);
+    if (rowId < 0 || rowId >= size) {
+      throw new IllegalArgumentException("Invalid rowId " + rowId + " for size " + size);
+    }
   }
 
   private ColumnVector delegate(int rowId) {

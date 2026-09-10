@@ -19,28 +19,43 @@ import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.annotation.Evolving;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * An engine-defined predicate whose semantics are opaque to Kernel.
  *
- * <p>The default engine rejects opaque predicates. Engines may use this node to preserve a
- * predicate name and its children while routing the predicate to an engine-specific handler.
+ * <p>The default engine rejects opaque predicates. Engine implementations provide a structural
+ * semantic key that completely identifies their predicate's behavior.
  */
 @Evolving
-public final class OpaquePredicate extends Predicate {
-  private final String opaqueName;
-
-  public OpaquePredicate(String name, List<Expression> children) {
+public abstract class OpaquePredicate extends Predicate {
+  protected OpaquePredicate(List<Expression> children) {
     super("OPAQUE_PREDICATE", requireNonNull(children, "children are null"));
-    this.opaqueName = requireNonNull(name, "name is null");
   }
 
-  public String getOpaqueName() {
-    return opaqueName;
-  }
+  /** Engine-owned, immutable key with structural equality for this predicate's full semantics. */
+  protected abstract Object semanticKey();
 
   @Override
   public String toString() {
-    return String.format("OpaquePredicate(%s)", opaqueName);
+    return String.format("OpaquePredicate(%s)", getClass().getName());
+  }
+
+  @Override
+  public final boolean equals(Object other) {
+    if (this == other) {
+      return true;
+    }
+    if (other == null || getClass() != other.getClass()) {
+      return false;
+    }
+    OpaquePredicate that = (OpaquePredicate) other;
+    return Objects.equals(semanticKey(), that.semanticKey())
+        && getChildren().equals(that.getChildren());
+  }
+
+  @Override
+  public final int hashCode() {
+    return Objects.hash(getClass(), semanticKey(), getChildren());
   }
 }

@@ -508,14 +508,13 @@ class DefaultJsonHandlerSuite extends AnyFunSuite with TestUtils with DefaultVec
     val schema = new StructType()
       .add("required", IntegerType.INTEGER, false)
       .add("optional", StringType.STRING, true)
-      .add("nothing", VoidType.VOID, false)
 
     testJsonParserWithSchema(
-      """{"required": 1, "nothing": null}""",
+      """{"required": 1}""",
       schema,
-      TestRow(1, null, null))
+      TestRow(1, null))
 
-    Seq("""{"nothing": null}""", """{"required": null, "nothing": null}""").foreach {
+    Seq("{}", """{"required": null}""").foreach {
       json =>
         val error = intercept[RuntimeException] {
           jsonHandler.parseJson(singletonStringColumnVector(json), schema, Optional.empty())

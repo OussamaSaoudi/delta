@@ -15,9 +15,5 @@
  */
 package io.delta.kernel.defaults.internal.data;
 
-import io.delta.kernel.data.Row;
-
 /** A row that can return immutable values independent of any column vector lifetime. */
-public interface RetainableRow extends Row {
-  Object retainValue(int ordinal);
-}
+public interface RetainableRow extends io.delta.kernel.internal.data.RetainableRow {}

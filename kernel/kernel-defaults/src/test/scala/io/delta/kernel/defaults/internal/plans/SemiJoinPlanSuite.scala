@@ -20,10 +20,10 @@ import java.lang.{Long => LongJ}
 import scala.jdk.CollectionConverters._
 
 import io.delta.kernel.data.Row
-import io.delta.kernel.expressions.{Column, Literal, Predicate}
+import io.delta.kernel.expressions.{Column, Expression, Literal, Predicate}
 import io.delta.kernel.internal.data.GenericRow
-import io.delta.kernel.internal.plans.PlanBuilder
-import io.delta.kernel.types.{BinaryType, LongType, StringType, StructType}
+import io.delta.kernel.plans.{Filter, PlanNode, SemiJoin, Values}
+import io.delta.kernel.types.{BinaryType, DataType, LongType, StringType, StructType}
 
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -34,96 +34,137 @@ class SemiJoinPlanSuite extends AnyFunSuite with PlanExecutionSuiteBase {
   private val buildSchema = new StructType()
     .add("build_id", LongType.LONG)
     .add("build_tag", StringType.STRING)
-  private val probeKeys = Seq(new Column("id"), new Column("tag")).asJava
-  private val buildKeys = Seq(new Column("build_id"), new Column("build_tag")).asJava
+  private val probeKeys = Seq[Expression](new Column("id"), new Column("tag"))
+  private val buildKeys = Seq[Expression](new Column("build_id"), new Column("build_tag"))
+  private val keyTypes = Seq[DataType](LongType.LONG, StringType.STRING)
 
   private def row(schema: StructType, values: AnyRef*): Row =
     GenericRow.fromValues(schema, values.asJava)
 
-  private def values(schema: StructType, rows: Seq[Row]): PlanBuilder =
-    PlanBuilder.values(schema, rows.asJava)
+  private def values(schema: StructType, rows: Row*): Values =
+    new Values(schema, rows.asJava)
 
-  for ((inverted, expected) <- Seq(
+  private def join(
+      probe: PlanNode,
+      build: PlanNode,
+      probeKeys: Seq[Expression],
+      buildKeys: Seq[Expression],
+      keyTypes: Seq[DataType],
+      inverted: Boolean): SemiJoin =
+    new SemiJoin(
+      probe,
+      build,
+      probeKeys.asJava,
+      buildKeys.asJava,
+      keyTypes.asJava,
+      inverted)
+
+  for (
+    (inverted, expected) <- Seq(
       false -> Seq(1L -> "one", 1L -> null),
-      true -> Seq(2L -> "two", 3L -> "three"))) {
+      true -> Seq(2L -> "two", 3L -> "three"))
+  ) {
     test(s"${if (inverted) "anti" else "semi"} join uses null-safe compound keys") {
-      val probe = values(probeSchema, Seq(
+      val probe = values(
+        probeSchema,
         row(probeSchema, LongJ.valueOf(1), "one"),
         row(probeSchema, LongJ.valueOf(1), null),
         row(probeSchema, LongJ.valueOf(2), "two"),
-        row(probeSchema, LongJ.valueOf(3), "three")))
-      val build = values(buildSchema, Seq(
+        row(probeSchema, LongJ.valueOf(3), "three"))
+      val build = values(
+        buildSchema,
         row(buildSchema, LongJ.valueOf(1), "one"),
-        row(buildSchema, LongJ.valueOf(1), null)))
-      val plan = if (inverted) {
-        probe.antiJoin(build, probeKeys, buildKeys)
-      } else {
-        probe.semiJoin(build, probeKeys, buildKeys)
-      }
+        row(buildSchema, LongJ.valueOf(1), null))
+      val plan = join(probe, build, probeKeys, buildKeys, keyTypes, inverted)
 
-      checkRows(plan, expected.map { case (id, tag) =>
-        row(probeSchema, LongJ.valueOf(id), tag)
-      })
+      checkRows(
+        plan,
+        expected.map { case (id, tag) =>
+          row(probeSchema, LongJ.valueOf(id), tag)
+        })
     }
   }
 
   test("honor selections on both inputs") {
-    val probe = values(probeSchema, Seq(
-      row(probeSchema, LongJ.valueOf(1), "one"),
-      row(probeSchema, LongJ.valueOf(2), "two")))
-      .filter(new Predicate(">", new Column("id"), Literal.ofLong(1)))
-    val build = values(buildSchema, Seq(
-      row(buildSchema, LongJ.valueOf(1), "one"),
-      row(buildSchema, LongJ.valueOf(2), "two")))
-      .filter(new Predicate(">", new Column("build_id"), Literal.ofLong(1)))
+    val probe = new Filter(
+      values(
+        probeSchema,
+        row(probeSchema, LongJ.valueOf(1), "one"),
+        row(probeSchema, LongJ.valueOf(2), "two")),
+      new Predicate(">", new Column("id"), Literal.ofLong(1)))
+    val build = new Filter(
+      values(
+        buildSchema,
+        row(buildSchema, LongJ.valueOf(1), "one"),
+        row(buildSchema, LongJ.valueOf(2), "two")),
+      new Predicate(">", new Column("build_id"), Literal.ofLong(1)))
 
     checkRows(
-      probe.semiJoin(build, probeKeys, buildKeys),
+      join(probe, build, probeKeys, buildKeys, keyTypes, inverted = false),
       Seq(row(probeSchema, LongJ.valueOf(2), "two")))
   }
 
-  for ((inverted, expected) <- Seq(false -> Seq.empty[Row], true -> Seq(
-      row(probeSchema, LongJ.valueOf(1), "one")))) {
+  for (
+    (inverted, expected) <- Seq(
+      false -> Seq.empty[Row],
+      true -> Seq(row(probeSchema, LongJ.valueOf(1), "one")))
+  ) {
     test(s"${if (inverted) "anti" else "semi"} join handles an empty build") {
-      val probe = values(
-        probeSchema,
-        Seq(row(probeSchema, LongJ.valueOf(1), "one")))
-      val build = values(buildSchema, Seq.empty[Row])
-      val plan = if (inverted) {
-        probe.antiJoin(build, probeKeys, buildKeys)
-      } else {
-        probe.semiJoin(build, probeKeys, buildKeys)
-      }
+      val probe = values(probeSchema, row(probeSchema, LongJ.valueOf(1), "one"))
+      val build = values(buildSchema)
 
-      checkRows(plan, expected)
+      checkRows(join(probe, build, probeKeys, buildKeys, keyTypes, inverted), expected)
     }
+  }
+
+  test("empty join keys distinguish empty and non-empty builds") {
+    val expected = Seq(
+      row(probeSchema, LongJ.valueOf(1), "one"),
+      row(probeSchema, LongJ.valueOf(2), "two"))
+    val probe = new Values(probeSchema, expected.asJava)
+    val nonEmptyBuild = values(buildSchema, row(buildSchema, LongJ.valueOf(9), "nine"))
+    val emptyBuild = values(buildSchema)
+
+    checkRows(
+      join(probe, nonEmptyBuild, Seq.empty, Seq.empty, Seq.empty, inverted = false),
+      expected)
+    checkRows(
+      join(probe, emptyBuild, Seq.empty, Seq.empty, Seq.empty, inverted = true),
+      expected)
   }
 
   test("compare binary keys by content") {
     val probeType = new StructType().add("key", BinaryType.BINARY)
     val buildType = new StructType().add("other", BinaryType.BINARY)
-    val probe = values(probeType, Seq(
+    val probe = values(
+      probeType,
       row(probeType, Array[Byte](1, 2)),
-      row(probeType, Array[Byte](3))))
-    val build = values(buildType, Seq(row(buildType, Array[Byte](1, 2))))
+      row(probeType, Array[Byte](3)))
+    val build = values(buildType, row(buildType, Array[Byte](1, 2)))
 
     checkRows(
-      probe.semiJoin(
+      join(
+        probe,
         build,
-        Seq(new Column("key")).asJava,
-        Seq(new Column("other")).asJava),
+        Seq(new Column("key")),
+        Seq(new Column("other")),
+        Seq(BinaryType.BINARY),
+        inverted = false),
       Seq(row(probeType, Array[Byte](1, 2))))
   }
 
-  test("reject incompatible key types while building") {
+  test("reject incompatible key types when execution is wired") {
     val wrongBuildSchema = new StructType().add("build_id", StringType.STRING)
-    val error = intercept[IllegalArgumentException] {
-      values(probeSchema, Seq.empty[Row]).semiJoin(
-        values(wrongBuildSchema, Seq.empty[Row]),
-        Seq(new Column("id")).asJava,
-        Seq(new Column("build_id")).asJava)
-    }
+    val plan = join(
+      values(probeSchema),
+      values(wrongBuildSchema),
+      Seq(new Column("id")),
+      Seq(new Column("build_id")),
+      Seq(LongType.LONG),
+      inverted = false)
 
-    assert(error.getMessage.contains("incompatible types"))
+    intercept[UnsupportedOperationException] {
+      checkRows(plan, Seq.empty)
+    }
   }
 }

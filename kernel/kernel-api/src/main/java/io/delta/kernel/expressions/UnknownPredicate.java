@@ -19,6 +19,7 @@ import static java.util.Collections.emptyList;
 import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.annotation.Evolving;
+import java.util.Objects;
 
 /**
  * A predicate kind that is unknown to this version of Kernel.
@@ -42,5 +43,17 @@ public final class UnknownPredicate extends Predicate {
   @Override
   public String toString() {
     return String.format("UnknownPredicate(%s)", unknownName);
+  }
+
+  @Override
+  public boolean equals(Object other) {
+    return this == other
+        || (other instanceof UnknownPredicate
+            && unknownName.equals(((UnknownPredicate) other).unknownName));
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(UnknownPredicate.class, unknownName);
   }
 }

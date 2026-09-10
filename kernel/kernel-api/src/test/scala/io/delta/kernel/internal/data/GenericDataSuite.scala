@@ -79,6 +79,31 @@ class GenericDataSuite extends AnyFunSuite {
     assert(child.getSize === 2)
     assert(child.isNullAt(0))
     assert(child.getInt(1) === 7)
+    assert(child eq vector.getChild(0))
+  }
+
+  test("RowBackedColumnarBatch appends a column as a vector view") {
+    val inputSchema = new StructType().add("id", IntegerType.INTEGER, false)
+    val input = GenericRow.fromValues(inputSchema, Seq(IntegerJ.valueOf(7)).asJava)
+    val appendedField = new StructField("count", LongType.LONG, false)
+    val appendedValues = new GenericColumnVector(Seq(LongJ.valueOf(11L)).asJava, LongType.LONG)
+
+    val output = new RowBackedColumnarBatch(inputSchema, Seq(input).asJava)
+      .withNewColumn(1, appendedField, appendedValues)
+
+    assert(output.getSchema === inputSchema.add(appendedField))
+    assert(output.getColumnVector(0).getInt(0) === 7)
+    assert(output.getColumnVector(1).getLong(0) === 11L)
+    val rows = output.getRows
+    try {
+      val row = rows.next()
+      assert(row.getSchema === output.getSchema)
+      assert(row.getInt(0) === 7)
+      assert(row.getLong(1) === 11L)
+      assert(!rows.hasNext)
+    } finally {
+      rows.close()
+    }
   }
 
   test("generic rows and struct children use logical Kernel getters") {

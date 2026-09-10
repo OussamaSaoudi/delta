@@ -22,6 +22,7 @@ import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.MapValue;
 import io.delta.kernel.data.Row;
+import io.delta.kernel.internal.util.RowKernels;
 import io.delta.kernel.types.*;
 import java.math.BigDecimal;
 import java.util.Collections;
@@ -379,6 +380,25 @@ public final class Literal implements Expression {
       return false;
     }
     Literal other = (Literal) o;
-    return Objects.equals(dataType, other.dataType) && Objects.equals(value, other.value);
+    if (!dataType.equals(other.dataType)) {
+      return false;
+    }
+    if (value == other.value) {
+      return true;
+    }
+    try {
+      return RowKernels.equal(value, other.value, dataType);
+    } catch (UnsupportedOperationException unsupportedType) {
+      return false;
+    }
+  }
+
+  @Override
+  public int hashCode() {
+    try {
+      return 31 * dataType.hashCode() + RowKernels.hash(value, dataType);
+    } catch (UnsupportedOperationException unsupportedType) {
+      return 31 * dataType.hashCode() + System.identityHashCode(value);
+    }
   }
 }

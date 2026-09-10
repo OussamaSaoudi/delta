@@ -19,6 +19,7 @@ package io.delta.kernel.engine;
 import io.delta.kernel.annotation.Evolving;
 import io.delta.kernel.data.*;
 import io.delta.kernel.expressions.Predicate;
+import io.delta.kernel.plans.ScanJson;
 import io.delta.kernel.types.StructType;
 import io.delta.kernel.utils.CloseableIterator;
 import io.delta.kernel.utils.FileStatus;
@@ -36,6 +37,11 @@ import java.util.Optional;
  */
 @Evolving
 public interface JsonHandler {
+  /** Executes a complete plan scan, including constants and deletion vectors. */
+  default CloseableIterator<FilteredColumnarBatch> readJsonFiles(ScanJson scan) {
+    throw new UnsupportedOperationException("Plan-aware JSON scans are not supported");
+  }
+
   /**
    * Parse the given <i>json</i> strings and return the fields requested by {@code outputSchema} as
    * columns in a {@link ColumnarBatch}.

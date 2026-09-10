@@ -24,10 +24,12 @@ import io.delta.kernel.defaults.engine.fileio.SeekableInputStream;
 import io.delta.kernel.defaults.internal.data.DefaultJsonBatchParser;
 import io.delta.kernel.defaults.internal.data.vector.DefaultGenericVector;
 import io.delta.kernel.defaults.internal.json.JsonUtils;
+import io.delta.kernel.defaults.internal.plans.FileScanExecutor;
 import io.delta.kernel.engine.JsonHandler;
 import io.delta.kernel.exceptions.KernelEngineException;
 import io.delta.kernel.expressions.Predicate;
 import io.delta.kernel.internal.util.Utils;
+import io.delta.kernel.plans.ScanJson;
 import io.delta.kernel.types.*;
 import io.delta.kernel.utils.CloseableIterator;
 import io.delta.kernel.utils.FileStatus;
@@ -49,6 +51,11 @@ public class DefaultJsonHandler implements JsonHandler {
             .map(Integer::valueOf)
             .orElse(1024);
     checkArgument(maxBatchSize > 0, "invalid JSON reader batch size: %d", maxBatchSize);
+  }
+
+  @Override
+  public CloseableIterator<FilteredColumnarBatch> readJsonFiles(ScanJson scan) {
+    return FileScanExecutor.execute(scan, this, new DefaultFileSystemClient(fileIO));
   }
 
   @Override

@@ -22,7 +22,7 @@ import scala.jdk.CollectionConverters._
 import io.delta.kernel.data.Row
 import io.delta.kernel.expressions.{Column, Literal, Predicate}
 import io.delta.kernel.internal.data.GenericRow
-import io.delta.kernel.internal.plans.PlanBuilder
+import io.delta.kernel.plans.{Filter, Values}
 import io.delta.kernel.types.{LongType, StringType, StructType}
 
 import org.scalatest.funsuite.AnyFunSuite
@@ -46,7 +46,7 @@ class FilterPlanSuite extends AnyFunSuite with PlanExecutionSuiteBase {
     val predicate = new Predicate(">", column("id"), Literal.ofLong(2))
 
     checkRows(
-      PlanBuilder.values(schema, input.asJava).filter(predicate),
+      new Filter(new Values(schema, input.asJava), predicate),
       Seq(row(LongJ.valueOf(3), "three"), row(LongJ.valueOf(5), "five")))
   }
 
@@ -57,16 +57,18 @@ class FilterPlanSuite extends AnyFunSuite with PlanExecutionSuiteBase {
       row(LongJ.valueOf(5), "five"))
     val greaterThanOne = new Predicate(">", column("id"), Literal.ofLong(1))
     val lessThanFive = new Predicate("<", column("id"), Literal.ofLong(5))
+    val source = new Values(schema, input.asJava)
 
     checkRows(
-      PlanBuilder.values(schema, input.asJava).filter(greaterThanOne).filter(lessThanFive),
+      new Filter(new Filter(source, greaterThanOne), lessThanFive),
       Seq(row(LongJ.valueOf(3), "three")))
   }
 
   test("reject unresolved predicate columns while building") {
     val error = intercept[IllegalArgumentException] {
-      PlanBuilder.values(schema, java.util.Collections.emptyList[Row]())
-        .filter(new Predicate("IS_NOT_NULL", column("missing")))
+      new Filter(
+        new Values(schema, java.util.Collections.emptyList[Row]()),
+        new Predicate("IS_NOT_NULL", column("missing")))
     }
 
     assert(error.getMessage.contains("Filter predicate"))

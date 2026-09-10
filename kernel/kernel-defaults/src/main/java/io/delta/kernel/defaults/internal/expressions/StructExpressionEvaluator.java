@@ -63,9 +63,8 @@ final class StructExpressionEvaluator {
             requireNonNull(
                 childEvaluator.eval(
                     expression.getFieldExpressions().get(ordinal), field.getDataType()),
-                String.format("field expression at ordinal %d returned null", ordinal));
+                "field expression returned null");
         fieldVectors.add(vector);
-        validateVector(vector, field.getDataType(), rowCount, "Struct field " + field.getName());
       }
 
       if (expression.getNullabilityPredicate().isPresent()) {
@@ -74,8 +73,6 @@ final class StructExpressionEvaluator {
                 childEvaluator.eval(
                     expression.getNullabilityPredicate().get(), BooleanType.BOOLEAN),
                 "nullability predicate returned null");
-        validateVector(
-            nullabilityVector, BooleanType.BOOLEAN, rowCount, "Struct nullability predicate");
       }
 
       ColumnVector[] fields = fieldVectors.toArray(new ColumnVector[0]);
@@ -88,22 +85,6 @@ final class StructExpressionEvaluator {
       closeAfterFailure(failure, fieldVectors, nullabilityVector);
       throw failure;
     }
-  }
-
-  private static void validateVector(
-      ColumnVector vector, DataType expectedType, int expectedSize, String context) {
-    checkArgument(
-        expectedType.equals(vector.getDataType()),
-        "%s type mismatch: expected %s but got %s",
-        context,
-        expectedType,
-        vector.getDataType());
-    checkArgument(
-        vector.getSize() == expectedSize,
-        "%s size mismatch: expected %s but got %s",
-        context,
-        expectedSize,
-        vector.getSize());
   }
 
   private static void validateFieldNullability(

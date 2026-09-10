@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 /**
@@ -118,5 +119,22 @@ public class ScalarExpression implements Expression {
   @Override
   public List<Expression> getChildren() {
     return children;
+  }
+
+  @Override
+  public boolean equals(Object other) {
+    if (this == other) {
+      return true;
+    }
+    if (other == null || getClass() != other.getClass()) {
+      return false;
+    }
+    ScalarExpression that = (ScalarExpression) other;
+    return name.equals(that.name) && children.equals(that.children);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(getClass(), name, children);
   }
 }

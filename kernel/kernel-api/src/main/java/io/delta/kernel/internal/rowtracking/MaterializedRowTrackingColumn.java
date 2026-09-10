@@ -17,6 +17,7 @@ package io.delta.kernel.internal.rowtracking;
 
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.ColumnarBatch;
+import io.delta.kernel.data.FilteredColumnarBatch;
 import io.delta.kernel.data.Row;
 import io.delta.kernel.engine.Engine;
 import io.delta.kernel.engine.ExpressionHandler;
@@ -283,7 +284,14 @@ public final class MaterializedRowTrackingColumn {
                     Arrays.asList(
                         new Column(rowIndexMetadataColName), Literal.ofLong(baseRowId)))));
     ColumnVector rowIdVector =
-        exprHandler.getEvaluator(physicalSchema, rowIdExpr, LongType.LONG).eval(dataBatch);
+        exprHandler
+            .getEvaluator(
+                physicalSchema,
+                new StructExpression(Collections.singletonList(rowIdExpr)),
+                new StructType(Collections.singletonList(logicalRowIdColumn)))
+            .eval(new FilteredColumnarBatch(dataBatch, Optional.empty()))
+            .getData()
+            .getColumnVector(0);
 
     // Remove the materialized row ID column and replace it with the coalesced vector
     dataBatch =
@@ -317,7 +325,14 @@ public final class MaterializedRowTrackingColumn {
             Arrays.asList(
                 new Column(commitVersionColumnName), Literal.ofLong(defaultRowCommitVersion)));
     ColumnVector commitVersionVector =
-        exprHandler.getEvaluator(physicalSchema, commitVersionExpr, LongType.LONG).eval(dataBatch);
+        exprHandler
+            .getEvaluator(
+                physicalSchema,
+                new StructExpression(Collections.singletonList(commitVersionExpr)),
+                new StructType(Collections.singletonList(logicalCommitVersionColumn)))
+            .eval(new FilteredColumnarBatch(dataBatch, Optional.empty()))
+            .getData()
+            .getColumnVector(0);
 
     // Remove the materialized row commit version column and replace it with the coalesced vector
     dataBatch =

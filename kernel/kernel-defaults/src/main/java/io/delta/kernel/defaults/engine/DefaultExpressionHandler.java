@@ -27,7 +27,6 @@ import io.delta.kernel.expressions.Expression;
 import io.delta.kernel.expressions.ExpressionEvaluator;
 import io.delta.kernel.expressions.Predicate;
 import io.delta.kernel.expressions.PredicateEvaluator;
-import io.delta.kernel.types.DataType;
 import io.delta.kernel.types.StructType;
 import java.util.Arrays;
 import java.util.Optional;
@@ -37,8 +36,8 @@ public class DefaultExpressionHandler implements ExpressionHandler {
 
   @Override
   public ExpressionEvaluator getEvaluator(
-      StructType inputSchema, Expression expression, DataType outputType) {
-    return new DefaultExpressionEvaluator(inputSchema, expression, outputType);
+      StructType inputSchema, Expression expression, StructType outputSchema) {
+    return new DefaultExpressionEvaluator(inputSchema, expression, outputSchema);
   }
 
   @Override
@@ -51,7 +50,7 @@ public class DefaultExpressionHandler implements ExpressionHandler {
     requireNonNull(values, "values is null");
     int length = to - from;
     checkArgument(
-        length >= 0 && values.length > from && values.length >= to,
+        from >= 0 && length >= 0 && to <= values.length,
         "invalid range from=%s, to=%s, values length=%s",
         from,
         to,

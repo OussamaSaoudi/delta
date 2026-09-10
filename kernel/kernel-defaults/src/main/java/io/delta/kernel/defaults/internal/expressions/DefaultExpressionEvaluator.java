@@ -27,11 +27,12 @@ import static java.util.stream.Collectors.toList;
 
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.ColumnarBatch;
+import io.delta.kernel.data.FilteredColumnarBatch;
+import io.delta.kernel.defaults.internal.data.DefaultColumnarBatch;
 import io.delta.kernel.defaults.internal.data.DefaultJsonBatchParser;
 import io.delta.kernel.defaults.internal.data.vector.DefaultBooleanVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultConstantVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultViewVector;
-import io.delta.kernel.engine.ExpressionHandler;
 import io.delta.kernel.expressions.*;
 import io.delta.kernel.internal.util.ColumnBinding;
 import io.delta.kernel.internal.util.GeometryUtils;
@@ -42,9 +43,9 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * Implementation of {@link ExpressionEvaluator} for default {@link ExpressionHandler}. It takes
- * care of validating, adding necessary implicit casts and evaluating the {@link Expression} on
- * given {@link ColumnarBatch}.
+ * Default {@link ExpressionEvaluator}. It validates and lowers one struct-valued expression, then
+ * evaluates it as a batch. Scalar evaluation remains an internal building block for the expression
+ * kernels.
  */
 public class DefaultExpressionEvaluator implements ExpressionEvaluator {
   private static final Map<String, ExpressionKernel> EXPRESSION_KERNELS;
@@ -59,17 +60,25 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
   private final Expression expression;
   private final Map<Column, ColumnBinding> columnBindings;
   private final DataType outputType;
+  private final StructType outputSchema;
 
-  /**
-   * Create a {@link DefaultExpressionEvaluator} instance bound to the given expression and
-   * <i>inputSchem</i>.
-   *
-   * @param inputSchema Input data schema
-   * @param expression Expression to evaluate.
-   * @param outputType Expected result data type.
-   */
+  /** Creates a scalar evaluator used internally by the default expression implementation. */
+  DefaultExpressionEvaluator(StructType inputSchema, Expression expression, DataType outputType) {
+    this(inputSchema, expression, outputType, null);
+  }
+
+  /** Creates a batch evaluator for one struct-valued row expression. */
   public DefaultExpressionEvaluator(
-      StructType inputSchema, Expression expression, DataType outputType) {
+      StructType inputSchema, Expression expression, StructType outputSchema) {
+    this(
+        inputSchema,
+        expression,
+        outputSchema,
+        requireNonNull(outputSchema, "outputSchema is null"));
+  }
+
+  private DefaultExpressionEvaluator(
+      StructType inputSchema, Expression expression, DataType outputType, StructType outputSchema) {
     ExpressionTransformResult transformResult =
         new ExpressionTransformer(inputSchema).transform(expression, outputType);
     if (!transformResult.outputType.equivalent(outputType)) {
@@ -83,10 +92,42 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     bindColumns(inputSchema, this.expression, bindings);
     this.columnBindings = Collections.unmodifiableMap(bindings);
     this.outputType = outputType;
+    this.outputSchema = outputSchema;
   }
 
   @Override
-  public ColumnVector eval(ColumnarBatch input) {
+  public FilteredColumnarBatch eval(FilteredColumnarBatch input) {
+    requireNonNull(input, "input is null");
+    checkArgument(outputSchema != null, "Scalar evaluator cannot produce a batch");
+    ColumnVector root = eval(input.getData());
+    try {
+      checkArgument(
+          outputSchema.equals(root.getDataType()),
+          "Expression returned type %s, expected %s",
+          root.getDataType(),
+          outputSchema);
+      checkArgument(
+          root.getSize() == input.getData().getSize(),
+          "Expression returned %s rows, expected %s",
+          root.getSize(),
+          input.getData().getSize());
+      boolean rootIsNeverNull =
+          expression instanceof StructExpression
+              && !((StructExpression) expression).getNullabilityPredicate().isPresent();
+      ColumnVector view = rootIsNeverNull ? root : new DefaultViewVector(root, 0, root.getSize());
+      ColumnVector[] columns = new ColumnVector[outputSchema.length()];
+      for (int ordinal = 0; ordinal < columns.length; ordinal++) {
+        columns[ordinal] = view.getChild(ordinal);
+      }
+      return input.withData(new DefaultColumnarBatch(root.getSize(), outputSchema, columns));
+    } catch (RuntimeException | Error failure) {
+      Utils.closeCloseablesAndAddSuppressed(failure, root);
+      throw failure;
+    }
+  }
+
+  /** Evaluates one scalar or struct value per input row for internal default-engine use. */
+  ColumnVector eval(ColumnarBatch input) {
     return new ExpressionEvalVisitor(input, columnBindings).eval(expression, outputType);
   }
 
@@ -793,10 +834,11 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
             "Struct expression expects a StructType output, but got %s",
             expectedType);
         return StructExpressionEvaluator.eval(
-            (StructExpression) expression,
-            (StructType) expectedType,
-            input.getSize(),
-            this::eval);
+            (StructExpression) expression, (StructType) expectedType, input.getSize(), this::eval);
+      }
+      if (expression instanceof ScalarExpression
+          && ((ScalarExpression) expression).getName().equalsIgnoreCase("COALESCE")) {
+        return evalCoalesce((ScalarExpression) expression, expectedType);
       }
       return visit(expression);
     }
@@ -950,8 +992,13 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     ColumnVector visitColumn(Column column) {
-      ColumnVector columnVector = columnBindings.get(column).getVector(input);
-      return new DefaultViewVector(columnVector, 0, columnVector.getSize());
+      int[] ordinals = columnBindings.get(column).getOrdinals();
+      ColumnVector vector = input.getColumnVector(ordinals[0]);
+      vector = new DefaultViewVector(vector, 0, vector.getSize());
+      for (int level = 1; level < ordinals.length; level++) {
+        vector = vector.getChild(ordinals[level]);
+      }
+      return vector;
     }
 
     @Override
@@ -1047,8 +1094,14 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     ColumnVector visitCoalesce(ScalarExpression coalesce) {
-      List<ColumnVector> childResults =
-          coalesce.getChildren().stream().map(this::visit).collect(Collectors.toList());
+      return evalCoalesce(coalesce, null);
+    }
+
+    private ColumnVector evalCoalesce(ScalarExpression coalesce, DataType expectedType) {
+      List<ColumnVector> childResults = new ArrayList<>(coalesce.getChildren().size());
+      for (Expression child : coalesce.getChildren()) {
+        childResults.add(expectedType == null ? visit(child) : eval(child, expectedType));
+      }
       int[] selectedChildren = new int[input.getSize()];
       for (int rowId = 0; rowId < selectedChildren.length; rowId++) {
         for (int childIndex = 0; childIndex < childResults.size(); childIndex++) {
@@ -1168,8 +1221,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
         for (Expression child : expression.getChildren()) {
           children.add(visit(child));
         }
-        return resolved.kernel.eval(
-            expression, children, resolved.outputType, input.getSize());
+        return resolved.kernel.eval(expression, children, resolved.outputType, input.getSize());
       } catch (RuntimeException | Error failure) {
         Utils.closeCloseablesAndAddSuppressed(failure, children.toArray(new ColumnVector[0]));
         throw failure;
@@ -1226,8 +1278,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     }
   }
 
-  private static void register(
-      Map<String, ExpressionKernel> kernels, ExpressionKernel kernel) {
+  private static void register(Map<String, ExpressionKernel> kernels, ExpressionKernel kernel) {
     kernels.put(kernel.name(), kernel);
   }
 

@@ -15,7 +15,7 @@
  */
 package io.delta.kernel.internal.util
 
-import io.delta.kernel.data.{ColumnVector, ColumnarBatch}
+import io.delta.kernel.data.{ColumnarBatch, ColumnVector}
 import io.delta.kernel.expressions.Column
 import io.delta.kernel.test.VectorTestUtils
 import io.delta.kernel.types.{DataType, StringType, StructType}

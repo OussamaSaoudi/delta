@@ -17,10 +17,10 @@ package io.delta.kernel.internal.replay;
 
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.ColumnarBatch;
+import io.delta.kernel.expressions.Column;
 import io.delta.kernel.internal.actions.AddFile;
 import io.delta.kernel.internal.actions.DeletionVectorDescriptor;
 import io.delta.kernel.internal.actions.RemoveFile;
-import io.delta.kernel.expressions.Column;
 import io.delta.kernel.internal.util.ColumnBinding;
 import io.delta.kernel.internal.util.Tuple2;
 import io.delta.kernel.types.StructType;

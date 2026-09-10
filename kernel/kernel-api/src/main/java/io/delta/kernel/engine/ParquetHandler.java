@@ -20,6 +20,7 @@ import io.delta.kernel.annotation.Evolving;
 import io.delta.kernel.data.*;
 import io.delta.kernel.expressions.Column;
 import io.delta.kernel.expressions.Predicate;
+import io.delta.kernel.plans.ScanParquet;
 import io.delta.kernel.types.MetadataColumnSpec;
 import io.delta.kernel.types.StructField;
 import io.delta.kernel.types.StructType;
@@ -38,6 +39,11 @@ import java.util.Optional;
  */
 @Evolving
 public interface ParquetHandler {
+  /** Executes a complete plan scan, including constants and deletion vectors. */
+  default CloseableIterator<FilteredColumnarBatch> readParquetFiles(ScanParquet scan) {
+    throw new UnsupportedOperationException("Plan-aware Parquet scans are not supported");
+  }
+
   /**
    * Read the Parquet format files at the given locations and return the data as a {@link
    * ColumnarBatch} with the columns requested by {@code physicalSchema}.

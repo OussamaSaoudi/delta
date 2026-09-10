@@ -134,7 +134,7 @@ trait BaseMockExpressionHandler extends ExpressionHandler {
   override def getEvaluator(
       inputSchema: StructType,
       expression: Expression,
-      outputType: DataType): ExpressionEvaluator =
+      outputSchema: StructType): ExpressionEvaluator =
     throw new UnsupportedOperationException("not supported in this test suite")
 
   override def createSelectionVector(values: Array[Boolean], from: Int, to: Int): ColumnVector =

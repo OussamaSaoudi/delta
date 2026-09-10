@@ -22,7 +22,7 @@ import scala.jdk.CollectionConverters._
 
 import io.delta.kernel.data.Row
 import io.delta.kernel.internal.data.GenericRow
-import io.delta.kernel.internal.plans.PlanBuilder
+import io.delta.kernel.plans.Values
 import io.delta.kernel.types.{LongType, StringType, StructType}
 
 import org.scalatest.funsuite.AnyFunSuite
@@ -37,10 +37,10 @@ class ValuesPlanSuite extends AnyFunSuite with PlanExecutionSuiteBase {
 
   test("execute Values") {
     val expected = Seq(row(1, "one"), row(2, null))
-    checkRows(PlanBuilder.values(schema, expected.asJava), expected)
+    checkRows(new Values(schema, expected.asJava), expected)
   }
 
   test("execute empty Values") {
-    checkRows(PlanBuilder.values(schema, util.Collections.emptyList[Row]()), Seq.empty)
+    checkRows(new Values(schema, util.Collections.emptyList[Row]()), Seq.empty)
   }
 }

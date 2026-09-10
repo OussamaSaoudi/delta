@@ -122,6 +122,21 @@ public class DataTypeJsonSerDe {
     }
   }
 
+  /** Deserializes a JSON object using Kernel's field-metadata representation. */
+  public static FieldMetadata deserializeFieldMetadata(String fieldMetadataJson) {
+    try {
+      return parseFieldMetadata(OBJECT_MAPPER.reader().readTree(fieldMetadataJson));
+    } catch (JsonProcessingException ex) {
+      throw new KernelException(
+          format("Could not parse field metadata given as JSON: %s", fieldMetadataJson), ex);
+    }
+  }
+
+  /** Applies metadata-encoded type details such as collations to a decoded field. */
+  public static StructField applyFieldLevelMetadata(StructField field) {
+    return fixupFieldLevelMetadata(field, field.getMetadata());
+  }
+
   /**
    * Parses a Delta data type from JSON. Data types can either be serialized as strings (for
    * primitive types) or as objects (for complex types).

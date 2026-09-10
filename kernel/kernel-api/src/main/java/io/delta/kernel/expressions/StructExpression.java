@@ -22,6 +22,7 @@ import io.delta.kernel.types.StructType;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
@@ -93,5 +94,23 @@ public final class StructExpression implements Expression {
     return nullabilityPredicate
         .map(predicate -> String.format("STRUCT_IF(%s; %s)", predicate, fields))
         .orElseGet(() -> String.format("STRUCT(%s)", fields));
+  }
+
+  @Override
+  public boolean equals(Object other) {
+    if (this == other) {
+      return true;
+    }
+    if (!(other instanceof StructExpression)) {
+      return false;
+    }
+    StructExpression that = (StructExpression) other;
+    return fieldExpressions.equals(that.fieldExpressions)
+        && nullabilityPredicate.equals(that.nullabilityPredicate);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(StructExpression.class, fieldExpressions, nullabilityPredicate);
   }
 }

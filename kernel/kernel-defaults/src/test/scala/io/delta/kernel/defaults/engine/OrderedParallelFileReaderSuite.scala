@@ -42,9 +42,12 @@ class OrderedParallelFileReaderSuite extends AnyFunSuite {
     release.countDown()
     try {
       assert(result.asScala.toSeq === Seq(
-        Batch(0, 0), Batch(0, 1),
-        Batch(1, 0), Batch(1, 1),
-        Batch(2, 0), Batch(2, 1)))
+        Batch(0, 0),
+        Batch(0, 1),
+        Batch(1, 0),
+        Batch(1, 1),
+        Batch(2, 0),
+        Batch(2, 1)))
       assert(closed.get() === 3)
     } finally {
       result.close()
@@ -70,12 +73,13 @@ class OrderedParallelFileReaderSuite extends AnyFunSuite {
     val result = OrderedParallelFileReader.read(
       files(2),
       2,
-      file => new CloseableIterator[Batch] {
-        started.countDown()
-        override def hasNext: Boolean = true
-        override def next(): Batch = Batch(file.getPath.toInt, 0)
-        override def close(): Unit = closed.countDown()
-      })
+      file =>
+        new CloseableIterator[Batch] {
+          started.countDown()
+          override def hasNext: Boolean = true
+          override def next(): Batch = Batch(file.getPath.toInt, 0)
+          override def close(): Unit = closed.countDown()
+        })
 
     assert(started.await(5, TimeUnit.SECONDS))
     result.close()

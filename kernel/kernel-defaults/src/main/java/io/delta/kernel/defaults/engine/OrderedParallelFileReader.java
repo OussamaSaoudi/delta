@@ -59,8 +59,7 @@ final class OrderedParallelFileReader {
             runnable -> {
               Thread thread =
                   new Thread(
-                      runnable,
-                      "delta-kernel-file-reader-" + NEXT_THREAD_ID.incrementAndGet());
+                      runnable, "delta-kernel-file-reader-" + NEXT_THREAD_ID.incrementAndGet());
               thread.setDaemon(true);
               return thread;
             });

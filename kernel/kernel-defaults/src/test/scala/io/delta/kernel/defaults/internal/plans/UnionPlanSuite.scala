@@ -21,7 +21,7 @@ import scala.jdk.CollectionConverters._
 
 import io.delta.kernel.data.Row
 import io.delta.kernel.internal.data.GenericRow
-import io.delta.kernel.internal.plans.PlanBuilder
+import io.delta.kernel.plans.{PlanNode, UnionAll, Values}
 import io.delta.kernel.types.{LongType, StringType, StructType}
 
 import org.scalatest.funsuite.AnyFunSuite
@@ -34,11 +34,11 @@ class UnionPlanSuite extends AnyFunSuite with PlanExecutionSuiteBase {
   private def row(id: Long): Row =
     GenericRow.fromValues(schema, Seq(LongJ.valueOf(id), s"value-$id").asJava)
 
-  private def values(rows: Row*): PlanBuilder = PlanBuilder.values(schema, rows.asJava)
+  private def values(rows: Row*): Values = new Values(schema, rows.asJava)
 
   test("execute UnionAll") {
     val expected = Seq(row(1), row(2), row(3))
-    val union = PlanBuilder.unionAll(Seq(
+    val union = new UnionAll(Seq[PlanNode](
       values(expected(0), expected(1)),
       values(expected(2))).asJava)
 
@@ -49,6 +49,6 @@ class UnionPlanSuite extends AnyFunSuite with PlanExecutionSuiteBase {
     val one = row(1)
     val source = values(one)
 
-    checkRows(PlanBuilder.unionAll(Seq(source, source).asJava), Seq(one, one))
+    checkRows(new UnionAll(Seq[PlanNode](source, source).asJava), Seq(one, one))
   }
 }

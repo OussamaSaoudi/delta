@@ -58,6 +58,8 @@ class MapToStructExpressionEvaluatorSuite extends AnyFunSuite {
       outputType: DataType): ColumnVector =
     new DefaultExpressionEvaluator(input.getSchema, expression, outputType).eval(input)
 
+  private val nonAsciiText: String = "h" + 233.toChar + "llo"
+
   private val primitiveCases = Seq[(String, DataType, String, Any)](
     ("boolean", BooleanType.BOOLEAN, "TrUe", true),
     ("byte", ByteType.BYTE, "-8", -8.toByte),
@@ -83,7 +85,7 @@ class MapToStructExpressionEvaluatorSuite extends AnyFunSuite {
       "2024-01-15 12:34:56.789123",
       InternalUtils.microsSinceEpoch(Timestamp.valueOf("2024-01-15 12:34:56.789123"))),
     ("string", StringType.STRING, "hello", "hello"),
-    ("binary", BinaryType.BINARY, "héllo", "héllo".getBytes(UTF_8)))
+    ("binary", BinaryType.BINARY, nonAsciiText, nonAsciiText.getBytes(UTF_8)))
 
   primitiveCases.foreach { case (name, dataType, serialized, expected) =>
     test(s"parses $name fields") {

@@ -21,6 +21,7 @@ import static java.util.Objects.requireNonNull;
 import io.delta.kernel.annotation.Evolving;
 import io.delta.kernel.types.StructType;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Permissively parses a JSON string expression into a struct.
@@ -59,5 +60,22 @@ public final class ParseJson implements Expression {
   @Override
   public String toString() {
     return String.format("PARSE_JSON(%s, %s)", jsonExpression, outputSchema);
+  }
+
+  @Override
+  public boolean equals(Object other) {
+    if (this == other) {
+      return true;
+    }
+    if (!(other instanceof ParseJson)) {
+      return false;
+    }
+    ParseJson that = (ParseJson) other;
+    return jsonExpression.equals(that.jsonExpression) && outputSchema.equals(that.outputSchema);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(ParseJson.class, jsonExpression, outputSchema);
   }
 }

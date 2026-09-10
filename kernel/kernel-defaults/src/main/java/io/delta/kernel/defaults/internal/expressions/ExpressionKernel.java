@@ -28,13 +28,9 @@ interface ExpressionKernel {
     return null;
   }
 
-  DataType resolve(
-      ScalarExpression expression, List<DataType> childTypes, DataType expectedType);
+  DataType resolve(ScalarExpression expression, List<DataType> childTypes, DataType expectedType);
 
   /** The returned vector owns the child vectors when evaluation succeeds. */
   ColumnVector eval(
-      ScalarExpression expression,
-      List<ColumnVector> children,
-      DataType outputType,
-      int rowCount);
+      ScalarExpression expression, List<ColumnVector> children, DataType outputType, int rowCount);
 }

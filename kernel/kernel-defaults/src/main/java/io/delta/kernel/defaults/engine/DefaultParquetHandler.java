@@ -20,11 +20,13 @@ import io.delta.kernel.data.FilteredColumnarBatch;
 import io.delta.kernel.defaults.engine.fileio.FileIO;
 import io.delta.kernel.defaults.internal.parquet.ParquetFileReader;
 import io.delta.kernel.defaults.internal.parquet.ParquetFileWriter;
+import io.delta.kernel.defaults.internal.plans.FileScanExecutor;
 import io.delta.kernel.engine.FileReadResult;
 import io.delta.kernel.engine.ParquetHandler;
 import io.delta.kernel.expressions.Column;
 import io.delta.kernel.expressions.Predicate;
 import io.delta.kernel.internal.util.Utils;
+import io.delta.kernel.plans.ScanParquet;
 import io.delta.kernel.types.StructType;
 import io.delta.kernel.utils.*;
 import io.delta.kernel.utils.FileStatus;
@@ -56,6 +58,11 @@ public class DefaultParquetHandler implements ParquetHandler {
     if (readerParallelism <= 0) {
       throw new IllegalArgumentException(READER_PARALLELISM + " must be positive");
     }
+  }
+
+  @Override
+  public CloseableIterator<FilteredColumnarBatch> readParquetFiles(ScanParquet scan) {
+    return FileScanExecutor.execute(scan, this, new DefaultFileSystemClient(fileIO));
   }
 
   @Override

@@ -21,13 +21,15 @@ import java.util.Optional
 import scala.collection.mutable.ArrayBuffer
 import scala.jdk.CollectionConverters._
 
-import io.delta.kernel.data.{ColumnarBatch, Row}
+import io.delta.kernel.data.{ColumnarBatch, FilteredColumnarBatch, Row}
+import io.delta.kernel.data.FilteredColumnarBatch.Lifetime
 import io.delta.kernel.defaults.internal.data.DefaultRowBasedColumnarBatch
 import io.delta.kernel.engine.FileReadResult
+import io.delta.kernel.execution.{PlanExecutor, PlanResultCache}
 import io.delta.kernel.expressions.Predicate
 import io.delta.kernel.internal.actions.DeletionVectorDescriptor
 import io.delta.kernel.internal.data.GenericRow
-import io.delta.kernel.internal.plans.{PlanBuilder, ScanFile}
+import io.delta.kernel.plans.{ScanFile, ScanJson, ScanParquet}
 import io.delta.kernel.test.{BaseMockFileSystemClient, BaseMockJsonHandler, BaseMockParquetHandler}
 import io.delta.kernel.types._
 import io.delta.kernel.utils.{CloseableIterator, FileStatus}
@@ -38,6 +40,7 @@ class FileScanExecutorSuite extends AnyFunSuite with PlanExecutionSuiteBase {
   private val readSchema = new StructType().add("id", LongType.LONG, false)
   private val outputSchema = readSchema.add("part", StringType.STRING, false)
   private val constantsSchema = new StructType().add("part", StringType.STRING, false)
+  private val fileSystem = new BaseMockFileSystemClient {}
 
   private def row(schema: StructType, values: AnyRef*): Row =
     GenericRow.fromValues(schema, values.asJava)
@@ -48,57 +51,40 @@ class FileScanExecutorSuite extends AnyFunSuite with PlanExecutionSuiteBase {
       ids.map(id => row(readSchema, LongJ.valueOf(id))).asJava)
 
   private def file(path: String, part: String): ScanFile =
-    new ScanFile(FileStatus.of(path), row(constantsSchema, part))
+    new ScanFile(
+      FileStatus.of(path, 10, 20),
+      row(constantsSchema, part),
+      Optional.empty())
 
-  test("Parquet scans files in order and broadcasts file constants") {
+  test("Parquet scans files together and broadcasts constants without copying data") {
     val files = Seq(file("file:///table/a", "a"), file("file:///table/b", "b"))
+    val firstBatch = batch(1, 2)
     val handler = new ParquetReads(Map(
-      files(0).getFileStatus.getPath -> Seq(batch(1, 2)),
+      files(0).getFileStatus.getPath -> Seq(firstBatch),
       files(1).getFileStatus.getPath -> Seq(batch(3))))
-    val plan = PlanBuilder.scanParquet(files.asJava, Seq("part").asJava, outputSchema)
+    val plan = new ScanParquet(
+      files.asJava,
+      Optional.empty(),
+      Seq("part").asJava,
+      outputSchema,
+      Optional.empty())
 
     checkRows(
       plan,
       mockEngine(parquetHandler = handler),
-      Seq(row(outputSchema, LongJ.valueOf(1), "a"),
+      Seq(
+        row(outputSchema, LongJ.valueOf(1), "a"),
         row(outputSchema, LongJ.valueOf(2), "a"),
         row(outputSchema, LongJ.valueOf(3), "b")))
 
-    assert(handler.files === files.map(_.getFileStatus.getPath))
+    val cache = new PlanResultCache(1, Long.MaxValue)
+    val batches = new PlanExecutor(mockEngine(parquetHandler = handler), cache).execute(plan)
+    val first = batches.next()
+    assert(first.getData.getColumnVector(0) eq firstBatch.getColumnVector(0))
+    assert(first.getLifetime === Lifetime.OWNED)
+    batches.close()
+    cache.close()
     assert(handler.schemas.forall(_ === readSchema))
-  }
-
-  test("Parquet scan reuses columns returned by Kernel Java") {
-    val scanFile = file("file:///table/a", "a")
-    val input = batch(1)
-    val handler = new ParquetReads(Map(scanFile.getFileStatus.getPath -> Seq(input)))
-    val iterator = DefaultPlanExecutor.execute(
-      PlanBuilder.scanParquet(Seq(scanFile).asJava, Seq("part").asJava, outputSchema).build(),
-      mockEngine(parquetHandler = handler))
-
-    val output = iterator.next().getData
-    iterator.close()
-    assert(output.getColumnVector(0) eq input.getColumnVector(0))
-  }
-
-  test("scan resolves missing file status through Kernel Java") {
-    val path = "file:///table/unresolved"
-    val scanFile = new ScanFile(path, row(constantsSchema, "a"), Optional.empty())
-    val handler = new ParquetReads(Map(path -> Seq(batch(1))))
-    var requestedPath: String = null
-    val fileSystem = new BaseMockFileSystemClient {
-      override def getFileStatus(location: String): FileStatus = {
-        requestedPath = location
-        FileStatus.of(location, 10, 20)
-      }
-    }
-
-    checkRows(
-      PlanBuilder.scanParquet(Seq(scanFile).asJava, Seq("part").asJava, outputSchema),
-      mockEngine(fileSystemClient = fileSystem, parquetHandler = handler),
-      Seq(row(outputSchema, LongJ.valueOf(1), "a")))
-
-    assert(requestedPath === path)
   }
 
   test("scan applies deletion vectors through an internal row-index column") {
@@ -110,80 +96,88 @@ class FileScanExecutorSuite extends AnyFunSuite with PlanExecutionSuiteBase {
       0,
       0)
     val scanFile = new ScanFile(
-      FileStatus.of(path),
+      FileStatus.of(path, 10, 20),
       row(constantsSchema, "a"),
       Optional.of(deletionVector))
-    val privateReadSchema = readSchema.add(
+    val privateSchema = readSchema.add(
       StructField.createMetadataColumn(
         "__delta_kernel_scan_row_index",
         MetadataColumnSpec.ROW_INDEX))
     val input = new DefaultRowBasedColumnarBatch(
-      privateReadSchema,
-      Seq(
-        row(privateReadSchema, LongJ.valueOf(1), LongJ.valueOf(0)),
-        row(privateReadSchema, LongJ.valueOf(2), LongJ.valueOf(1))).asJava)
+      privateSchema,
+      Seq(row(privateSchema, LongJ.valueOf(1), LongJ.valueOf(0))).asJava)
     val handler = new ParquetReads(Map(path -> Seq(input)))
-    val batches = DefaultPlanExecutor.execute(
-      PlanBuilder.scanParquet(Seq(scanFile).asJava, Seq("part").asJava, outputSchema).build(),
-      mockEngine(parquetHandler = handler))
+    val scan = new ScanParquet(
+      Seq(scanFile).asJava,
+      Optional.empty(),
+      Seq("part").asJava,
+      outputSchema,
+      Optional.empty())
+    val cache = new PlanResultCache(1, Long.MaxValue)
+    val batches = new PlanExecutor(mockEngine(parquetHandler = handler), cache).execute(scan)
 
     val result = batches.next()
     assert(result.getData.getSchema === outputSchema)
     assert(result.getSelectionVector.isPresent)
     assert(result.isSelected(0))
-    assert(result.isSelected(1))
+    assert(result.getLifetime === Lifetime.OWNED)
     batches.close()
+    cache.close()
   }
 
-  test("JSON scans files in order and resets row indices for each file") {
+  test("JSON scans reset physical row indices for each file") {
     val rowIndex = StructField.createMetadataColumn("index", MetadataColumnSpec.ROW_INDEX)
     val schema = readSchema.add(rowIndex)
-    val files = Seq(
-      new ScanFile(FileStatus.of("file:///table/a")),
-      new ScanFile(FileStatus.of("file:///table/b")))
+    val emptyConstants = GenericRow.fromOwnedValues(new StructType(), Array.empty[AnyRef])
+    val files = Seq("a", "b").map { name =>
+      new ScanFile(
+        FileStatus.of(s"file:///table/$name", 10, 20),
+        emptyConstants,
+        Optional.empty())
+    }
     val handler = new JsonReads(Map(
       files(0).getFileStatus.getPath -> Seq(batch(10, 11), batch(12)),
       files(1).getFileStatus.getPath -> Seq(batch(20))))
+    val scan = new ScanJson(files.asJava, Optional.empty(), Seq.empty[String].asJava, schema)
 
     checkRows(
-      PlanBuilder.scanJson(files.asJava, Seq.empty[String].asJava, schema),
+      scan,
       mockEngine(jsonHandler = handler),
-      Seq(row(schema, LongJ.valueOf(10), LongJ.valueOf(0)),
+      Seq(
+        row(schema, LongJ.valueOf(10), LongJ.valueOf(0)),
         row(schema, LongJ.valueOf(11), LongJ.valueOf(1)),
         row(schema, LongJ.valueOf(12), LongJ.valueOf(2)),
         row(schema, LongJ.valueOf(20), LongJ.valueOf(0))))
-
-    assert(handler.files === files.map(_.getFileStatus.getPath))
-    assert(handler.schemas.forall(_ === readSchema))
   }
 
   private class ParquetReads(outputs: Map[String, Seq[ColumnarBatch]])
       extends BaseMockParquetHandler {
-    val files = ArrayBuffer.empty[String]
     val schemas = ArrayBuffer.empty[StructType]
+
+    override def readParquetFiles(scan: ScanParquet): CloseableIterator[FilteredColumnarBatch] =
+      FileScanExecutor.execute(scan, this, fileSystem)
 
     override def readParquetFiles(
         input: CloseableIterator[FileStatus],
         schema: StructType,
         predicate: Optional[Predicate]): CloseableIterator[FileReadResult] = {
-      val file = input.next()
-      files += file.getPath
-      schemas += schema
-      closeable(outputs(file.getPath).map(new FileReadResult(_, file.getPath)))
+      val files = input.toInMemoryList.asScala.toSeq
+      schemas ++= Seq.fill(files.size)(schema)
+      closeable(files.flatMap { file =>
+        outputs(file.getPath).map(new FileReadResult(_, file.getPath))
+      })
     }
   }
 
   private class JsonReads(outputs: Map[String, Seq[ColumnarBatch]]) extends BaseMockJsonHandler {
-    val files = ArrayBuffer.empty[String]
-    val schemas = ArrayBuffer.empty[StructType]
+    override def readJsonFiles(scan: ScanJson): CloseableIterator[FilteredColumnarBatch] =
+      FileScanExecutor.execute(scan, this, fileSystem)
 
     override def readJsonFiles(
         input: CloseableIterator[FileStatus],
         schema: StructType,
         predicate: Optional[Predicate]): CloseableIterator[ColumnarBatch] = {
       val file = input.next()
-      files += file.getPath
-      schemas += schema
       closeable(outputs(file.getPath))
     }
   }

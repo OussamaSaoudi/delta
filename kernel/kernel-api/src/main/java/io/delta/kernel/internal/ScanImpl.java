@@ -345,17 +345,15 @@ public class ScanImpl implements Scan {
                   next.getData().getSchema(),
                   predicateOnScanFileBatch);
         }
-        ColumnVector newSelectionVector =
-            wrapEngineException(
-                () -> predicateEvaluator.eval(next.getData(), next.getSelectionVector()),
-                "Evaluating the partition expression %s",
-                predicateOnScanFileBatch);
-        return new FilteredColumnarBatch(next.getData(), Optional.of(newSelectionVector));
+        return wrapEngineException(
+            () -> predicateEvaluator.eval(next),
+            "Evaluating the partition expression %s",
+            predicateOnScanFileBatch);
       }
 
       @Override
       public void close() throws IOException {
-        scanFileIter.close();
+        Utils.closeCloseables(predicateEvaluator, scanFileIter);
       }
     };
   }
@@ -403,21 +401,41 @@ public class ScanImpl implements Scan {
             prunedStatsSchema,
             filterToEval);
 
-    return scanFileIter.map(
-        filteredScanFileBatch -> {
-          ColumnVector newSelectionVector =
-              wrapEngineException(
-                  () ->
-                      predicateEvaluator.eval(
-                          DataSkippingUtils.parseJsonStats(
-                              engine, filteredScanFileBatch, prunedStatsSchema),
-                          filteredScanFileBatch.getSelectionVector()),
-                  "Evaluating the data skipping filter %s",
-                  filterToEval);
+    CloseableIterator<FilteredColumnarBatch> filtered =
+        scanFileIter.map(
+            filteredScanFileBatch -> {
+              FilteredColumnarBatch statsInput =
+                  new FilteredColumnarBatch(
+                      DataSkippingUtils.parseJsonStats(
+                          engine, filteredScanFileBatch, prunedStatsSchema),
+                      filteredScanFileBatch.getSelectionVector(),
+                      filteredScanFileBatch.getLifetime());
+              FilteredColumnarBatch evaluated =
+                  wrapEngineException(
+                      () -> predicateEvaluator.eval(statsInput),
+                      "Evaluating the data skipping filter %s",
+                      filterToEval);
+              return new FilteredColumnarBatch(
+                  filteredScanFileBatch.getData(),
+                  evaluated.getSelectionVector(),
+                  evaluated.getLifetime());
+            });
+    return new CloseableIterator<FilteredColumnarBatch>() {
+      @Override
+      public boolean hasNext() {
+        return filtered.hasNext();
+      }
 
-          return new FilteredColumnarBatch(
-              filteredScanFileBatch.getData(), Optional.of(newSelectionVector));
-        });
+      @Override
+      public FilteredColumnarBatch next() {
+        return filtered.next();
+      }
+
+      @Override
+      public void close() {
+        Utils.closeCloseables(predicateEvaluator, filtered);
+      }
+    };
   }
 
   /**

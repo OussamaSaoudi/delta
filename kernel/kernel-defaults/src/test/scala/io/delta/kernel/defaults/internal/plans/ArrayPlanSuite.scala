@@ -21,8 +21,8 @@ import scala.jdk.CollectionConverters._
 
 import io.delta.kernel.data.Row
 import io.delta.kernel.internal.data.GenericRow
-import io.delta.kernel.internal.plans.PlanBuilder
 import io.delta.kernel.internal.util.VectorUtils
+import io.delta.kernel.plans.{Project, Values}
 import io.delta.kernel.types.{ArrayType, IntegerType, StringType, StructType}
 
 import org.scalatest.funsuite.AnyFunSuite
@@ -41,34 +41,46 @@ class ArrayPlanSuite extends AnyFunSuite with PlanExecutionSuiteBase {
     val input = Seq(
       row(inputSchema, IntegerJ.valueOf(1), null),
       row(inputSchema, IntegerJ.valueOf(2), IntegerJ.valueOf(20)))
-    val plan = PlanBuilder.values(inputSchema, input.asJava)
-      .project(struct(array(col("left"), col("right"), int(42))), outputSchema)
+    val plan = new Project(
+      new Values(inputSchema, input.asJava),
+      struct(array(col("left"), col("right"), int(42))),
+      outputSchema)
 
     def expected(values: Integer*): Row = row(
       outputSchema,
-      VectorUtils.buildArrayValue(values.map(IntegerJ.valueOf).asJava, IntegerType.INTEGER))
+      VectorUtils.buildArrayValue(values.asJava, IntegerType.INTEGER))
 
-    checkRows(plan, Seq(
-      row(
-        outputSchema,
-        VectorUtils.buildArrayValue(
-          Seq[IntegerJ](IntegerJ.valueOf(1), null, IntegerJ.valueOf(42)).asJava,
-          IntegerType.INTEGER)),
-      expected(2, 20, 42)))
+    checkRows(
+      plan,
+      Seq(
+        row(
+          outputSchema,
+          VectorUtils.buildArrayValue(
+            Seq[IntegerJ](IntegerJ.valueOf(1), null, IntegerJ.valueOf(42)).asJava,
+            IntegerType.INTEGER)),
+        expected(2, 20, 42)))
   }
 
   test("reject invalid ARRAY shapes while binding the plan") {
-    val input = PlanBuilder.values(inputSchema, Seq.empty[Row].asJava)
+    val input = new Values(inputSchema, Seq.empty[Row].asJava)
 
     val empty = intercept[UnsupportedOperationException] {
-      input.project(struct(array()), new StructType().add("values", arrayType))
+      checkRows(
+        new Project(
+          input,
+          struct(array()),
+          new StructType().add("values", arrayType)),
+        Seq.empty)
     }
     assert(empty.getMessage.contains("requires at least one element"))
 
     val wrongOutput = intercept[UnsupportedOperationException] {
-      input.project(
-        struct(array(int(1))),
-        new StructType().add("values", StringType.STRING))
+      checkRows(
+        new Project(
+          input,
+          struct(array(int(1))),
+          new StructType().add("values", StringType.STRING)),
+        Seq.empty)
     }
     assert(wrongOutput.getMessage.contains("requires an ArrayType result"))
   }

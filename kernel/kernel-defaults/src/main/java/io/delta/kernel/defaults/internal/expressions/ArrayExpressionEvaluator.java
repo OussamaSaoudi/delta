@@ -77,10 +77,7 @@ final class ArrayExpressionEvaluator implements ExpressionKernel {
 
   @Override
   public ColumnVector eval(
-      ScalarExpression expression,
-      List<ColumnVector> elements,
-      DataType outputType,
-      int rowCount) {
+      ScalarExpression expression, List<ColumnVector> elements, DataType outputType, int rowCount) {
     ArrayType arrayType = (ArrayType) outputType;
     DataType elementType = arrayType.getElementType();
     for (int index = 0; index < elements.size(); index++) {

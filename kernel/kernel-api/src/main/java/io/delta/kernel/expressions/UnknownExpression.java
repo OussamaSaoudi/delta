@@ -20,6 +20,7 @@ import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.annotation.Evolving;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * An expression kind that is unknown to this version of Kernel.
@@ -47,5 +48,16 @@ public final class UnknownExpression implements Expression {
   @Override
   public String toString() {
     return String.format("UnknownExpression(%s)", name);
+  }
+
+  @Override
+  public boolean equals(Object other) {
+    return this == other
+        || (other instanceof UnknownExpression && name.equals(((UnknownExpression) other).name));
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(UnknownExpression.class, name);
   }
 }

@@ -19,16 +19,19 @@ package io.delta.kernel.internal;
 import static io.delta.kernel.internal.DeltaErrors.wrapEngineException;
 
 import io.delta.kernel.CommitActions;
-import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.ColumnarBatch;
+import io.delta.kernel.data.FilteredColumnarBatch;
 import io.delta.kernel.engine.Engine;
 import io.delta.kernel.expressions.ExpressionEvaluator;
 import io.delta.kernel.expressions.Literal;
+import io.delta.kernel.expressions.StructExpression;
 import io.delta.kernel.internal.util.Utils;
 import io.delta.kernel.types.LongType;
 import io.delta.kernel.types.StructField;
 import io.delta.kernel.types.StructType;
 import io.delta.kernel.utils.CloseableIterator;
+import java.util.Arrays;
+import java.util.Optional;
 
 /** Utility class for table changes operations. */
 public class TableChangesUtils {
@@ -64,34 +67,31 @@ public class TableChangesUtils {
       Engine engine, ColumnarBatch batch, long version, long timestamp) {
     StructType schemaForEval = batch.getSchema();
 
-    ExpressionEvaluator commitVersionGenerator =
+    StructType metadataSchema =
+        new StructType(Arrays.asList(VERSION_STRUCT_FIELD, TIMESTAMP_STRUCT_FIELD));
+    ExpressionEvaluator metadataGenerator =
         wrapEngineException(
             () ->
                 engine
                     .getExpressionHandler()
-                    .getEvaluator(schemaForEval, Literal.ofLong(version), LongType.LONG),
-            "Get the expression evaluator for the commit version");
+                    .getEvaluator(
+                        schemaForEval,
+                        new StructExpression(
+                            Arrays.asList(Literal.ofLong(version), Literal.ofLong(timestamp))),
+                        metadataSchema),
+            "Get the expression evaluator for commit metadata");
 
-    ExpressionEvaluator commitTimestampGenerator =
+    ColumnarBatch metadata =
         wrapEngineException(
             () ->
-                engine
-                    .getExpressionHandler()
-                    .getEvaluator(schemaForEval, Literal.ofLong(timestamp), LongType.LONG),
-            "Get the expression evaluator for the commit timestamp");
-
-    ColumnVector commitVersionVector =
-        wrapEngineException(
-            () -> commitVersionGenerator.eval(batch), "Evaluating the commit version expression");
-
-    ColumnVector commitTimestampVector =
-        wrapEngineException(
-            () -> commitTimestampGenerator.eval(batch),
-            "Evaluating the commit timestamp expression");
+                metadataGenerator
+                    .eval(new FilteredColumnarBatch(batch, Optional.empty()))
+                    .getData(),
+            "Evaluating the commit metadata expression");
 
     return batch
-        .withNewColumn(0, VERSION_STRUCT_FIELD, commitVersionVector)
-        .withNewColumn(1, TIMESTAMP_STRUCT_FIELD, commitTimestampVector);
+        .withNewColumn(0, VERSION_STRUCT_FIELD, metadata.getColumnVector(0))
+        .withNewColumn(1, TIMESTAMP_STRUCT_FIELD, metadata.getColumnVector(1));
   }
 
   /**

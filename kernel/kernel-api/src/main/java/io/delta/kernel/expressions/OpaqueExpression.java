@@ -21,28 +21,29 @@ import io.delta.kernel.annotation.Evolving;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * An engine-defined expression whose semantics are opaque to Kernel.
  *
- * <p>The default engine rejects opaque expressions. Engines may use this node to preserve an
- * expression name and its children while routing the expression to an engine-specific handler.
+ * <p>The default engine rejects opaque expressions. Engine implementations provide a structural
+ * semantic key that completely identifies their expression's behavior.
  */
 @Evolving
-public final class OpaqueExpression implements Expression {
-  private final String name;
+public abstract class OpaqueExpression implements Expression {
   private final List<Expression> children;
 
-  public OpaqueExpression(String name, List<Expression> children) {
-    this.name = requireNonNull(name, "name is null");
-    this.children =
-        Collections.unmodifiableList(
-            new ArrayList<>(requireNonNull(children, "children are null")));
+  protected OpaqueExpression(List<Expression> children) {
+    requireNonNull(children, "children are null");
+    List<Expression> copy = new ArrayList<>(children.size());
+    for (Expression child : children) {
+      copy.add(requireNonNull(child, "child is null"));
+    }
+    this.children = Collections.unmodifiableList(copy);
   }
 
-  public String getName() {
-    return name;
-  }
+  /** Engine-owned, immutable key with structural equality for this expression's full semantics. */
+  protected abstract Object semanticKey();
 
   @Override
   public List<Expression> getChildren() {
@@ -51,6 +52,23 @@ public final class OpaqueExpression implements Expression {
 
   @Override
   public String toString() {
-    return String.format("OpaqueExpression(%s)", name);
+    return String.format("OpaqueExpression(%s)", getClass().getName());
+  }
+
+  @Override
+  public final boolean equals(Object other) {
+    if (this == other) {
+      return true;
+    }
+    if (other == null || getClass() != other.getClass()) {
+      return false;
+    }
+    OpaqueExpression that = (OpaqueExpression) other;
+    return Objects.equals(semanticKey(), that.semanticKey()) && children.equals(that.children);
+  }
+
+  @Override
+  public final int hashCode() {
+    return Objects.hash(getClass(), semanticKey(), children);
   }
 }

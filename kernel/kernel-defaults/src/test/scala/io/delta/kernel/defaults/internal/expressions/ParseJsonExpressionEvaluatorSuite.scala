@@ -17,18 +17,28 @@ package io.delta.kernel.defaults.internal.expressions
 
 import java.math.{BigDecimal => JBigDecimal}
 
-import io.delta.kernel.data.ColumnarBatch
-import io.delta.kernel.defaults.internal.data.vector.DefaultStructVector
+import io.delta.kernel.data.{ColumnarBatch, ColumnVector}
+import io.delta.kernel.defaults.internal.data.DefaultColumnarBatch
+import io.delta.kernel.defaults.internal.data.vector.{DefaultGenericVector, DefaultStructVector}
 import io.delta.kernel.expressions.{Column, Expression, ParseJson}
 import io.delta.kernel.types._
 
 import org.scalatest.funsuite.AnyFunSuite
 
-class ParseJsonExpressionEvaluatorSuite extends AnyFunSuite with ExpressionSuiteBase {
+class ParseJsonExpressionEvaluatorSuite extends AnyFunSuite {
   private val inputSchema = new StructType().add("json", StringType.STRING, true)
 
   private def jsonBatch(values: Seq[String]): ColumnarBatch =
-    batch(inputSchema, values.size, vector(StringType.STRING, values: _*))
+    new DefaultColumnarBatch(
+      values.size,
+      inputSchema,
+      Array(DefaultGenericVector.fromArray(StringType.STRING, values.toArray[AnyRef])))
+
+  private def evaluate(
+      input: ColumnarBatch,
+      expression: Expression,
+      outputType: DataType): ColumnVector =
+    new DefaultExpressionEvaluator(input.getSchema, expression, outputType).eval(input)
 
   test("parses Kernel-native primitive and complex values") {
     val nestedType = new StructType().add("x", IntegerType.INTEGER, true)

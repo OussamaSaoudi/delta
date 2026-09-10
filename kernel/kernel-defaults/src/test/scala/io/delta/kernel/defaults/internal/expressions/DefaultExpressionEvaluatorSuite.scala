@@ -43,8 +43,12 @@ class DefaultExpressionEvaluatorSuite extends AnyFunSuite with ExpressionSuiteBa
   Seq[Expression](
     new UnknownExpression("future_expression"),
     new UnknownPredicate("future_predicate"),
-    new OpaqueExpression("engine_expression", util.Collections.emptyList()),
-    new OpaquePredicate("engine_predicate", util.Collections.emptyList())).foreach { expression =>
+    new OpaqueExpression(util.Collections.emptyList()) {
+      override protected def semanticKey(): AnyRef = "engine_expression"
+    },
+    new OpaquePredicate(util.Collections.emptyList()) {
+      override protected def semanticKey(): AnyRef = "engine_predicate"
+    }).foreach { expression =>
     test(s"reject unevaluable expression: $expression") {
       val error = intercept[UnsupportedOperationException] {
         evaluator(new StructType(), expression, BooleanType.BOOLEAN)

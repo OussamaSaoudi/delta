@@ -71,6 +71,7 @@ public final class DefaultExpressionUtils {
     }
     return Integer.compare(left.length() - leftOffset, right.length() - rightOffset);
   }
+
   public static boolean supportsComparison(DataType type) {
     return type instanceof BooleanType
         || type instanceof ByteType
@@ -142,8 +143,7 @@ public final class DefaultExpressionUtils {
     } else if (type instanceof DoubleType) {
       return Double.compare(left.getDouble(leftRow), right.getDouble(rightRow));
     } else if (type instanceof DecimalType) {
-      return BIGDECIMAL_COMPARATOR.compare(
-          left.getDecimal(leftRow), right.getDecimal(rightRow));
+      return BIGDECIMAL_COMPARATOR.compare(left.getDecimal(leftRow), right.getDecimal(rightRow));
     } else if (type instanceof StringType
         || type instanceof GeometryType
         || type instanceof GeographyType) {
