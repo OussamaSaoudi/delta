@@ -68,9 +68,7 @@ public class DeletionVectorStoredBitmap {
 
             @Override
             public int getStartOffset() {
-              // Persisted DV files start with a one-byte format version. Protocol descriptors may
-              // omit the offset when the bitmap immediately follows that header.
-              return dvDescriptor.getOffset().orElse(1);
+              return dvDescriptor.getOffset().orElse(0);
             }
 
             @Override

@@ -17,11 +17,9 @@ package io.delta.kernel.execution;
 
 import static java.util.Objects.requireNonNull;
 
-import io.delta.kernel.data.FilteredColumnarBatch;
-import io.delta.kernel.internal.execution.FutureResultIterator;
+import io.delta.kernel.data.ColumnarBatch;
 import io.delta.kernel.internal.util.Utils;
-import io.delta.kernel.plans.PlanNode;
-import io.delta.kernel.utils.CloseableIterable;
+import io.delta.kernel.plans.PlanNode.FileScan;
 import io.delta.kernel.utils.CloseableIterator;
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -29,69 +27,45 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
-/** A thread-safe FIFO cache of replayable results and one-shot prefetched results. */
+/** A thread-safe FIFO map from scan nodes to one-shot prefetched row sources. */
 public final class PlanResultCache implements AutoCloseable {
   private final int maxEntries;
   private final long maxBytes;
-  private final boolean disabled;
-  private final LinkedHashMap<PlanNode, Entry> entries = new LinkedHashMap<>();
+  private final LinkedHashMap<FileScan, RowSource> scans = new LinkedHashMap<>();
   private long weightBytes;
   private boolean closed;
 
   public PlanResultCache(int maxEntries, long maxBytes) {
-    this(maxEntries, maxBytes, false);
     if (maxEntries <= 0 || maxBytes <= 0) {
       throw new IllegalArgumentException("Cache limits must be positive");
     }
-  }
-
-  private PlanResultCache(int maxEntries, long maxBytes, boolean disabled) {
     this.maxEntries = maxEntries;
     this.maxBytes = maxBytes;
-    this.disabled = disabled;
   }
 
-  /** Returns a cache that always misses and closes every result offered to it. */
-  public static PlanResultCache disabled() {
-    return new PlanResultCache(0, 0, true);
-  }
-
-  /** Returns one execution cursor, or null on a miss. */
-  public synchronized CloseableIterator<FilteredColumnarBatch> get(PlanNode plan) {
-    requireOpen();
-    requireNonNull(plan, "plan is null");
-    Entry entry = entries.get(plan);
-    if (entry == null) {
-      return null;
+  /** Claims a prefetched scan result, or returns null on a miss. */
+  public CloseableIterator<ColumnarBatch> get(FileScan scan) {
+    RowSource source;
+    synchronized (this) {
+      requireOpen();
+      requireNonNull(scan, "scan is null");
+      source = scans.remove(scan);
+      if (source == null) {
+        return null;
+      }
+      weightBytes -= source.weight;
     }
-    CloseableIterator<FilteredColumnarBatch> result = entry.open();
-    if (entry.oneShot()) {
-      entries.remove(plan);
-      recomputeWeight();
-    }
-    return result;
-  }
-
-  /** Installs an owned, complete result that may be read more than once. */
-  public void put(
-      PlanNode plan, CloseableIterable<FilteredColumnarBatch> ownedResult, long approximateBytes) {
-    install(plan, new ReplayableEntry(ownedResult, checkWeight(approximateBytes)));
-  }
-
-  /** Installs a ready, one-shot streaming result. */
-  public boolean prefetch(
-      PlanNode plan, CloseableIterator<FilteredColumnarBatch> result, long approximateBytes) {
-    requireNonNull(result, "result is null");
-    return prefetch(plan, CompletableFuture.completedFuture(result), approximateBytes);
+    return source.open();
   }
 
   /** Installs a future one-shot streaming result without waiting for it. */
   public boolean prefetch(
-      PlanNode plan,
-      CompletableFuture<CloseableIterator<FilteredColumnarBatch>> result,
+      FileScan scan,
+      CompletableFuture<CloseableIterator<ColumnarBatch>> result,
       long approximateBytes) {
-    return install(plan, new OneShotEntry(result, checkWeight(approximateBytes)));
+    return install(scan, new RowSource(result, checkWeight(approximateBytes)));
   }
 
   public synchronized long weightBytes() {
@@ -99,11 +73,11 @@ public final class PlanResultCache implements AutoCloseable {
   }
 
   public void invalidateAll() {
-    List<Entry> removed;
+    List<RowSource> removed;
     synchronized (this) {
       requireOpen();
-      removed = new ArrayList<>(entries.values());
-      entries.clear();
+      removed = new ArrayList<>(scans.values());
+      scans.clear();
       weightBytes = 0;
     }
     closeAll(removed);
@@ -111,50 +85,50 @@ public final class PlanResultCache implements AutoCloseable {
 
   @Override
   public void close() {
-    List<Entry> removed;
+    List<RowSource> removed;
     synchronized (this) {
       if (closed) {
         return;
       }
       closed = true;
-      removed = new ArrayList<>(entries.values());
-      entries.clear();
+      removed = new ArrayList<>(scans.values());
+      scans.clear();
       weightBytes = 0;
     }
     closeAll(removed);
   }
 
-  private boolean install(PlanNode plan, Entry offered) {
-    requireNonNull(plan, "plan is null");
+  private boolean install(FileScan scan, RowSource offered) {
+    requireNonNull(scan, "scan is null");
     requireNonNull(offered, "result is null");
-    List<Entry> removed = new ArrayList<>();
+    List<RowSource> removed = new ArrayList<>();
     boolean accepted;
     synchronized (this) {
       requireOpen();
-      if (disabled || entries.containsKey(plan)) {
+      if (scans.containsKey(scan)) {
         removed.add(offered);
         accepted = false;
       } else {
-        entries.put(plan, offered);
-        weightBytes = saturatedAdd(weightBytes, offered.weight());
-        Iterator<Map.Entry<PlanNode, Entry>> iterator = entries.entrySet().iterator();
-        while ((entries.size() > maxEntries || weightBytes > maxBytes) && iterator.hasNext()) {
-          removed.add(iterator.next().getValue());
+        Iterator<Map.Entry<FileScan, RowSource>> iterator = scans.entrySet().iterator();
+        while ((scans.size() >= maxEntries || offered.weight > maxBytes - weightBytes)
+            && iterator.hasNext()) {
+          RowSource evicted = iterator.next().getValue();
+          removed.add(evicted);
           iterator.remove();
-          recomputeWeight();
+          weightBytes -= evicted.weight;
         }
-        accepted = entries.get(plan) == offered;
+        if (offered.weight > maxBytes) {
+          removed.add(offered);
+          accepted = false;
+        } else {
+          scans.put(scan, offered);
+          weightBytes += offered.weight;
+          accepted = true;
+        }
       }
     }
     closeAll(removed);
     return accepted;
-  }
-
-  private void recomputeWeight() {
-    weightBytes = 0;
-    for (Map.Entry<PlanNode, Entry> entry : entries.entrySet()) {
-      weightBytes = saturatedAdd(weightBytes, entry.getValue().weight());
-    }
   }
 
   private void requireOpen() {
@@ -170,151 +144,39 @@ public final class PlanResultCache implements AutoCloseable {
     return approximateBytes;
   }
 
-  private static long saturatedAdd(long left, long right) {
-    return Long.MAX_VALUE - left < right ? Long.MAX_VALUE : left + right;
+  private static void closeAll(List<RowSource> sources) {
+    Utils.closeCloseables(sources.toArray(new AutoCloseable[0]));
   }
 
-  private static void closeAll(List<Entry> entries) {
-    Utils.closeCloseables(entries.toArray(new AutoCloseable[0]));
-  }
-
-  private interface Entry extends AutoCloseable {
-    CloseableIterator<FilteredColumnarBatch> open();
-
-    long weight();
-
-    boolean oneShot();
-
-    void close();
-  }
-
-  private static final class ReplayableEntry implements Entry {
-    private final CloseableIterable<FilteredColumnarBatch> result;
-    private final long weight;
-    private int pins;
-    private boolean evicted;
-
-    private ReplayableEntry(
-        CloseableIterable<FilteredColumnarBatch> result, long approximateBytes) {
-      this.result = requireNonNull(result, "ownedResult is null");
-      this.weight = approximateBytes;
-    }
-
-    @Override
-    public synchronized CloseableIterator<FilteredColumnarBatch> open() {
-      if (evicted) {
-        throw new IllegalStateException("Cache entry is evicted");
-      }
-      pins++;
-      try {
-        return new PinnedIterator(result.iterator(), this);
-      } catch (RuntimeException | Error failure) {
-        release();
-        throw failure;
-      }
-    }
-
-    @Override
-    public long weight() {
-      return weight;
-    }
-
-    @Override
-    public boolean oneShot() {
-      return false;
-    }
-
-    @Override
-    public synchronized void close() {
-      evicted = true;
-      closeIfUnpinned();
-    }
-
-    private synchronized void release() {
-      if (pins <= 0) {
-        throw new IllegalStateException("Cache entry is not pinned");
-      }
-      pins--;
-      closeIfUnpinned();
-    }
-
-    private void closeIfUnpinned() {
-      if (evicted && pins == 0) {
-        Utils.closeCloseables(result);
-      }
-    }
-  }
-
-  private static final class OneShotEntry implements Entry {
-    private final CompletableFuture<CloseableIterator<FilteredColumnarBatch>> result;
+  private static final class RowSource implements AutoCloseable {
+    private final CompletableFuture<CloseableIterator<ColumnarBatch>> result;
     private final long weight;
 
-    private OneShotEntry(
-        CompletableFuture<CloseableIterator<FilteredColumnarBatch>> result, long approximateBytes) {
+    private RowSource(
+        CompletableFuture<CloseableIterator<ColumnarBatch>> result, long approximateBytes) {
       this.result = requireNonNull(result, "result is null");
       this.weight = approximateBytes;
     }
 
-    @Override
-    public CloseableIterator<FilteredColumnarBatch> open() {
-      return new FutureResultIterator(result);
-    }
-
-    @Override
-    public long weight() {
-      return weight;
-    }
-
-    @Override
-    public boolean oneShot() {
-      return true;
+    private CloseableIterator<ColumnarBatch> open() {
+      try {
+        return requireNonNull(result.join(), "Prefetch future produced a null iterator");
+      } catch (CompletionException failure) {
+        Throwable cause = failure.getCause();
+        if (cause instanceof RuntimeException) {
+          throw (RuntimeException) cause;
+        }
+        if (cause instanceof Error) {
+          throw (Error) cause;
+        }
+        throw new CompletionException(cause);
+      }
     }
 
     @Override
     public void close() {
       result.whenComplete((iterator, failure) -> Utils.closeCloseablesSilently(iterator));
       result.cancel(false);
-    }
-  }
-
-  private static final class PinnedIterator implements CloseableIterator<FilteredColumnarBatch> {
-    private CloseableIterator<FilteredColumnarBatch> delegate;
-    private ReplayableEntry owner;
-
-    private PinnedIterator(
-        CloseableIterator<FilteredColumnarBatch> delegate, ReplayableEntry owner) {
-      this.delegate = requireNonNull(delegate, "cache iterator is null");
-      this.owner = owner;
-    }
-
-    @Override
-    public boolean hasNext() {
-      requireOpen();
-      return delegate.hasNext();
-    }
-
-    @Override
-    public FilteredColumnarBatch next() {
-      requireOpen();
-      return delegate.next();
-    }
-
-    @Override
-    public void close() {
-      if (delegate == null) {
-        return;
-      }
-      CloseableIterator<FilteredColumnarBatch> iterator = delegate;
-      ReplayableEntry entry = owner;
-      delegate = null;
-      owner = null;
-      Utils.closeCloseables(iterator, entry::release);
-    }
-
-    private void requireOpen() {
-      if (delegate == null) {
-        throw new IllegalStateException("Cached result iterator is closed");
-      }
     }
   }
 }

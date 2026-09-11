@@ -18,11 +18,6 @@ package io.delta.kernel.expressions;
 import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 
 import io.delta.kernel.annotation.Evolving;
-import io.delta.kernel.data.ArrayValue;
-import io.delta.kernel.data.ColumnVector;
-import io.delta.kernel.data.MapValue;
-import io.delta.kernel.data.Row;
-import io.delta.kernel.internal.util.RowKernels;
 import io.delta.kernel.types.*;
 import java.math.BigDecimal;
 import java.util.Collections;
@@ -35,8 +30,9 @@ import java.util.Objects;
  * <p>Definition:
  *
  * <ul>
- *   <li>Represents literals of primitive and nested types as defined in the Delta Transaction Log
- *       Protocol.
+ *   <li>Represents literal of primitive types as defined in the protocol <a
+ *       href="https://github.com/delta-io/delta/blob/master/PROTOCOL.md#primitive-types">Delta
+ *       Transaction Log Protocol: Primitive Types</a>
  *   <li>Use {@link #getValue()} to fetch the literal value. Returned value type depends on the type
  *       of the literal data type. See the {@link #getValue()} for further details.
  * </ul>
@@ -222,87 +218,6 @@ public final class Literal implements Expression {
   }
 
   /**
-   * Create an {@code array} literal.
-   *
-   * @param value array value
-   * @param dataType array type, including its element type and nullability
-   * @return a validated array literal
-   */
-  public static Literal ofArray(ArrayValue value, ArrayType dataType) {
-    Objects.requireNonNull(value, "array value is null");
-    Objects.requireNonNull(dataType, "array type is null");
-    checkArgument(value.getSize() >= 0, "Array size is negative: %s", value.getSize());
-    ColumnVector elements = Objects.requireNonNull(value.getElements(), "array elements are null");
-    checkArgument(elements.getSize() == value.getSize(), "Array element count does not match size");
-    checkArgument(
-        dataType.getElementType().equals(elements.getDataType()),
-        "Array element type %s does not match %s",
-        elements.getDataType(),
-        dataType.getElementType());
-    if (!dataType.containsNull()) {
-      for (int index = 0; index < value.getSize(); index++) {
-        checkArgument(!elements.isNullAt(index), "Array contains null at index %s", index);
-      }
-    }
-    return new Literal(value, dataType);
-  }
-
-  /**
-   * Create a {@code map} literal.
-   *
-   * @param value map value
-   * @param dataType map type, including its key and value types and value nullability
-   * @return a validated map literal
-   */
-  public static Literal ofMap(MapValue value, MapType dataType) {
-    Objects.requireNonNull(value, "map value is null");
-    Objects.requireNonNull(dataType, "map type is null");
-    checkArgument(value.getSize() >= 0, "Map size is negative: %s", value.getSize());
-    ColumnVector keys = Objects.requireNonNull(value.getKeys(), "map keys are null");
-    ColumnVector values = Objects.requireNonNull(value.getValues(), "map values are null");
-    checkArgument(keys.getSize() == value.getSize(), "Map key count does not match size");
-    checkArgument(values.getSize() == value.getSize(), "Map value count does not match size");
-    checkArgument(
-        dataType.getKeyType().equals(keys.getDataType()),
-        "Map key type %s does not match %s",
-        keys.getDataType(),
-        dataType.getKeyType());
-    checkArgument(
-        dataType.getValueType().equals(values.getDataType()),
-        "Map value type %s does not match %s",
-        values.getDataType(),
-        dataType.getValueType());
-    for (int index = 0; index < value.getSize(); index++) {
-      checkArgument(!keys.isNullAt(index), "Map contains null key at index %s", index);
-      if (!dataType.isValueContainsNull()) {
-        checkArgument(!values.isNullAt(index), "Map contains null value at index %s", index);
-      }
-    }
-    return new Literal(value, dataType);
-  }
-
-  /**
-   * Create a {@code struct} literal.
-   *
-   * @param value struct value
-   * @param dataType struct type, including field nullability
-   * @return a validated struct literal
-   */
-  public static Literal ofStruct(Row value, StructType dataType) {
-    Objects.requireNonNull(value, "struct value is null");
-    Objects.requireNonNull(dataType, "struct type is null");
-    checkArgument(
-        dataType.equals(value.getSchema()), "Struct value schema does not match literal type");
-    for (int ordinal = 0; ordinal < dataType.length(); ordinal++) {
-      checkArgument(
-          dataType.at(ordinal).isNullable() || !value.isNullAt(ordinal),
-          "Struct field %s is non-nullable",
-          dataType.at(ordinal).getName());
-    }
-    return new Literal(value, dataType);
-  }
-
-  /**
    * Create {@code null} value literal.
    *
    * @param dataType {@link DataType} of the null literal.
@@ -316,8 +231,13 @@ public final class Literal implements Expression {
   private final DataType dataType;
 
   private Literal(Object value, DataType dataType) {
+    if (dataType instanceof ArrayType
+        || dataType instanceof MapType
+        || dataType instanceof StructType) {
+      throw new IllegalArgumentException(dataType + " is an invalid data type for Literal.");
+    }
     this.value = value;
-    this.dataType = Objects.requireNonNull(dataType, "dataType is null");
+    this.dataType = dataType;
   }
 
   /**
@@ -336,11 +256,6 @@ public final class Literal implements Expression {
    *   <li>TIMESTAMP: {@link Long} represents the microseconds since epoch in UTC
    *   <li>TIMESTAMP_NTZ: {@link Long} represents the microseconds since epoch with no timezone
    *   <li>DECIMAL: {@link BigDecimal}.Use {@link #getDataType()} to find the precision and scale
-   *   <li>STRING: {@link String}
-   *   <li>BINARY: {@code byte[]}
-   *   <li>ARRAY: {@link ArrayValue}
-   *   <li>MAP: {@link MapValue}
-   *   <li>STRUCT: {@link Row}
    *   <li>GEOMETRY: {@link String} WKT (Well-Known Text) representation
    *   <li>GEOGRAPHY: {@link String} WKT (Well-Known Text) representation
    * </ul>
@@ -380,25 +295,6 @@ public final class Literal implements Expression {
       return false;
     }
     Literal other = (Literal) o;
-    if (!dataType.equals(other.dataType)) {
-      return false;
-    }
-    if (value == other.value) {
-      return true;
-    }
-    try {
-      return RowKernels.equal(value, other.value, dataType);
-    } catch (UnsupportedOperationException unsupportedType) {
-      return false;
-    }
-  }
-
-  @Override
-  public int hashCode() {
-    try {
-      return 31 * dataType.hashCode() + RowKernels.hash(value, dataType);
-    } catch (UnsupportedOperationException unsupportedType) {
-      return 31 * dataType.hashCode() + System.identityHashCode(value);
-    }
+    return Objects.equals(dataType, other.dataType) && Objects.equals(value, other.value);
   }
 }

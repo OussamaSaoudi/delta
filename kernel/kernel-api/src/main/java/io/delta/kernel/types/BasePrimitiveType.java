@@ -89,7 +89,7 @@ public abstract class BasePrimitiveType extends DataType {
 
   @Override
   public int hashCode() {
-    return 31 + primitiveTypeName.hashCode();
+    return Objects.hash(primitiveTypeName);
   }
 
   @Override

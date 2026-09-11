@@ -17,10 +17,12 @@ package io.delta.kernel.engine;
 
 import io.delta.kernel.annotation.Evolving;
 import io.delta.kernel.data.ColumnVector;
+import io.delta.kernel.data.ColumnarBatch;
 import io.delta.kernel.expressions.Expression;
 import io.delta.kernel.expressions.ExpressionEvaluator;
 import io.delta.kernel.expressions.Predicate;
 import io.delta.kernel.expressions.PredicateEvaluator;
+import io.delta.kernel.types.DataType;
 import io.delta.kernel.types.StructType;
 
 /**
@@ -34,23 +36,24 @@ import io.delta.kernel.types.StructType;
 public interface ExpressionHandler {
 
   /**
-   * Creates an evaluator for a struct-valued expression that produces one output row for each input
-   * row.
+   * Create an {@link ExpressionEvaluator} that can evaluate the given <i>expression</i> on {@link
+   * ColumnarBatch}s with the given <i>batchSchema</i>. The <i>expression</i> is expected to be a
+   * scalar expression where for each one input row there is a one output value.
    *
-   * @param inputSchema input data schema
-   * @param expression expression to evaluate
-   * @param outputSchema expected fields in each output row
-   * @return an evaluator bound to the input schema, expression, and output schema
+   * @param inputSchema Input data schema
+   * @param expression Expression to evaluate.
+   * @param outputType Expected result data type.
    */
   ExpressionEvaluator getEvaluator(
-      StructType inputSchema, Expression expression, StructType outputSchema);
+      StructType inputSchema, Expression expression, DataType outputType);
 
   /**
-   * Creates an evaluator that applies the predicate by narrowing a batch's selection.
+   * Create a {@link PredicateEvaluator} that can evaluate the given <i>predicate</i> expression and
+   * return a selection vector ({@link ColumnVector} of {@code boolean} type).
    *
-   * @param inputSchema schema of the data referred to by the predicate
-   * @param predicate predicate expression to evaluate
-   * @return an evaluator bound to the input schema and predicate
+   * @param inputSchema Schema of the data referred by the given predicate expression.
+   * @param predicate Predicate expression to evaluate.
+   * @return
    */
   PredicateEvaluator getPredicateEvaluator(StructType inputSchema, Predicate predicate);
 

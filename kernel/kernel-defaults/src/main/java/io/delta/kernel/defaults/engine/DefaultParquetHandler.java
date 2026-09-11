@@ -20,13 +20,11 @@ import io.delta.kernel.data.FilteredColumnarBatch;
 import io.delta.kernel.defaults.engine.fileio.FileIO;
 import io.delta.kernel.defaults.internal.parquet.ParquetFileReader;
 import io.delta.kernel.defaults.internal.parquet.ParquetFileWriter;
-import io.delta.kernel.defaults.internal.plans.FileScanExecutor;
 import io.delta.kernel.engine.FileReadResult;
 import io.delta.kernel.engine.ParquetHandler;
 import io.delta.kernel.expressions.Column;
 import io.delta.kernel.expressions.Predicate;
 import io.delta.kernel.internal.util.Utils;
-import io.delta.kernel.plans.ScanParquet;
 import io.delta.kernel.types.StructType;
 import io.delta.kernel.utils.*;
 import io.delta.kernel.utils.FileStatus;
@@ -37,11 +35,7 @@ import java.util.*;
 
 /** Default implementation of {@link ParquetHandler} based on Hadoop APIs. */
 public class DefaultParquetHandler implements ParquetHandler {
-  private static final String READER_PARALLELISM =
-      "delta.kernel.default.parquet.reader.parallelism";
-
   private final FileIO fileIO;
-  private final int readerParallelism;
 
   /**
    * Create an instance of default {@link ParquetHandler} implementation.
@@ -50,19 +44,6 @@ public class DefaultParquetHandler implements ParquetHandler {
    */
   public DefaultParquetHandler(FileIO fileIO) {
     this.fileIO = Objects.requireNonNull(fileIO, "fileIO is null");
-    this.readerParallelism =
-        fileIO
-            .getConf(READER_PARALLELISM)
-            .map(Integer::parseInt)
-            .orElse(Math.min(8, Runtime.getRuntime().availableProcessors()));
-    if (readerParallelism <= 0) {
-      throw new IllegalArgumentException(READER_PARALLELISM + " must be positive");
-    }
-  }
-
-  @Override
-  public CloseableIterator<FilteredColumnarBatch> readParquetFiles(ScanParquet scan) {
-    return FileScanExecutor.execute(scan, this, new DefaultFileSystemClient(fileIO));
   }
 
   @Override
@@ -71,15 +52,6 @@ public class DefaultParquetHandler implements ParquetHandler {
       StructType physicalSchema,
       Optional<Predicate> predicate)
       throws IOException {
-    if (readerParallelism > 1) {
-      return OrderedParallelFileReader.read(
-          fileIter,
-          readerParallelism,
-          file ->
-              new ParquetFileReader(fileIO)
-                  .read(file, physicalSchema, predicate)
-                  .map(batch -> new FileReadResult(batch, file.getPath())));
-    }
     return new CloseableIterator<FileReadResult>() {
       private final ParquetFileReader batchReader = new ParquetFileReader(fileIO);
       private CloseableIterator<ColumnarBatch> currentFileReader;

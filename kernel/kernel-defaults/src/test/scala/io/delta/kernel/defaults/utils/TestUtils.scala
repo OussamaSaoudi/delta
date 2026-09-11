@@ -152,7 +152,8 @@ trait AbstractTestUtils
       } else {
         val predicateEvaluator = defaultEngine.getExpressionHandler
           .getPredicateEvaluator(batch.getSchema, predicate.get)
-        predicateEvaluator.eval(new FilteredColumnarBatch(batch, Optional.empty()))
+        val selVector = predicateEvaluator.eval(batch, Optional.empty())
+        new FilteredColumnarBatch(batch, Optional.of(selVector))
       }
     }
   }

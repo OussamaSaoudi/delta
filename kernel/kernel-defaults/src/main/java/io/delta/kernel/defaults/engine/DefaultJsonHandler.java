@@ -18,18 +18,19 @@ package io.delta.kernel.defaults.engine;
 import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 import static java.lang.String.format;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.*;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.delta.kernel.data.*;
 import io.delta.kernel.defaults.engine.fileio.FileIO;
 import io.delta.kernel.defaults.engine.fileio.SeekableInputStream;
-import io.delta.kernel.defaults.internal.data.DefaultJsonBatchParser;
-import io.delta.kernel.defaults.internal.data.vector.DefaultGenericVector;
+import io.delta.kernel.defaults.internal.data.DefaultJsonRow;
+import io.delta.kernel.defaults.internal.data.DefaultRowBasedColumnarBatch;
 import io.delta.kernel.defaults.internal.json.JsonUtils;
-import io.delta.kernel.defaults.internal.plans.FileScanExecutor;
 import io.delta.kernel.engine.JsonHandler;
 import io.delta.kernel.exceptions.KernelEngineException;
 import io.delta.kernel.expressions.Predicate;
 import io.delta.kernel.internal.util.Utils;
-import io.delta.kernel.plans.ScanJson;
 import io.delta.kernel.types.*;
 import io.delta.kernel.utils.CloseableIterator;
 import io.delta.kernel.utils.FileStatus;
@@ -40,6 +41,11 @@ import java.util.*;
 
 /** Default implementation of {@link JsonHandler} based on Hadoop APIs. */
 public class DefaultJsonHandler implements JsonHandler {
+  private static final ObjectMapper mapper = new ObjectMapper();
+  // by default BigDecimals are truncated and read as floats
+  private static final ObjectReader objectReaderReadBigDecimals =
+      new ObjectMapper().reader(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
+
   private final FileIO fileIO;
   private final int maxBatchSize;
 
@@ -54,20 +60,22 @@ public class DefaultJsonHandler implements JsonHandler {
   }
 
   @Override
-  public CloseableIterator<FilteredColumnarBatch> readJsonFiles(ScanJson scan) {
-    return FileScanExecutor.execute(scan, this, new DefaultFileSystemClient(fileIO));
-  }
-
-  @Override
   public ColumnarBatch parseJson(
       ColumnVector jsonStringVector,
       StructType outputSchema,
       Optional<ColumnVector> selectionVector) {
-    try {
-      return DefaultJsonBatchParser.parseStrict(jsonStringVector, outputSchema, selectionVector);
-    } catch (IOException ex) {
-      throw new KernelEngineException(ex.getMessage(), ex);
+    List<Row> rows = new ArrayList<>();
+    for (int i = 0; i < jsonStringVector.getSize(); i++) {
+      boolean isSelected =
+          !selectionVector.isPresent()
+              || (!selectionVector.get().isNullAt(i) && selectionVector.get().getBoolean(i));
+      if (isSelected && !jsonStringVector.isNullAt(i)) {
+        rows.add(parseJson(jsonStringVector.getString(i), outputSchema));
+      } else {
+        rows.add(null);
+      }
     }
+    return new DefaultRowBasedColumnarBatch(outputSchema, rows);
   }
 
   @Override
@@ -116,21 +124,16 @@ public class DefaultJsonHandler implements JsonHandler {
           throw new NoSuchElementException();
         }
 
-        List<Object> jsonStrings = new ArrayList<>(maxBatchSize);
+        List<Row> rows = new ArrayList<>();
         int currentBatchSize = 0;
         do {
           // hasNext already reads the next one and keeps it in member variable `nextLine`
-          jsonStrings.add(nextLine);
+          rows.add(parseJson(nextLine, physicalSchema));
           nextLine = null;
           currentBatchSize++;
         } while (currentBatchSize < maxBatchSize && hasNext());
 
-        ColumnVector jsonVector = DefaultGenericVector.fromList(StringType.STRING, jsonStrings);
-        try {
-          return parseJson(jsonVector, physicalSchema, Optional.empty());
-        } finally {
-          jsonVector.close();
-        }
+        return new DefaultRowBasedColumnarBatch(physicalSchema, rows);
       }
 
       private boolean tryOpenNextFile() throws IOException {
@@ -166,5 +169,14 @@ public class DefaultJsonHandler implements JsonHandler {
   public void writeJsonFileAtomically(
       String filePath, CloseableIterator<Row> data, boolean overwrite) throws IOException {
     fileIO.newOutputFile(filePath).writeAtomically(data.map(JsonUtils::rowToJson), overwrite);
+  }
+
+  private Row parseJson(String json, StructType readSchema) {
+    try {
+      final JsonNode jsonNode = objectReaderReadBigDecimals.readTree(json);
+      return new DefaultJsonRow((ObjectNode) jsonNode, readSchema);
+    } catch (JsonProcessingException ex) {
+      throw new KernelEngineException(format("Could not parse JSON: %s", json), ex);
+    }
   }
 }

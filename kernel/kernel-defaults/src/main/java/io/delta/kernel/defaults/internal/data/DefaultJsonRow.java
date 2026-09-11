@@ -15,10 +15,7 @@
  */
 package io.delta.kernel.defaults.internal.data;
 
-import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.delta.kernel.data.ArrayValue;
@@ -30,9 +27,7 @@ import io.delta.kernel.defaults.internal.data.vector.DefaultGenericVector;
 import io.delta.kernel.internal.util.InternalUtils;
 import io.delta.kernel.internal.util.TimestampUtils;
 import io.delta.kernel.types.*;
-import java.io.IOException;
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.sql.Date;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -41,67 +36,19 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
-public class DefaultJsonRow implements RetainableRow {
-  private static final ObjectReader JSON_READER =
-      new ObjectMapper().reader(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
-  private static final ObjectReader SINGLE_OBJECT_JSON_READER =
-      JSON_READER.with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
-
+public class DefaultJsonRow implements Row {
   private final Object[] parsedValues;
   private final StructType readSchema;
 
   public DefaultJsonRow(ObjectNode rootNode, StructType readSchema) {
-    this(rootNode, readSchema, false);
-  }
-
-  private DefaultJsonRow(
-      ObjectNode rootNode, StructType readSchema, boolean nullFailureProneLeaves) {
     this.readSchema = readSchema;
     this.parsedValues = new Object[readSchema.length()];
 
     for (int i = 0; i < readSchema.length(); i++) {
       final StructField field = readSchema.at(i);
-      final Object parsedValue = decodeField(rootNode, field, nullFailureProneLeaves);
+      final Object parsedValue = decodeField(rootNode, field);
       parsedValues[i] = parsedValue;
     }
-  }
-
-  DefaultJsonRow(Object[] parsedValues, StructType readSchema) {
-    this.readSchema = readSchema;
-    this.parsedValues = parsedValues;
-  }
-
-  /** Decodes one JSON object using strict type and nullability semantics. */
-  public static DefaultJsonRow fromJson(String json, StructType readSchema) throws IOException {
-    return fromJsonTree(json, readSchema);
-  }
-
-  static DefaultJsonRow fromJsonTree(String json, StructType readSchema) throws IOException {
-    return fromJson(JSON_READER, json, readSchema, false);
-  }
-
-  static DefaultJsonRow fromJsonTreePermissively(String json, StructType readSchema)
-      throws IOException {
-    return fromJson(SINGLE_OBJECT_JSON_READER, json, readSchema, true);
-  }
-
-  /**
-   * Decodes one JSON object while turning invalid date, timestamp, and decimal struct leaves into
-   * null. This is the permissive leaf behavior required by the ParseJson expression.
-   */
-  public static DefaultJsonRow fromJsonPermissively(String json, StructType readSchema)
-      throws IOException {
-    return StrictJsonRowParser.forSchema(readSchema).parsePermissively(json);
-  }
-
-  private static DefaultJsonRow fromJson(
-      ObjectReader reader, String json, StructType readSchema, boolean nullFailureProneLeaves)
-      throws IOException {
-    JsonNode rootNode = reader.readTree(json);
-    if (rootNode == null || !rootNode.isObject()) {
-      throw new IllegalArgumentException("Expected one JSON object");
-    }
-    return new DefaultJsonRow((ObjectNode) rootNode, readSchema, nullFailureProneLeaves);
   }
 
   @Override
@@ -112,12 +59,6 @@ public class DefaultJsonRow implements RetainableRow {
   @Override
   public boolean isNullAt(int ordinal) {
     return parsedValues[ordinal] == null;
-  }
-
-  @Override
-  public final Object retainValue(int ordinal) {
-    Object value = parsedValues[ordinal];
-    return value instanceof byte[] ? ((byte[]) value).clone() : value;
   }
 
   @Override
@@ -192,25 +133,10 @@ public class DefaultJsonRow implements RetainableRow {
     }
   }
 
-  private static Object decodeElement(
-      JsonNode jsonValue, DataType dataType, boolean nullFailureProneLeaves) {
+  private static Object decodeElement(JsonNode jsonValue, DataType dataType) {
     if (jsonValue.isNull()) {
       return null;
     }
-
-    if (nullFailureProneLeaves && isFailureProneLeaf(dataType)) {
-      try {
-        return decodeElementUnchecked(jsonValue, dataType, true);
-      } catch (RuntimeException ignored) {
-        return null;
-      }
-    }
-
-    return decodeElementUnchecked(jsonValue, dataType, nullFailureProneLeaves);
-  }
-
-  private static Object decodeElementUnchecked(
-      JsonNode jsonValue, DataType dataType, boolean nullFailureProneLeaves) {
 
     if (dataType instanceof BooleanType) {
       throwIfTypeMismatch("boolean", jsonValue.isBoolean(), jsonValue);
@@ -317,19 +243,8 @@ public class DefaultJsonRow implements RetainableRow {
     }
 
     if (dataType instanceof DecimalType) {
-      if (!nullFailureProneLeaves) {
-        throwIfTypeMismatch("decimal", jsonValue.isNumber(), jsonValue);
-        return jsonValue.decimalValue();
-      }
-      throwIfTypeMismatch("decimal", jsonValue.isNumber() || jsonValue.isTextual(), jsonValue);
-      BigDecimal decimal =
-          jsonValue.isTextual() ? new BigDecimal(jsonValue.textValue()) : jsonValue.decimalValue();
-      DecimalType decimalType = (DecimalType) dataType;
-      BigDecimal scaled = decimal.setScale(decimalType.getScale(), RoundingMode.HALF_UP);
-      if (scaled.precision() > decimalType.getPrecision()) {
-        throw new ArithmeticException("Decimal exceeds precision " + decimalType.getPrecision());
-      }
-      return scaled;
+      throwIfTypeMismatch("decimal", jsonValue.isNumber(), jsonValue);
+      return jsonValue.decimalValue();
     }
 
     if (dataType instanceof DateType) {
@@ -350,8 +265,7 @@ public class DefaultJsonRow implements RetainableRow {
 
     if (dataType instanceof StructType) {
       throwIfTypeMismatch("object", jsonValue.isObject(), jsonValue);
-      return new DefaultJsonRow(
-          (ObjectNode) jsonValue, (StructType) dataType, nullFailureProneLeaves);
+      return new DefaultJsonRow((ObjectNode) jsonValue, (StructType) dataType);
     }
 
     if (dataType instanceof ArrayType) {
@@ -361,14 +275,24 @@ public class DefaultJsonRow implements RetainableRow {
       final Object[] elements = new Object[jsonArray.size()];
       for (int i = 0; i < jsonArray.size(); i++) {
         final JsonNode element = jsonArray.get(i);
-        final Object parsedElement = decodeElement(element, arrayType.getElementType(), false);
+        final Object parsedElement = decodeElement(element, arrayType.getElementType());
         if (parsedElement == null && !arrayType.containsNull()) {
           throw new RuntimeException(
               "Array type expects no nulls as elements, but " + "received `null` as array element");
         }
         elements[i] = parsedElement;
       }
-      return arrayValue(arrayType.getElementType(), elements);
+      return new ArrayValue() {
+        @Override
+        public int getSize() {
+          return elements.length;
+        }
+
+        @Override
+        public ColumnVector getElements() {
+          return DefaultGenericVector.fromArray(arrayType.getElementType(), elements);
+        }
+      };
     }
 
     if (dataType instanceof MapType) {
@@ -399,7 +323,7 @@ public class DefaultJsonRow implements RetainableRow {
             valueParsed = entry.getValue().asText();
           }
         } else {
-          valueParsed = decodeElement(entry.getValue(), mapType.getValueType(), false);
+          valueParsed = decodeElement(entry.getValue(), mapType.getValueType());
         }
         if (valueParsed == null && !mapType.isValueContainsNull()) {
           throw new RuntimeException(
@@ -408,7 +332,22 @@ public class DefaultJsonRow implements RetainableRow {
         keys.add(keyParsed);
         values.add(valueParsed);
       }
-      return mapValue(mapType, keys, values);
+      return new MapValue() {
+        @Override
+        public int getSize() {
+          return jsonValue.size();
+        }
+
+        @Override
+        public ColumnVector getKeys() {
+          return DefaultGenericVector.fromList(mapType.getKeyType(), keys);
+        }
+
+        @Override
+        public ColumnVector getValues() {
+          return DefaultGenericVector.fromList(mapType.getValueType(), values);
+        }
+      };
     }
 
     if (dataType instanceof GeometryType || dataType instanceof GeographyType) {
@@ -420,48 +359,7 @@ public class DefaultJsonRow implements RetainableRow {
         String.format("Unsupported DataType %s for RootNode %s", dataType, jsonValue));
   }
 
-  static ArrayValue arrayValue(DataType elementType, Object[] elements) {
-    return new ArrayValue() {
-      @Override
-      public int getSize() {
-        return elements.length;
-      }
-
-      @Override
-      public ColumnVector getElements() {
-        return DefaultGenericVector.fromArray(elementType, elements);
-      }
-    };
-  }
-
-  static MapValue mapValue(MapType type, List<Object> keys, List<Object> values) {
-    return new MapValue() {
-      @Override
-      public int getSize() {
-        return keys.size();
-      }
-
-      @Override
-      public ColumnVector getKeys() {
-        return DefaultGenericVector.fromList(type.getKeyType(), keys);
-      }
-
-      @Override
-      public ColumnVector getValues() {
-        return DefaultGenericVector.fromList(type.getValueType(), values);
-      }
-    };
-  }
-
-  static boolean isFailureProneLeaf(DataType dataType) {
-    return dataType instanceof DecimalType
-        || dataType instanceof DateType
-        || dataType instanceof TimestampType
-        || dataType instanceof TimestampNTZType;
-  }
-
-  private static Object decodeField(
-      ObjectNode rootNode, StructField field, boolean nullFailureProneLeaves) {
+  private static Object decodeField(ObjectNode rootNode, StructField field) {
     if (rootNode.get(field.getName()) == null || rootNode.get(field.getName()).isNull()) {
       if (field.isNullable()) {
         return null;
@@ -473,13 +371,6 @@ public class DefaultJsonRow implements RetainableRow {
               field.getName(), rootNode));
     }
 
-    Object value =
-        decodeElement(rootNode.get(field.getName()), field.getDataType(), nullFailureProneLeaves);
-    if (value == null && !field.isNullable()) {
-      throw new RuntimeException(
-          String.format(
-              "Decoded value at key %s is null but field isn't nullable", field.getName()));
-    }
-    return value;
+    return decodeElement(rootNode.get(field.getName()), field.getDataType());
   }
 }

@@ -26,6 +26,7 @@ import io.delta.kernel.utils.CloseableIterator;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.Iterator;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 
 /**
@@ -91,52 +92,30 @@ public class Utils {
 
   /**
    * Close the given one or more {@link AutoCloseable}s. {@link AutoCloseable#close()} will be
-   * called on all given non-null closeables. The first failure is thrown after every close is
-   * attempted; later failures are added as suppressed exceptions.
+   * called on all given non-null closeables. Will throw unchecked {@link RuntimeException} if an
+   * error occurs while closing. If multiple closeables causes exceptions in closing, the exceptions
+   * will be added as suppressed to the main exception that is thrown.
    *
    * @param closeables
    */
   public static void closeCloseables(AutoCloseable... closeables) {
-    Throwable failure = null;
+    RuntimeException exception = null;
     for (AutoCloseable closeable : closeables) {
       if (closeable == null) {
         continue;
       }
       try {
         closeable.close();
-      } catch (Throwable closeFailure) {
-        if (failure == null) {
-          failure = closeFailure;
-        } else if (closeFailure != failure) {
-          failure.addSuppressed(closeFailure);
+      } catch (Exception ex) {
+        if (exception == null) {
+          exception = new RuntimeException(ex);
+        } else {
+          exception.addSuppressed(ex);
         }
       }
     }
-    if (failure instanceof RuntimeException) {
-      throw (RuntimeException) failure;
-    }
-    if (failure instanceof Error) {
-      throw (Error) failure;
-    }
-    if (failure != null) {
-      throw new RuntimeException(failure);
-    }
-  }
-
-  /** Closes every non-null closeable and adds any close failures to {@code failure}. */
-  public static void closeCloseablesAndAddSuppressed(
-      Throwable failure, AutoCloseable... closeables) {
-    for (AutoCloseable closeable : closeables) {
-      if (closeable == null) {
-        continue;
-      }
-      try {
-        closeable.close();
-      } catch (Throwable closeFailure) {
-        if (closeFailure != failure) {
-          failure.addSuppressed(closeFailure);
-        }
-      }
+    if (exception != null) {
+      throw exception;
     }
   }
 
@@ -154,10 +133,48 @@ public class Utils {
     }
   }
 
+  // Utility class to support `intoRows` below
+  private static class FilteredBatchToRowIter implements CloseableIterator<Row> {
+    private final CloseableIterator<FilteredColumnarBatch> sourceBatches;
+    private CloseableIterator<Row> current;
+    private boolean isClosed = false;
+
+    FilteredBatchToRowIter(CloseableIterator<FilteredColumnarBatch> sourceBatches) {
+      this.sourceBatches = sourceBatches;
+    }
+
+    @Override
+    public boolean hasNext() {
+      if (isClosed) {
+        return false;
+      }
+      while ((current == null || !current.hasNext()) && sourceBatches.hasNext()) {
+        closeCloseables(current);
+        FilteredColumnarBatch next = sourceBatches.next();
+        current = next.getRows();
+      }
+      return current != null && current.hasNext();
+    }
+
+    @Override
+    public Row next() {
+      if (!hasNext()) {
+        throw new java.util.NoSuchElementException("No more rows available");
+      }
+      return current.next();
+    }
+
+    @Override
+    public void close() throws IOException {
+      isClosed = true;
+      closeCloseables(current, sourceBatches);
+    }
+  }
+
   /** Convert a ClosableIterator of FilteredColumnarBatch into a CloseableIterator of Row */
   public static CloseableIterator<Row> intoRows(
       CloseableIterator<FilteredColumnarBatch> sourceBatches) {
-    return sourceBatches.flatMap(FilteredColumnarBatch::getRows);
+    return new FilteredBatchToRowIter(sourceBatches);
   }
 
   /**
@@ -175,7 +192,50 @@ public class Utils {
    */
   public static <T> CloseableIterator<T> flatten(
       CloseableIterator<CloseableIterator<T>> nestedIterator) {
-    return nestedIterator.flatMap(iterator -> iterator);
+    return new CloseableIterator<>() {
+      private CloseableIterator<T> currentInnerIterator = null;
+
+      @Override
+      public boolean hasNext() {
+        while (true) {
+          if (currentInnerIterator != null && currentInnerIterator.hasNext()) {
+            return true;
+          }
+
+          if (currentInnerIterator != null) {
+            closeCloseables(currentInnerIterator);
+            currentInnerIterator = null;
+          }
+
+          if (!nestedIterator.hasNext()) {
+            return false;
+          }
+
+          try {
+            currentInnerIterator = nestedIterator.next();
+          } catch (Exception e) {
+            // Ensure cleanup on exception
+            closeCloseables(nestedIterator);
+            throw e;
+          }
+        }
+      }
+
+      @Override
+      public T next() {
+        if (!hasNext()) {
+          throw new NoSuchElementException();
+        }
+        return currentInnerIterator.next();
+      }
+
+      @Override
+      public void close() {
+        // Close both the current inner iterator and the outer iterator
+        // closeCloseables works with null closeable.
+        closeCloseables(currentInnerIterator, nestedIterator);
+      }
+    };
   }
 
   /**

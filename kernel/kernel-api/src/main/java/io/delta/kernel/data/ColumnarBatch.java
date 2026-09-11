@@ -30,6 +30,15 @@ import java.util.NoSuchElementException;
  */
 @Evolving
 public interface ColumnarBatch {
+  /** How long data reachable from this batch remains valid. */
+  enum Lifetime {
+    /** Valid only until the producing iterator or evaluator advances or closes. */
+    BORROWED,
+
+    /** Immutable, concurrently readable, and valid while reachable. */
+    OWNED
+  }
+
   /** @return the schema of the data in this batch. */
   StructType getSchema();
 
@@ -44,6 +53,11 @@ public interface ColumnarBatch {
 
   /** @return the number of rows/records in the columnar batch */
   int getSize();
+
+  /** Returns the lifetime of this batch and all data reachable from it. */
+  default Lifetime getLifetime() {
+    return Lifetime.BORROWED;
+  }
 
   /**
    * Return a copy of the {@link ColumnarBatch} with given new column vector inserted at the given
@@ -86,6 +100,14 @@ public interface ColumnarBatch {
     throw new UnsupportedOperationException("Not yet implemented");
   }
 
+  /** Returns one positional row view. */
+  default Row getRow(int rowId) {
+    if (rowId < 0 || rowId >= getSize()) {
+      throw new IndexOutOfBoundsException("Invalid row id: " + rowId);
+    }
+    return new ColumnarBatchRow(this, rowId);
+  }
+
   /** @return iterator of {@link Row}s in this batch */
   default CloseableIterator<Row> getRows() {
     final ColumnarBatch batch = this;
@@ -103,9 +125,7 @@ public interface ColumnarBatch {
         if (!hasNext()) {
           throw new NoSuchElementException();
         }
-        Row row = new ColumnarBatchRow(batch, rowId);
-        rowId += 1;
-        return row;
+        return batch.getRow(rowId++);
       }
 
       @Override

@@ -15,111 +15,26 @@
  */
 package io.delta.kernel.expressions
 
-import java.util.{Arrays, Collections}
-
-import io.delta.kernel.data.{ArrayValue, ColumnVector, MapValue, Row}
-import io.delta.kernel.internal.data.GenericRow
-import io.delta.kernel.internal.util.VectorUtils
 import io.delta.kernel.types._
 
 import org.scalatest.funsuite.AnyFunSuite
 
 class ExpressionsSuite extends AnyFunSuite {
-  test("nested null literals preserve their declared type") {
-    Seq[DataType](
-      new ArrayType(IntegerType.INTEGER, true),
-      new MapType(IntegerType.INTEGER, IntegerType.INTEGER, true),
-      new StructType().add("s1", BooleanType.BOOLEAN)).foreach { dataType =>
-      val literal = Literal.ofNull(dataType)
-      assert(literal.getValue == null)
-      assert(literal.getDataType == dataType)
+  test("expressions: unsupported literal data types") {
+    val ex1 = intercept[IllegalArgumentException] {
+      Literal.ofNull(new ArrayType(IntegerType.INTEGER, true))
     }
-  }
+    assert(ex1.getMessage.contains("array[integer] is an invalid data type for Literal."))
 
-  test("complex literal factories preserve Kernel data values") {
-    val arrayType = new ArrayType(IntegerType.INTEGER, false)
-    val array = VectorUtils.buildArrayValue(Arrays.asList(1, 2), IntegerType.INTEGER)
-    val arrayLiteral = Literal.ofArray(array, arrayType)
-    assert(arrayLiteral.getValue.asInstanceOf[ArrayValue].getElements.getInt(1) == 2)
-
-    val mapType = new MapType(StringType.STRING, IntegerType.INTEGER, false)
-    val map = VectorUtils.buildMapValue(
-      Arrays.asList("one", "two"),
-      Arrays.asList(1, 2),
-      mapType)
-    val mapLiteral = Literal.ofMap(map, mapType)
-    assert(mapLiteral.getValue.asInstanceOf[MapValue].getValues.getInt(0) == 1)
-
-    val structType = new StructType().add("id", IntegerType.INTEGER, false)
-    val row = GenericRow.fromValues(structType, Arrays.asList[AnyRef](Integer.valueOf(7)))
-    val structLiteral = Literal.ofStruct(row, structType)
-    assert(structLiteral.getValue.asInstanceOf[Row].getInt(0) == 7)
-  }
-
-  private val intArray = new ArrayType(IntegerType.INTEGER, false)
-  private val stringIntMap = new MapType(StringType.STRING, IntegerType.INTEGER, false)
-  private val requiredIntStruct = new StructType().add("id", IntegerType.INTEGER, false)
-
-  private def arrayValue(size: Int, elements: ColumnVector): ArrayValue = new ArrayValue {
-    override def getSize: Int = size
-    override def getElements: ColumnVector = elements
-  }
-
-  private def mapValue(size: Int, keys: ColumnVector, values: ColumnVector): MapValue =
-    new MapValue {
-      override def getSize: Int = size
-      override def getKeys: ColumnVector = keys
-      override def getValues: ColumnVector = values
+    val ex2 = intercept[IllegalArgumentException] {
+      Literal.ofNull(new MapType(IntegerType.INTEGER, IntegerType.INTEGER, true))
     }
+    assert(ex2.getMessage.contains("map[integer, integer] is an invalid data type for Literal."))
 
-  private val oneInt = VectorUtils.buildColumnVector(Arrays.asList(1), IntegerType.INTEGER)
-  private val twoInts = VectorUtils.buildColumnVector(Arrays.asList(1, 2), IntegerType.INTEGER)
-  private val oneString = VectorUtils.buildColumnVector(Arrays.asList("a"), StringType.STRING)
-  private val twoStrings = VectorUtils.buildColumnVector(
-    Arrays.asList("a", "b"),
-    StringType.STRING)
-  private val nullableInt = VectorUtils.buildColumnVector(
-    Arrays.asList[Integer](null),
-    IntegerType.INTEGER)
-  private val nullableString = VectorUtils.buildColumnVector(
-    Arrays.asList[String](null),
-    StringType.STRING)
-
-  Seq[(String, () => Unit)](
-    "negative array size" -> (() => Literal.ofArray(arrayValue(-1, oneInt), intArray)),
-    "array element count" -> (() => Literal.ofArray(arrayValue(2, oneInt), intArray)),
-    "array element type" -> (() => Literal.ofArray(arrayValue(1, oneString), intArray)),
-    "array element nullability" ->
-      (() => Literal.ofArray(arrayValue(1, nullableInt), intArray)),
-    "negative map size" ->
-      (() => Literal.ofMap(mapValue(-1, oneString, oneInt), stringIntMap)),
-    "map key count" ->
-      (() => Literal.ofMap(mapValue(2, oneString, twoInts), stringIntMap)),
-    "map value count" ->
-      (() => Literal.ofMap(mapValue(2, twoStrings, oneInt), stringIntMap)),
-    "map key type" ->
-      (() => Literal.ofMap(mapValue(1, oneInt, oneInt), stringIntMap)),
-    "map value type" ->
-      (() => Literal.ofMap(mapValue(1, oneString, oneString), stringIntMap)),
-    "map null key" ->
-      (() => Literal.ofMap(mapValue(1, nullableString, oneInt), stringIntMap)),
-    "map value nullability" ->
-      (() => Literal.ofMap(mapValue(1, oneString, nullableInt), stringIntMap)),
-    "map builder entry count" ->
-      (() => VectorUtils.buildMapValue(Arrays.asList("a"), Arrays.asList(1, 2), stringIntMap)),
-    "struct schema" -> (() =>
-      Literal.ofStruct(
-        GenericRow.fromValues(
-          new StructType().add("other", IntegerType.INTEGER, false),
-          Collections.singletonList(Integer.valueOf(1))),
-        requiredIntStruct)),
-    "struct field nullability" -> (() =>
-      Literal.ofStruct(
-        GenericRow.fromValues(requiredIntStruct, Collections.singletonList[AnyRef](null)),
-        requiredIntStruct))).foreach { case (name, invalidLiteral) =>
-    test(s"complex literal validation: $name") {
-      intercept[IllegalArgumentException](invalidLiteral())
+    val ex3 = intercept[IllegalArgumentException] {
+      Literal.ofNull(new StructType().add("s1", BooleanType.BOOLEAN))
     }
+    assert(ex3.getMessage.matches("struct.* is an invalid data type for Literal."))
   }
 
   test("ofDecimal: adjusts precision when scale exceeds caller-provided precision") {

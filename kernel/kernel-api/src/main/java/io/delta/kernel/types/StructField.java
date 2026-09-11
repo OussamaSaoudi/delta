@@ -237,12 +237,7 @@ public class StructField {
 
   @Override
   public int hashCode() {
-    int hash = 1;
-    hash = 31 * hash + Objects.hashCode(name);
-    hash = 31 * hash + Objects.hashCode(dataType);
-    hash = 31 * hash + Boolean.hashCode(nullable);
-    hash = 31 * hash + Objects.hashCode(metadata);
-    return 31 * hash + Objects.hashCode(typeChanges);
+    return Objects.hash(name, dataType, nullable, metadata, typeChanges);
   }
 
   public StructField withNewMetadata(FieldMetadata metadata) {

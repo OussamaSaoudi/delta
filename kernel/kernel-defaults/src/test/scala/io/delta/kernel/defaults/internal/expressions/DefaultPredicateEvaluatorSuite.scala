@@ -19,8 +19,7 @@ import java.lang.{Boolean => BooleanJ}
 import java.util.Optional
 import java.util.Optional.empty
 
-import io.delta.kernel.data.{ColumnarBatch, ColumnVector, FilteredColumnarBatch}
-import io.delta.kernel.data.FilteredColumnarBatch.Lifetime
+import io.delta.kernel.data.{ColumnarBatch, ColumnVector}
 import io.delta.kernel.defaults.internal.data.DefaultColumnarBatch
 import io.delta.kernel.expressions.{Column, Literal}
 import io.delta.kernel.types.{BooleanType, StructType}
@@ -53,7 +52,7 @@ class DefaultPredicateEvaluatorSuite extends AnyFunSuite with ExpressionSuiteBas
   private val orPredicate = or(left, right)
 
   private val expOrOutput = booleanVector(
-    Seq[BooleanJ](true, true, false, true, true, false, true, true, false, false, false))
+    Seq[BooleanJ](true, true, false, true, true, false, true, true, null, null, null))
 
   test("evaluate predicate: with no starting selection vector") {
     val batch = new DefaultColumnarBatch(
@@ -69,7 +68,7 @@ class DefaultPredicateEvaluatorSuite extends AnyFunSuite with ExpressionSuiteBas
     val existingSelVector = booleanVector(
       Seq[BooleanJ](false, true, true, true, false, false, null, null, null, null, null))
     val outputWithSelVector = booleanVector(
-      Seq[BooleanJ](false, true, false, true, false, false, false, false, false, false, false))
+      Seq[BooleanJ](false, true, false, true, false, false, null, null, null, null, null))
 
     val actOutputVector = evalOr(batch, Optional.of(existingSelVector))
     checkBooleanVectors(actOutputVector, outputWithSelVector)
@@ -82,13 +81,13 @@ class DefaultPredicateEvaluatorSuite extends AnyFunSuite with ExpressionSuiteBas
     val selVec1 = booleanVector(
       Seq[BooleanJ](false, true, false, true, false, false, null, null, null, null, null))
     val expOutputWithSelVec1 = booleanVector(
-      Seq[BooleanJ](false, true, false, true, false, false, false, false, false, false, false))
+      Seq[BooleanJ](false, true, false, true, false, false, null, null, null, null, null))
     checkBooleanVectors(evalOr(batch, Optional.of(selVec1)), expOutputWithSelVec1)
 
     val selVec2 = booleanVector(
       Seq[BooleanJ](false, false, false, true, false, false, null, null, null, null, null))
     val expOutputWithSelVec2 = booleanVector(
-      Seq[BooleanJ](false, false, false, true, false, false, false, false, false, false, false))
+      Seq[BooleanJ](false, false, false, true, false, false, null, null, null, null, null))
     checkBooleanVectors(evalOr(batch, Optional.of(selVec2)), expOutputWithSelVec2)
   }
 
@@ -96,10 +95,6 @@ class DefaultPredicateEvaluatorSuite extends AnyFunSuite with ExpressionSuiteBas
       batch: ColumnarBatch,
       existingSelVector: Optional[ColumnVector] = empty()): ColumnVector = {
     val evaluator = new DefaultPredicateEvaluator(batch.getSchema, orPredicate)
-    val input = new FilteredColumnarBatch(batch, existingSelVector, Lifetime.OWNED)
-    val result = evaluator.eval(input)
-    assert(result.getData eq batch)
-    assert(result.getLifetime == Lifetime.OWNED)
-    result.getSelectionVector.get()
+    evaluator.eval(batch, existingSelVector)
   }
 }

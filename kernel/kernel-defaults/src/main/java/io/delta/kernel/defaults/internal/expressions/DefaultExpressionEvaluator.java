@@ -19,7 +19,6 @@ import static io.delta.kernel.defaults.internal.DefaultEngineErrors.unsupportedE
 import static io.delta.kernel.defaults.internal.expressions.DefaultExpressionUtils.*;
 import static io.delta.kernel.defaults.internal.expressions.ImplicitCastExpression.canCastTo;
 import static io.delta.kernel.internal.util.ExpressionUtils.*;
-import static io.delta.kernel.internal.util.PartitionUtils.isSupportedPartitionValueType;
 import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -27,60 +26,35 @@ import static java.util.stream.Collectors.toList;
 
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.ColumnarBatch;
-import io.delta.kernel.data.FilteredColumnarBatch;
-import io.delta.kernel.defaults.internal.data.DefaultColumnarBatch;
-import io.delta.kernel.defaults.internal.data.DefaultJsonBatchParser;
 import io.delta.kernel.defaults.internal.data.vector.DefaultBooleanVector;
 import io.delta.kernel.defaults.internal.data.vector.DefaultConstantVector;
-import io.delta.kernel.defaults.internal.data.vector.DefaultViewVector;
+import io.delta.kernel.engine.ExpressionHandler;
 import io.delta.kernel.expressions.*;
-import io.delta.kernel.internal.util.ColumnBinding;
 import io.delta.kernel.internal.util.GeometryUtils;
-import io.delta.kernel.internal.util.Utils;
 import io.delta.kernel.types.*;
-import java.io.IOException;
 import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * Default {@link ExpressionEvaluator}. It validates and lowers one struct-valued expression, then
- * evaluates it as a batch. Scalar evaluation remains an internal building block for the expression
- * kernels.
+ * Implementation of {@link ExpressionEvaluator} for default {@link ExpressionHandler}. It takes
+ * care of validating, adding necessary implicit casts and evaluating the {@link Expression} on
+ * given {@link ColumnarBatch}.
  */
 public class DefaultExpressionEvaluator implements ExpressionEvaluator {
-  private static final Map<String, ExpressionKernel> EXPRESSION_KERNELS;
-
-  static {
-    Map<String, ExpressionKernel> kernels = new HashMap<>();
-    register(kernels, ArrayExpressionEvaluator.INSTANCE);
-    register(kernels, ToJsonExpressionEvaluator.INSTANCE);
-    EXPRESSION_KERNELS = Collections.unmodifiableMap(kernels);
-  }
-
   private final Expression expression;
-  private final Map<Column, ColumnBinding> columnBindings;
-  private final DataType outputType;
-  private final StructType outputSchema;
 
-  /** Creates a scalar evaluator used internally by the default expression implementation. */
-  DefaultExpressionEvaluator(StructType inputSchema, Expression expression, DataType outputType) {
-    this(inputSchema, expression, outputType, null);
-  }
-
-  /** Creates a batch evaluator for one struct-valued row expression. */
+  /**
+   * Create a {@link DefaultExpressionEvaluator} instance bound to the given expression and
+   * <i>inputSchem</i>.
+   *
+   * @param inputSchema Input data schema
+   * @param expression Expression to evaluate.
+   * @param outputType Expected result data type.
+   */
   public DefaultExpressionEvaluator(
-      StructType inputSchema, Expression expression, StructType outputSchema) {
-    this(
-        inputSchema,
-        expression,
-        outputSchema,
-        requireNonNull(outputSchema, "outputSchema is null"));
-  }
-
-  private DefaultExpressionEvaluator(
-      StructType inputSchema, Expression expression, DataType outputType, StructType outputSchema) {
+      StructType inputSchema, Expression expression, DataType outputType) {
     ExpressionTransformResult transformResult =
-        new ExpressionTransformer(inputSchema).transform(expression, outputType);
+        new ExpressionTransformer(inputSchema).visit(expression);
     if (!transformResult.outputType.equivalent(outputType)) {
       String reason =
           String.format(
@@ -88,63 +62,16 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       throw unsupportedExpressionException(expression, reason);
     }
     this.expression = transformResult.expression;
-    Map<Column, ColumnBinding> bindings = new HashMap<>();
-    bindColumns(inputSchema, this.expression, bindings);
-    this.columnBindings = Collections.unmodifiableMap(bindings);
-    this.outputType = outputType;
-    this.outputSchema = outputSchema;
   }
 
   @Override
-  public FilteredColumnarBatch eval(FilteredColumnarBatch input) {
-    requireNonNull(input, "input is null");
-    checkArgument(outputSchema != null, "Scalar evaluator cannot produce a batch");
-    ColumnVector root = eval(input.getData());
-    try {
-      checkArgument(
-          outputSchema.equals(root.getDataType()),
-          "Expression returned type %s, expected %s",
-          root.getDataType(),
-          outputSchema);
-      checkArgument(
-          root.getSize() == input.getData().getSize(),
-          "Expression returned %s rows, expected %s",
-          root.getSize(),
-          input.getData().getSize());
-      boolean rootIsNeverNull =
-          expression instanceof StructExpression
-              && !((StructExpression) expression).getNullabilityPredicate().isPresent();
-      ColumnVector view = rootIsNeverNull ? root : new DefaultViewVector(root, 0, root.getSize());
-      ColumnVector[] columns = new ColumnVector[outputSchema.length()];
-      for (int ordinal = 0; ordinal < columns.length; ordinal++) {
-        columns[ordinal] = view.getChild(ordinal);
-      }
-      return input.withData(new DefaultColumnarBatch(root.getSize(), outputSchema, columns));
-    } catch (RuntimeException | Error failure) {
-      Utils.closeCloseablesAndAddSuppressed(failure, root);
-      throw failure;
-    }
-  }
-
-  /** Evaluates one scalar or struct value per input row for internal default-engine use. */
-  ColumnVector eval(ColumnarBatch input) {
-    return new ExpressionEvalVisitor(input, columnBindings).eval(expression, outputType);
+  public ColumnVector eval(ColumnarBatch input) {
+    return new ExpressionEvalVisitor(input).visit(expression);
   }
 
   @Override
   public void close() {
     /* nothing to close */
-  }
-
-  private static void bindColumns(
-      StructType schema, Expression expression, Map<Column, ColumnBinding> bindings) {
-    if (expression instanceof Column) {
-      Column column = (Column) expression;
-      bindings.computeIfAbsent(column, key -> ColumnBinding.resolve(schema, key));
-    }
-    for (Expression child : expression.getChildren()) {
-      bindColumns(schema, child, bindings);
-    }
   }
 
   /** Encapsulates the result of {@link ExpressionTransformer} */
@@ -154,18 +81,6 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     ExpressionTransformResult(Expression expression, DataType outputType) {
       this.expression = expression;
-      this.outputType = outputType;
-    }
-  }
-
-  private static final class ResolvedKernelExpression extends ScalarExpression {
-    private final ExpressionKernel kernel;
-    private final DataType outputType;
-
-    private ResolvedKernelExpression(
-        ExpressionKernel kernel, List<Expression> children, DataType outputType) {
-      super(kernel.name(), children);
-      this.kernel = kernel;
       this.outputType = outputType;
     }
   }
@@ -188,236 +103,6 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     ExpressionTransformer(StructType inputDataSchema) {
       this.inputDataSchema = requireNonNull(inputDataSchema, "inputDataSchema is null");
-    }
-
-    ExpressionTransformResult transform(Expression expression, DataType expectedType) {
-      if (expression instanceof ScalarExpression) {
-        ExpressionKernel kernel = kernel((ScalarExpression) expression);
-        if (kernel != null) {
-          return transformKernel((ScalarExpression) expression, expectedType, kernel);
-        }
-      }
-      if (expression instanceof StructExpression) {
-        return transformStruct((StructExpression) expression, expectedType);
-      }
-      if (expression instanceof StructPatch) {
-        return transformStructPatch((StructPatch) expression, expectedType);
-      }
-      if (expression instanceof ParseJson) {
-        return transformParseJson((ParseJson) expression, expectedType);
-      }
-      if (expression instanceof MapToStruct) {
-        return transformMapToStruct((MapToStruct) expression, expectedType);
-      }
-      if (expression instanceof ScalarExpression
-          && ((ScalarExpression) expression).getName().equalsIgnoreCase("COALESCE")) {
-        return transformCoalesce((ScalarExpression) expression, expectedType);
-      }
-      return visit(expression);
-    }
-
-    private ExpressionTransformResult transformKernel(
-        ScalarExpression expression, DataType expectedType, ExpressionKernel kernel) {
-      List<ExpressionTransformResult> children = new ArrayList<>();
-      for (int index = 0; index < expression.getChildren().size(); index++) {
-        children.add(
-            transform(
-                expression.getChildren().get(index),
-                kernel.expectedChildType(expectedType, index)));
-      }
-      List<DataType> childTypes =
-          children.stream().map(child -> child.outputType).collect(Collectors.toList());
-      DataType outputType = kernel.resolve(expression, childTypes, expectedType);
-      return new ExpressionTransformResult(
-          new ResolvedKernelExpression(
-              kernel,
-              children.stream().map(child -> child.expression).collect(Collectors.toList()),
-              outputType),
-          outputType);
-    }
-
-    private ExpressionTransformResult transformMapToStruct(
-        MapToStruct mapToStruct, DataType expectedType) {
-      if (!(expectedType instanceof StructType)) {
-        throw unsupportedExpressionException(
-            mapToStruct,
-            String.format("MapToStruct expects a StructType output, but got %s", expectedType));
-      }
-      StructType outputType = (StructType) expectedType;
-      for (StructField field : outputType.fields()) {
-        if (!isSupportedPartitionValueType(field.getDataType())) {
-          throw unsupportedExpressionException(
-              mapToStruct,
-              String.format(
-                  "MapToStruct only supports primitive partition types, but field %s has type %s",
-                  field.getName(), field.getDataType()));
-        }
-      }
-
-      ExpressionTransformResult map = visit(mapToStruct.getMapExpression());
-      if (!(map.outputType instanceof MapType)
-          || !((MapType) map.outputType).getKeyType().equivalent(StringType.STRING)
-          || !((MapType) map.outputType).getValueType().equivalent(StringType.STRING)) {
-        throw unsupportedExpressionException(
-            mapToStruct,
-            String.format(
-                "MapToStruct expects map(string, string) input, but got %s", map.outputType));
-      }
-      return new ExpressionTransformResult(new MapToStruct(map.expression), outputType);
-    }
-
-    private ExpressionTransformResult transformCoalesce(
-        ScalarExpression coalesce, DataType expectedType) {
-      if (coalesce.getChildren().isEmpty()) {
-        throw unsupportedExpressionException(coalesce, "Coalesce requires at least one expression");
-      }
-      List<ExpressionTransformResult> children =
-          coalesce.getChildren().stream()
-              .map(child -> transform(child, expectedType))
-              .collect(Collectors.toList());
-      long numDistinctTypes = children.stream().map(e -> e.outputType).distinct().count();
-      if (numDistinctTypes > 1) {
-        throw unsupportedExpressionException(
-            coalesce, "Coalesce is only supported for arguments of the same type");
-      }
-      return new ExpressionTransformResult(
-          new ScalarExpression(
-              "COALESCE", children.stream().map(e -> e.expression).collect(Collectors.toList())),
-          children.get(0).outputType);
-    }
-
-    private ExpressionTransformResult transformParseJson(
-        ParseJson parseJson, DataType expectedType) {
-      if (!(expectedType instanceof StructType)
-          || !parseJson.getOutputSchema().equals(expectedType)) {
-        throw unsupportedExpressionException(
-            parseJson,
-            String.format(
-                "ParseJson output schema %s does not match expected output type %s",
-                parseJson.getOutputSchema(), expectedType));
-      }
-      ExpressionTransformResult json = visit(parseJson.getJsonExpression());
-      if (!(json.outputType instanceof StringType)) {
-        throw unsupportedExpressionException(
-            parseJson,
-            String.format("ParseJson expects string input, but got %s", json.outputType));
-      }
-      return new ExpressionTransformResult(
-          new ParseJson(json.expression, parseJson.getOutputSchema()), parseJson.getOutputSchema());
-    }
-
-    private ExpressionTransformResult transformStruct(
-        StructExpression struct, DataType expectedType) {
-      if (!(expectedType instanceof StructType)) {
-        throw unsupportedExpressionException(
-            struct,
-            String.format(
-                "Struct expression expects a StructType output, but got %s", expectedType));
-      }
-
-      StructType structType = (StructType) expectedType;
-      if (struct.getFieldExpressions().size() != structType.length()) {
-        throw unsupportedExpressionException(
-            struct,
-            String.format(
-                "Struct expression field count mismatch: %s fields in expression but %s in schema",
-                struct.getFieldExpressions().size(), structType.length()));
-      }
-
-      List<Expression> fields = new ArrayList<>(structType.length());
-      for (int ordinal = 0; ordinal < structType.length(); ordinal++) {
-        StructField field = structType.at(ordinal);
-        ExpressionTransformResult result =
-            transform(struct.getFieldExpressions().get(ordinal), field.getDataType());
-        if (!result.outputType.equals(field.getDataType())) {
-          throw unsupportedExpressionException(
-              struct,
-              String.format(
-                  "Struct field %s type mismatch: expected %s but got %s",
-                  field.getName(), field.getDataType(), result.outputType));
-        }
-        fields.add(result.expression);
-      }
-
-      Optional<Expression> predicate = Optional.empty();
-      if (struct.getNullabilityPredicate().isPresent()) {
-        ExpressionTransformResult result =
-            transform(struct.getNullabilityPredicate().get(), BooleanType.BOOLEAN);
-        if (!BooleanType.BOOLEAN.equals(result.outputType)) {
-          throw unsupportedExpressionException(
-              struct,
-              String.format(
-                  "Struct nullability predicate must be boolean, but got %s", result.outputType));
-        }
-        predicate = Optional.of(result.expression);
-      }
-
-      StructExpression transformed =
-          predicate
-              .map(value -> new StructExpression(fields, value))
-              .orElseGet(() -> new StructExpression(fields));
-      return new ExpressionTransformResult(transformed, structType);
-    }
-
-    private ExpressionTransformResult transformStructPatch(
-        StructPatch patch, DataType expectedType) {
-      if (!(expectedType instanceof StructType)) {
-        throw unsupportedExpressionException(
-            patch,
-            String.format("Struct patch expects a StructType output, but got %s", expectedType));
-      }
-
-      StructType sourceType = resolvePatchSourceType(patch);
-      List<Expression> fields = new ArrayList<>(patch.getPrependedFields());
-      Set<String> usedFieldTransforms = new HashSet<>();
-      for (StructField sourceField : sourceType.fields()) {
-        StructPatch.FieldTransform fieldTransform =
-            patch.getFieldTransforms().get(sourceField.getName());
-        if (fieldTransform == null || !fieldTransform.isReplace()) {
-          fields.add(sourceColumn(patch, sourceField.getName()));
-        }
-        if (fieldTransform != null) {
-          fields.addAll(fieldTransform.getExpressions());
-          usedFieldTransforms.add(sourceField.getName());
-        }
-      }
-      patch
-          .getFieldTransforms()
-          .forEach(
-              (fieldName, fieldTransform) -> {
-                if (!fieldTransform.isOptional() && !usedFieldTransforms.contains(fieldName)) {
-                  throw unsupportedExpressionException(
-                      patch, "Required struct patch field does not exist: " + fieldName);
-                }
-              });
-      fields.addAll(patch.getAppendedFields());
-
-      StructExpression densePatch =
-          patch
-              .getInputPath()
-              .<StructExpression>map(
-                  path -> new StructExpression(fields, new Predicate("IS_NOT_NULL", path)))
-              .orElseGet(() -> new StructExpression(fields));
-      return transformStruct(densePatch, expectedType);
-    }
-
-    private StructType resolvePatchSourceType(StructPatch patch) {
-      if (!patch.getInputPath().isPresent()) {
-        return inputDataSchema;
-      }
-      ExpressionTransformResult inputPath = visitColumn(patch.getInputPath().get());
-      if (!(inputPath.outputType instanceof StructType)) {
-        throw unsupportedExpressionException(
-            patch, "Struct patch input path does not point to a struct");
-      }
-      return (StructType) inputPath.outputType;
-    }
-
-    private Column sourceColumn(StructPatch patch, String fieldName) {
-      return patch
-          .getInputPath()
-          .map(path -> path.appendNestedField(fieldName))
-          .orElseGet(() -> new Column(fieldName));
     }
 
     @Override
@@ -483,29 +168,6 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       }
       assertColumnExists(currentType != null, inputDataSchema, column);
       return new ExpressionTransformResult(column, currentType);
-    }
-
-    @Override
-    ExpressionTransformResult visitStruct(StructExpression struct) {
-      throw unsupportedExpressionException(
-          struct, "A caller-supplied StructType is required to evaluate a struct expression");
-    }
-
-    @Override
-    ExpressionTransformResult visitStructPatch(StructPatch structPatch) {
-      throw unsupportedExpressionException(
-          structPatch, "A caller-supplied StructType is required to evaluate a struct patch");
-    }
-
-    @Override
-    ExpressionTransformResult visitParseJson(ParseJson parseJson) {
-      return transformParseJson(parseJson, parseJson.getOutputSchema());
-    }
-
-    @Override
-    ExpressionTransformResult visitMapToStruct(MapToStruct mapToStruct) {
-      throw unsupportedExpressionException(
-          mapToStruct, "A caller-supplied StructType is required to evaluate MapToStruct");
     }
 
     @Override
@@ -591,42 +253,31 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
     }
 
     @Override
-    ExpressionTransformResult visitArithmetic(ScalarExpression arithmetic) {
+    ExpressionTransformResult visitAdd(ScalarExpression add) {
       List<ExpressionTransformResult> children =
-          arithmetic.getChildren().stream().map(this::visit).collect(Collectors.toList());
-      String operation = arithmetic.getName();
+          add.getChildren().stream().map(this::visit).collect(Collectors.toList());
       if (children.size() != 2) {
         throw unsupportedExpressionException(
-            arithmetic,
-            format("%s requires exactly two arguments: left and right operands", operation));
+            add, "ADD requires exactly two arguments: left and right operands");
       }
-      DataType outputType = children.get(0).outputType;
-      if (!outputType.equivalent(children.get(1).outputType)) {
+      if (!children.get(0).outputType.equivalent(children.get(1).outputType)) {
         throw unsupportedExpressionException(
-            arithmetic, format("%s is only supported for arguments of the same type", operation));
+            add, "ADD is only supported for arguments of the same type");
       }
-      if (!isPrimitiveNumeric(outputType)) {
+      if (!(children.get(0).outputType instanceof ByteType
+          || children.get(0).outputType instanceof ShortType
+          || children.get(0).outputType instanceof IntegerType
+          || children.get(0).outputType instanceof LongType
+          || children.get(0).outputType instanceof FloatType
+          || children.get(0).outputType instanceof DoubleType)) {
         throw unsupportedExpressionException(
-            arithmetic,
-            format(
-                "%s is only supported for numeric types: byte, short, int, long, float, double",
-                operation));
+            add, "ADD is only supported for numeric types: byte, short, int, long, float, double");
       }
 
       return new ExpressionTransformResult(
           new ScalarExpression(
-              arithmetic.getName(),
-              children.stream().map(c -> c.expression).collect(Collectors.toList())),
-          outputType);
-    }
-
-    private static boolean isPrimitiveNumeric(DataType dataType) {
-      return dataType instanceof ByteType
-          || dataType instanceof ShortType
-          || dataType instanceof IntegerType
-          || dataType instanceof LongType
-          || dataType instanceof FloatType
-          || dataType instanceof DoubleType;
+              "ADD", Arrays.asList(children.get(0).expression, children.get(1).expression)),
+          children.get(0).outputType);
     }
 
     @Override
@@ -742,16 +393,6 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
           BooleanType.BOOLEAN);
     }
 
-    @Override
-    ExpressionTransformResult visitExtension(ScalarExpression expression) {
-      ExpressionKernel kernel = kernel(expression);
-      if (kernel == null) {
-        throw new UnsupportedOperationException(
-            String.format("Scalar expression `%s` is not supported.", expression.getName()));
-      }
-      return transformKernel(expression, null, kernel);
-    }
-
     private Predicate validateIsPredicate(
         Expression baseExpression, ExpressionTransformResult result) {
       checkArgument(
@@ -805,42 +446,9 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
    */
   private static class ExpressionEvalVisitor extends ExpressionVisitor<ColumnVector> {
     private final ColumnarBatch input;
-    private final Map<Column, ColumnBinding> columnBindings;
 
-    ExpressionEvalVisitor(ColumnarBatch input, Map<Column, ColumnBinding> columnBindings) {
+    ExpressionEvalVisitor(ColumnarBatch input) {
       this.input = input;
-      this.columnBindings = columnBindings;
-    }
-
-    ColumnVector eval(Expression expression, DataType expectedType) {
-      if (expression instanceof ParseJson) {
-        checkArgument(
-            ((ParseJson) expression).getOutputSchema().equals(expectedType),
-            "ParseJson output schema %s does not match expected output type %s",
-            ((ParseJson) expression).getOutputSchema(),
-            expectedType);
-        return visitParseJson((ParseJson) expression);
-      }
-      if (expression instanceof MapToStruct) {
-        checkArgument(
-            expectedType instanceof StructType,
-            "MapToStruct expects a StructType output, but got %s",
-            expectedType);
-        return evalMapToStruct((MapToStruct) expression, (StructType) expectedType);
-      }
-      if (expression instanceof StructExpression) {
-        checkArgument(
-            expectedType instanceof StructType,
-            "Struct expression expects a StructType output, but got %s",
-            expectedType);
-        return StructExpressionEvaluator.eval(
-            (StructExpression) expression, (StructType) expectedType, input.getSize(), this::eval);
-      }
-      if (expression instanceof ScalarExpression
-          && ((ScalarExpression) expression).getName().equalsIgnoreCase("COALESCE")) {
-        return evalCoalesce((ScalarExpression) expression, expectedType);
-      }
-      return visit(expression);
     }
 
     /*
@@ -858,7 +466,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
      */
     @Override
     ColumnVector visitAnd(And and) {
-      BinaryExpressionResult argResults = evalBinaryExpressionChildren(and);
+      PredicateChildrenEvalResult argResults = evalBinaryExpressionChildren(and);
       ColumnVector left = argResults.leftResult;
       ColumnVector right = argResults.rightResult;
       int numRows = argResults.rowCount;
@@ -886,7 +494,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     ColumnVector visitOr(Or or) {
-      BinaryExpressionResult argResults = evalBinaryExpressionChildren(or);
+      PredicateChildrenEvalResult argResults = evalBinaryExpressionChildren(or);
       ColumnVector left = argResults.leftResult;
       ColumnVector right = argResults.rightResult;
       int numRows = argResults.rowCount;
@@ -924,7 +532,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     ColumnVector visitComparator(Predicate predicate) {
-      BinaryExpressionResult argResults = evalBinaryExpressionChildren(predicate);
+      PredicateChildrenEvalResult argResults = evalBinaryExpressionChildren(predicate);
       switch (predicate.getName()) {
         case "=":
           return comparatorVector(
@@ -980,10 +588,7 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
           || dataType instanceof TimestampType
           || dataType instanceof TimestampNTZType
           || dataType instanceof GeometryType
-          || dataType instanceof GeographyType
-          || dataType instanceof ArrayType
-          || dataType instanceof MapType
-          || dataType instanceof StructType) {
+          || dataType instanceof GeographyType) {
         return new DefaultConstantVector(dataType, input.getSize(), literal.getValue());
       }
 
@@ -992,62 +597,24 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     ColumnVector visitColumn(Column column) {
-      int[] ordinals = columnBindings.get(column).getOrdinals();
-      ColumnVector vector = input.getColumnVector(ordinals[0]);
-      vector = new DefaultViewVector(vector, 0, vector.getSize());
-      for (int level = 1; level < ordinals.length; level++) {
-        vector = vector.getChild(ordinals[level]);
+      String[] names = column.getNames();
+      DataType currentType = input.getSchema();
+      ColumnVector columnVector = null;
+      for (int level = 0; level < names.length; level++) {
+        assertColumnExists(currentType instanceof StructType, input.getSchema(), column);
+        StructType structSchema = ((StructType) currentType);
+        int ordinal = structSchema.indexOf(names[level]);
+        assertColumnExists(ordinal != -1, input.getSchema(), column);
+        currentType = structSchema.at(ordinal).getDataType();
+
+        if (level == 0) {
+          columnVector = input.getColumnVector(ordinal);
+        } else {
+          columnVector = columnVector.getChild(ordinal);
+        }
       }
-      return vector;
-    }
-
-    @Override
-    ColumnVector visitStruct(StructExpression struct) {
-      throw new IllegalArgumentException(
-          "A caller-supplied StructType is required to evaluate a struct expression");
-    }
-
-    @Override
-    ColumnVector visitStructPatch(StructPatch structPatch) {
-      throw new IllegalArgumentException(
-          "Struct patches must be lowered before expression evaluation");
-    }
-
-    @Override
-    ColumnVector visitParseJson(ParseJson parseJson) {
-      ColumnVector jsonVector = visit(parseJson.getJsonExpression());
-      checkArgument(
-          jsonVector.getDataType() instanceof StringType,
-          "ParseJson expects string input, but got %s",
-          jsonVector.getDataType());
-      checkArgument(
-          jsonVector.getSize() == input.getSize(),
-          "ParseJson input size mismatch: expected %s but got %s",
-          input.getSize(),
-          jsonVector.getSize());
-
-      try {
-        return DefaultJsonBatchParser.parse(jsonVector, parseJson.getOutputSchema());
-      } catch (IOException | RuntimeException ignored) {
-        return new DefaultConstantVector(parseJson.getOutputSchema(), jsonVector.getSize(), null);
-      } finally {
-        jsonVector.close();
-      }
-    }
-
-    @Override
-    ColumnVector visitMapToStruct(MapToStruct mapToStruct) {
-      throw new IllegalArgumentException(
-          "A caller-supplied StructType is required to evaluate MapToStruct");
-    }
-
-    private ColumnVector evalMapToStruct(MapToStruct mapToStruct, StructType outputType) {
-      ColumnVector maps = visit(mapToStruct.getMapExpression());
-      try {
-        return MapToStructEvaluator.eval(maps, outputType);
-      } finally {
-        maps.close();
-      }
+      assertColumnExists(columnVector != null, input.getSchema(), column);
+      return columnVector;
     }
 
     @Override
@@ -1094,30 +661,61 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     ColumnVector visitCoalesce(ScalarExpression coalesce) {
-      return evalCoalesce(coalesce, null);
-    }
-
-    private ColumnVector evalCoalesce(ScalarExpression coalesce, DataType expectedType) {
-      List<ColumnVector> childResults = new ArrayList<>(coalesce.getChildren().size());
-      for (Expression child : coalesce.getChildren()) {
-        childResults.add(expectedType == null ? visit(child) : eval(child, expectedType));
-      }
-      int[] selectedChildren = new int[input.getSize()];
-      for (int rowId = 0; rowId < selectedChildren.length; rowId++) {
-        for (int childIndex = 0; childIndex < childResults.size(); childIndex++) {
-          if (!childResults.get(childIndex).isNullAt(rowId)) {
-            selectedChildren[rowId] = childIndex;
-            break;
-          }
-        }
-      }
-      return DefaultExpressionUtils.combinationVector(childResults, selectedChildren);
+      List<ColumnVector> childResults =
+          coalesce.getChildren().stream().map(this::visit).collect(Collectors.toList());
+      return DefaultExpressionUtils.combinationVector(
+          childResults,
+          rowId -> {
+            for (int idx = 0; idx < childResults.size(); idx++) {
+              if (!childResults.get(idx).isNullAt(rowId)) {
+                return idx;
+              }
+            }
+            return 0; // If all are null then any idx suffices
+          });
     }
 
     @Override
-    ColumnVector visitArithmetic(ScalarExpression arithmetic) {
-      BinaryExpressionResult children = evalBinaryExpressionChildren(arithmetic);
-      return arithmeticVector(children.leftResult, children.rightResult, arithmetic.getName());
+    ColumnVector visitAdd(ScalarExpression add) {
+      List<ColumnVector> childResults =
+          add.getChildren().stream().map(this::visit).collect(toList());
+
+      // NOTE: The current implementation only supports operands of the same type, and it does not
+      // check for overflows (i.e., values will wrap around when overflowing).
+      return DefaultExpressionUtils.arithmeticVector(
+          childResults.get(0),
+          childResults.get(1),
+          new ArithmeticOperator() {
+            @Override
+            public byte apply(byte a, byte b) {
+              return (byte) (a + b);
+            }
+
+            @Override
+            public short apply(short a, short b) {
+              return (short) (a + b);
+            }
+
+            @Override
+            public int apply(int a, int b) {
+              return a + b;
+            }
+
+            @Override
+            public long apply(long a, long b) {
+              return a + b;
+            }
+
+            @Override
+            public float apply(float a, float b) {
+              return a + b;
+            }
+
+            @Override
+            public double apply(double a, double b) {
+              return a + b;
+            }
+          });
     }
 
     @Override
@@ -1210,24 +808,6 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       return new DefaultBooleanVector(numRows, Optional.of(nullability), result);
     }
 
-    @Override
-    ColumnVector visitExtension(ScalarExpression expression) {
-      if (!(expression instanceof ResolvedKernelExpression)) {
-        throw new IllegalStateException(expression.getName() + " expression was not resolved");
-      }
-      ResolvedKernelExpression resolved = (ResolvedKernelExpression) expression;
-      List<ColumnVector> children = new ArrayList<>(expression.getChildren().size());
-      try {
-        for (Expression child : expression.getChildren()) {
-          children.add(visit(child));
-        }
-        return resolved.kernel.eval(expression, children, resolved.outputType, input.getSize());
-      } catch (RuntimeException | Error failure) {
-        Utils.closeCloseablesAndAddSuppressed(failure, children.toArray(new ColumnVector[0]));
-        throw failure;
-      }
-    }
-
     private static boolean boxesIntersect(
         double[] lMin, double[] lMax, double[] rMin, double[] rMax) {
       return lMax[0] >= rMin[0] && rMax[0] >= lMin[0] && lMax[1] >= rMin[1] && rMax[1] >= lMin[1];
@@ -1237,34 +817,28 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
      * Utility method to evaluate inputs to the binary input expression. Also validates the
      * evaluated expression result {@link ColumnVector}s are of the same size.
      *
-     * @param expression binary expression to evaluate
-     * @return the result size and evaluated left and right operands
+     * @param predicate
+     * @return Triplet of (result vector size, left operand result, left operand result)
      */
-    private BinaryExpressionResult evalBinaryExpressionChildren(Expression expression) {
-      ColumnVector left = visit(childAt(expression, 0));
-      ColumnVector right = null;
-      try {
-        right = visit(childAt(expression, 1));
-        checkArgument(
-            left.getSize() == right.getSize(),
-            "Left and right operand returned different results: left=%d, right=%d",
-            left.getSize(),
-            right.getSize());
-      } catch (RuntimeException | Error failure) {
-        Utils.closeCloseablesAndAddSuppressed(failure, left, right);
-        throw failure;
-      }
-      return new BinaryExpressionResult(left.getSize(), left, right);
+    private PredicateChildrenEvalResult evalBinaryExpressionChildren(Predicate predicate) {
+      ColumnVector left = visit(getLeft(predicate));
+      ColumnVector right = visit(getRight(predicate));
+      checkArgument(
+          left.getSize() == right.getSize(),
+          "Left and right operand returned different results: left=%d, right=d",
+          left.getSize(),
+          right.getSize());
+      return new PredicateChildrenEvalResult(left.getSize(), left, right);
     }
   }
 
-  /** Evaluated children of a binary expression. */
-  private static class BinaryExpressionResult {
+  /** Encapsulates children expression result of binary input predicate */
+  private static class PredicateChildrenEvalResult {
     public final int rowCount;
     public final ColumnVector leftResult;
     public final ColumnVector rightResult;
 
-    BinaryExpressionResult(int rowCount, ColumnVector leftResult, ColumnVector rightResult) {
+    PredicateChildrenEvalResult(int rowCount, ColumnVector leftResult, ColumnVector rightResult) {
       this.rowCount = rowCount;
       this.leftResult = leftResult;
       this.rightResult = rightResult;
@@ -1276,13 +850,5 @@ public class DefaultExpressionEvaluator implements ExpressionEvaluator {
       throw new IllegalArgumentException(
           format("%s doesn't exist in input data schema: %s", column, schema));
     }
-  }
-
-  private static void register(Map<String, ExpressionKernel> kernels, ExpressionKernel kernel) {
-    kernels.put(kernel.name(), kernel);
-  }
-
-  private static ExpressionKernel kernel(ScalarExpression expression) {
-    return EXPRESSION_KERNELS.get(expression.getName().toUpperCase(Locale.ENGLISH));
   }
 }

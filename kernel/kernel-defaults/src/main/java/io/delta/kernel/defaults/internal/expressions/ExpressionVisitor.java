@@ -48,14 +48,6 @@ abstract class ExpressionVisitor<R> {
 
   abstract R visitColumn(Column column);
 
-  abstract R visitStruct(StructExpression struct);
-
-  abstract R visitStructPatch(StructPatch structPatch);
-
-  abstract R visitParseJson(ParseJson parseJson);
-
-  abstract R visitMapToStruct(MapToStruct mapToStruct);
-
   abstract R visitCast(ImplicitCastExpression cast);
 
   abstract R visitPartitionValue(PartitionValueExpression partitionValue);
@@ -74,7 +66,7 @@ abstract class ExpressionVisitor<R> {
 
   abstract R visitSubstring(ScalarExpression subString);
 
-  abstract R visitArithmetic(ScalarExpression arithmetic);
+  abstract R visitAdd(ScalarExpression add);
 
   abstract R visitLike(Predicate predicate);
 
@@ -84,16 +76,8 @@ abstract class ExpressionVisitor<R> {
 
   abstract R visitStGeometryBoxesIntersectOnStats(Predicate predicate);
 
-  abstract R visitExtension(ScalarExpression expression);
-
   final R visit(Expression expression) {
-    if (expression instanceof UnknownExpression
-        || expression instanceof UnknownPredicate
-        || expression instanceof OpaqueExpression
-        || expression instanceof OpaquePredicate) {
-      throw new UnsupportedOperationException(
-          String.format("Expression %s is not supported.", expression));
-    } else if (expression instanceof PartitionValueExpression) {
+    if (expression instanceof PartitionValueExpression) {
       return visitPartitionValue((PartitionValueExpression) expression);
     } else if (expression instanceof ScalarExpression) {
       return visitScalarExpression((ScalarExpression) expression);
@@ -101,14 +85,6 @@ abstract class ExpressionVisitor<R> {
       return visitLiteral((Literal) expression);
     } else if (expression instanceof Column) {
       return visitColumn((Column) expression);
-    } else if (expression instanceof StructExpression) {
-      return visitStruct((StructExpression) expression);
-    } else if (expression instanceof StructPatch) {
-      return visitStructPatch((StructPatch) expression);
-    } else if (expression instanceof ParseJson) {
-      return visitParseJson((ParseJson) expression);
-    } else if (expression instanceof MapToStruct) {
-      return visitMapToStruct((MapToStruct) expression);
     } else if (expression instanceof ImplicitCastExpression) {
       return visitCast((ImplicitCastExpression) expression);
     }
@@ -151,10 +127,7 @@ abstract class ExpressionVisitor<R> {
       case "COALESCE":
         return visitCoalesce(expression);
       case "ADD":
-      case "SUBTRACT":
-      case "MULTIPLY":
-      case "DIVIDE":
-        return visitArithmetic(expression);
+        return visitAdd(expression);
       case "TIMEADD":
         return visitTimeAdd(expression);
       case "SUBSTRING":
@@ -177,7 +150,8 @@ abstract class ExpressionVisitor<R> {
         return visitStGeometryBoxesIntersectOnStats(
             createPredicate(name, children, collationIdentifier));
       default:
-        return visitExtension(expression);
+        throw new UnsupportedOperationException(
+            String.format("Scalar expression `%s` is not supported.", name));
     }
   }
 

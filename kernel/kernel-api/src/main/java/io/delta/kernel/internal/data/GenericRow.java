@@ -23,65 +23,21 @@ import io.delta.kernel.data.MapValue;
 import io.delta.kernel.data.Row;
 import io.delta.kernel.types.*;
 import java.math.BigDecimal;
-import java.util.List;
 import java.util.Map;
 
-/** Exposes ordinal values as a {@link Row}. */
+/** Exposes a given map of values as a {@link Row} */
 public class GenericRow implements Row {
   private final StructType schema;
-  private final Map<Integer, ?> ordinalToValue;
-  private final Object[] ordinalValues;
+  private final Map<Integer, Object> ordinalToValue;
 
   /**
    * @param schema the schema of the row
    * @param ordinalToValue a mapping of column ordinal to objects; for each column the object must
    *     be of the return type corresponding to the data type's getter method in the Row interface
    */
-  public GenericRow(StructType schema, Map<Integer, ?> ordinalToValue) {
+  public GenericRow(StructType schema, Map<Integer, Object> ordinalToValue) {
     this.schema = requireNonNull(schema, "schema is null");
     this.ordinalToValue = requireNonNull(ordinalToValue, "ordinalToValue is null");
-    this.ordinalValues = null;
-  }
-
-  /**
-   * Creates a dense row whose values are in schema ordinal order.
-   *
-   * <p>Each value must be of the return type corresponding to the data type's getter method in the
-   * {@link Row} interface. The values are copied so subsequent changes to the input list do not
-   * affect the row.
-   *
-   * @param schema the schema of the row
-   * @param ordinalValues one value for every field in {@code schema}, in ordinal order
-   */
-  public static GenericRow fromValues(StructType schema, List<?> ordinalValues) {
-    requireNonNull(schema, "schema is null");
-    requireNonNull(ordinalValues, "ordinalValues is null");
-    return new GenericRow(schema, ordinalValues.toArray());
-  }
-
-  /**
-   * Creates a dense row that takes ownership of values in schema ordinal order.
-   *
-   * <p>The caller must not retain or modify {@code ordinalValues} after this call.
-   *
-   * @param schema the schema of the row
-   * @param ordinalValues one value for every field in {@code schema}, in ordinal order
-   */
-  public static GenericRow fromOwnedValues(StructType schema, Object[] ordinalValues) {
-    requireNonNull(schema, "schema is null");
-    requireNonNull(ordinalValues, "ordinalValues is null");
-    return new GenericRow(schema, ordinalValues);
-  }
-
-  private GenericRow(StructType schema, Object[] ordinalValues) {
-    this.schema = schema;
-    if (ordinalValues.length != schema.length()) {
-      throw new IllegalArgumentException(
-          String.format(
-              "Expected %s values for row schema, got %s", schema.length(), ordinalValues.length));
-    }
-    this.ordinalToValue = null;
-    this.ordinalValues = ordinalValues;
   }
 
   @Override
@@ -91,110 +47,117 @@ public class GenericRow implements Row {
 
   @Override
   public boolean isNullAt(int ordinal) {
-    dataType(ordinal);
     return getValue(ordinal) == null;
   }
 
   @Override
   public boolean getBoolean(int ordinal) {
-    throwIfUnsafeAccess(ordinal, "boolean", BooleanType.class);
+    throwIfUnsafeAccess(ordinal, BooleanType.class, "boolean");
     return (boolean) getValue(ordinal);
   }
 
   @Override
   public byte getByte(int ordinal) {
-    throwIfUnsafeAccess(ordinal, "byte", ByteType.class);
+    throwIfUnsafeAccess(ordinal, ByteType.class, "byte");
     return (byte) getValue(ordinal);
   }
 
   @Override
   public short getShort(int ordinal) {
-    throwIfUnsafeAccess(ordinal, "short", ShortType.class);
+    throwIfUnsafeAccess(ordinal, ShortType.class, "short");
     return (short) getValue(ordinal);
   }
 
   @Override
   public int getInt(int ordinal) {
-    throwIfUnsafeAccess(ordinal, "integer", IntegerType.class, DateType.class);
+    throwIfUnsafeAccess(ordinal, IntegerType.class, "integer", DateType.class);
     return (int) getValue(ordinal);
   }
 
   @Override
   public long getLong(int ordinal) {
     throwIfUnsafeAccess(
-        ordinal, "long", LongType.class, TimestampType.class, TimestampNTZType.class);
+        ordinal, LongType.class, "long", TimestampType.class, TimestampNTZType.class);
     return (long) getValue(ordinal);
   }
 
   @Override
   public float getFloat(int ordinal) {
-    throwIfUnsafeAccess(ordinal, "float", FloatType.class);
+    throwIfUnsafeAccess(ordinal, FloatType.class, "float");
     return (float) getValue(ordinal);
   }
 
   @Override
   public double getDouble(int ordinal) {
-    throwIfUnsafeAccess(ordinal, "double", DoubleType.class);
+    throwIfUnsafeAccess(ordinal, DoubleType.class, "double");
     return (double) getValue(ordinal);
   }
 
   @Override
   public String getString(int ordinal) {
     throwIfUnsafeAccess(
-        ordinal, "string", StringType.class, GeometryType.class, GeographyType.class);
+        ordinal, StringType.class, "string", GeometryType.class, GeographyType.class);
     return (String) getValue(ordinal);
   }
 
   @Override
   public BigDecimal getDecimal(int ordinal) {
-    throwIfUnsafeAccess(ordinal, "decimal", DecimalType.class);
+    throwIfUnsafeAccess(ordinal, DecimalType.class, "decimal");
     return (BigDecimal) getValue(ordinal);
   }
 
   @Override
   public byte[] getBinary(int ordinal) {
-    throwIfUnsafeAccess(ordinal, "binary", BinaryType.class);
+    throwIfUnsafeAccess(ordinal, BinaryType.class, "binary");
     return (byte[]) getValue(ordinal);
   }
 
   @Override
   public Row getStruct(int ordinal) {
-    throwIfUnsafeAccess(ordinal, "struct", StructType.class);
+    throwIfUnsafeAccess(ordinal, StructType.class, "struct");
     return (Row) getValue(ordinal);
   }
 
   @Override
   public ArrayValue getArray(int ordinal) {
     // TODO: not sufficient check, also need to check the element type
-    throwIfUnsafeAccess(ordinal, "array", ArrayType.class);
+    throwIfUnsafeAccess(ordinal, ArrayType.class, "array");
     return (ArrayValue) getValue(ordinal);
   }
 
   @Override
   public MapValue getMap(int ordinal) {
     // TODO: not sufficient check, also need to check the element types
-    throwIfUnsafeAccess(ordinal, "map", MapType.class);
+    throwIfUnsafeAccess(ordinal, MapType.class, "map");
     return (MapValue) getValue(ordinal);
   }
 
   private Object getValue(int ordinal) {
-    return ordinalValues != null ? ordinalValues[ordinal] : ordinalToValue.get(ordinal);
+    return ordinalToValue.get(ordinal);
   }
 
-  private void throwIfUnsafeAccess(int ordinal, String accessType, Class<?>... expectedDataTypes) {
+  @SafeVarargs
+  private final void throwIfUnsafeAccess(
+      int ordinal,
+      Class<? extends DataType> expDataType,
+      String accessType,
+      Class<? extends DataType>... alternatives) {
+
     DataType actualDataType = dataType(ordinal);
-    for (Class<?> expectedDataType : expectedDataTypes) {
-      if (expectedDataType.isAssignableFrom(actualDataType.getClass())) {
-        return;
-      }
+    boolean compatible = expDataType.isAssignableFrom(actualDataType.getClass());
+    for (Class<? extends DataType> alternative : alternatives) {
+      compatible |= alternative.isAssignableFrom(actualDataType.getClass());
     }
-    throw new UnsupportedOperationException(
-        String.format(
-            "Trying to access a `%s` value from vector of type `%s`", accessType, actualDataType));
+    if (!compatible) {
+      String msg =
+          String.format(
+              "Trying to access a `%s` value from vector of type `%s`", accessType, actualDataType);
+      throw new UnsupportedOperationException(msg);
+    }
   }
 
   private DataType dataType(int ordinal) {
-    if (ordinal < 0 || schema.length() <= ordinal) {
+    if (schema.length() <= ordinal) {
       throw new IllegalArgumentException("invalid ordinal: " + ordinal);
     }
 

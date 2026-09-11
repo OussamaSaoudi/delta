@@ -18,14 +18,13 @@ package io.delta.kernel.defaults.internal.data.vector;
 import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 
 import io.delta.kernel.data.*;
-import io.delta.kernel.defaults.internal.data.DefaultValueRetainer;
 import io.delta.kernel.types.*;
 import java.math.BigDecimal;
 import java.util.List;
-import java.util.function.IntFunction;
+import java.util.function.Function;
 
 /** Generic column vector implementation to expose an array of objects as a column vector. */
-public class DefaultGenericVector implements RetainableColumnVector {
+public class DefaultGenericVector implements ColumnVector {
 
   public static DefaultGenericVector fromArray(DataType dataType, Object[] elements) {
     return new DefaultGenericVector(elements.length, dataType, rowId -> elements[rowId]);
@@ -37,10 +36,10 @@ public class DefaultGenericVector implements RetainableColumnVector {
 
   private final int size;
   private final DataType dataType;
-  private final IntFunction<Object> rowIdToValueAccessor;
+  private final Function<Integer, Object> rowIdToValueAccessor;
 
   protected DefaultGenericVector(
-      int size, DataType dataType, IntFunction<Object> rowIdToValueAccessor) {
+      int size, DataType dataType, Function<Integer, Object> rowIdToValueAccessor) {
     this.size = size;
     this.dataType = dataType;
     this.rowIdToValueAccessor = rowIdToValueAccessor;
@@ -58,21 +57,6 @@ public class DefaultGenericVector implements RetainableColumnVector {
 
   @Override
   public void close() {}
-
-  @Override
-  public Object retainValue(int rowId) {
-    assertValidRowId(rowId);
-    Object value = rowIdToValueAccessor.apply(rowId);
-    if (value instanceof byte[]) {
-      return ((byte[]) value).clone();
-    }
-    if (dataType instanceof StructType
-        || dataType instanceof ArrayType
-        || dataType instanceof MapType) {
-      return DefaultValueRetainer.materialize(this, dataType, rowId);
-    }
-    return value;
-  }
 
   @Override
   public boolean isNullAt(int rowId) {
@@ -221,8 +205,6 @@ public class DefaultGenericVector implements RetainableColumnVector {
   }
 
   private void assertValidRowId(int rowId) {
-    if (rowId >= size) {
-      checkArgument(false, "Invalid rowId: %s, max allowed rowId is: %s", rowId, (size - 1));
-    }
+    checkArgument(rowId < size, "Invalid rowId: %s, max allowed rowId is: %s", rowId, (size - 1));
   }
 }

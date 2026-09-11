@@ -204,21 +204,14 @@ public class Predicate extends ScalarExpression {
 
   @Override
   public int hashCode() {
-    return Objects.hash(getClass(), name, children, collationIdentifier);
+    return toString().hashCode();
   }
 
   @Override
-  public boolean equals(Object other) {
-    if (this == other) {
-      return true;
-    }
-    if (other == null || getClass() != other.getClass()) {
-      return false;
-    }
-    Predicate that = (Predicate) other;
-    return name.equals(that.name)
-        && children.equals(that.children)
-        && collationIdentifier.equals(that.collationIdentifier);
+  public boolean equals(Object o) {
+    if (this == o) return true;
+    if (!(o instanceof Predicate)) return false;
+    return this.hashCode() == o.hashCode();
   }
 
   private static final Set<String> BINARY_OPERATORS =

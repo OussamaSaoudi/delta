@@ -40,14 +40,14 @@ public final class Column implements Expression {
 
   /** Create a column expression to refer to a nested column. */
   public Column(String[] names) {
-    this.names = names.clone();
+    this.names = names;
   }
 
   /**
    * @return the column names. Each part in the name correspond to one level of nested reference.
    */
   public String[] getNames() {
-    return names.clone();
+    return names;
   }
 
   @Override
@@ -90,7 +90,7 @@ public final class Column implements Expression {
       return false;
     }
     Column other = (Column) o;
-    return Arrays.equals(names, other.names);
+    return Arrays.equals(names, other.getNames());
   }
 
   @Override

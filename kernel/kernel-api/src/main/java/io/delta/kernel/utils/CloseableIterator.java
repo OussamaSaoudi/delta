@@ -139,31 +139,21 @@ public interface CloseableIterator<T> extends Iterator<T>, Closeable {
     CloseableIterator<T> delegate = this;
     return new CloseableIterator<U>() {
       private CloseableIterator<U> currentInner = null;
-      private boolean closed;
 
       @Override
       public boolean hasNext() {
-        if (closed) {
-          return false;
-        }
-        try {
-          while (true) {
-            if (currentInner != null && currentInner.hasNext()) {
-              return true;
-            }
-            if (currentInner != null) {
-              CloseableIterator<U> exhausted = currentInner;
-              currentInner = null;
-              Utils.closeCloseables(exhausted);
-            }
-            if (!delegate.hasNext()) {
-              return false;
-            }
-            currentInner = mapper.apply(delegate.next());
+        while (true) {
+          if (currentInner != null && currentInner.hasNext()) {
+            return true;
           }
-        } catch (RuntimeException | Error failure) {
-          closeAfterFailure(failure);
-          throw failure;
+          if (currentInner != null) {
+            Utils.closeCloseables(currentInner);
+            currentInner = null;
+          }
+          if (!delegate.hasNext()) {
+            return false;
+          }
+          currentInner = mapper.apply(delegate.next());
         }
       }
 
@@ -172,33 +162,13 @@ public interface CloseableIterator<T> extends Iterator<T>, Closeable {
         if (!hasNext()) {
           throw new NoSuchElementException();
         }
-        try {
-          return currentInner.next();
-        } catch (RuntimeException | Error failure) {
-          closeAfterFailure(failure);
-          throw failure;
-        }
+        return currentInner.next();
       }
 
       @Override
       public void close() throws IOException {
-        if (closed) {
-          return;
-        }
-        closed = true;
-        CloseableIterator<U> inner = currentInner;
+        Utils.closeCloseables(currentInner, delegate);
         currentInner = null;
-        Utils.closeCloseables(inner, delegate);
-      }
-
-      private void closeAfterFailure(Throwable failure) {
-        if (closed) {
-          return;
-        }
-        closed = true;
-        CloseableIterator<U> inner = currentInner;
-        currentInner = null;
-        Utils.closeCloseablesAndAddSuppressed(failure, inner, delegate);
       }
     };
   }
@@ -310,52 +280,23 @@ public interface CloseableIterator<T> extends Iterator<T>, Closeable {
 
     CloseableIterator<T> delegate = this;
     return new CloseableIterator<T>() {
-      private boolean closed;
-
       @Override
       public boolean hasNext() {
-        if (closed) {
-          return false;
-        }
-        try {
-          return delegate.hasNext() || other.hasNext();
-        } catch (RuntimeException | Error failure) {
-          closeAfterFailure(failure);
-          throw failure;
-        }
+        return delegate.hasNext() || other.hasNext();
       }
 
       @Override
       public T next() {
-        if (closed) {
-          throw new NoSuchElementException();
-        }
-        try {
-          if (delegate.hasNext()) {
-            return delegate.next();
-          } else {
-            return other.next();
-          }
-        } catch (RuntimeException | Error failure) {
-          closeAfterFailure(failure);
-          throw failure;
+        if (delegate.hasNext()) {
+          return delegate.next();
+        } else {
+          return other.next();
         }
       }
 
       @Override
       public void close() throws IOException {
-        if (!closed) {
-          closed = true;
-          Utils.closeCloseables(delegate, other);
-        }
-      }
-
-      private void closeAfterFailure(Throwable failure) {
-        if (closed) {
-          return;
-        }
-        closed = true;
-        Utils.closeCloseablesAndAddSuppressed(failure, delegate, other);
+        Utils.closeCloseables(delegate, other);
       }
     };
   }

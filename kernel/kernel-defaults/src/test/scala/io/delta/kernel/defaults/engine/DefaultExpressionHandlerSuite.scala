@@ -15,40 +15,16 @@
  */
 package io.delta.kernel.defaults.engine
 
-import java.util.Optional
-
-import io.delta.kernel.data.{ColumnVector, FilteredColumnarBatch}
-import io.delta.kernel.data.FilteredColumnarBatch.Lifetime
-import io.delta.kernel.defaults.internal.data.DefaultColumnarBatch
 import io.delta.kernel.defaults.utils.ExpressionTestUtils
 import io.delta.kernel.types.BooleanType.BOOLEAN
 import io.delta.kernel.types.IntegerType.INTEGER
+import io.delta.kernel.types.LongType.LONG
+import io.delta.kernel.types.StringType.STRING
 import io.delta.kernel.types.StructType
 
 import org.scalatest.funsuite.AnyFunSuite
 
 class DefaultExpressionHandlerSuite extends AnyFunSuite with ExpressionTestUtils {
-
-  test("evaluate a struct expression as a batch") {
-    val inputSchema = new StructType()
-    val inputData = new DefaultColumnarBatch(2, inputSchema, Array.empty[ColumnVector])
-    val selection = selectionVector(Array(true, false), 0, 2)
-    val input = new FilteredColumnarBatch(inputData, Optional.of(selection), Lifetime.OWNED)
-    val outputSchema = new StructType().add("value", INTEGER)
-
-    val result = new DefaultExpressionHandler()
-      .getEvaluator(inputSchema, struct(int(7)), outputSchema)
-      .eval(input)
-
-    assert(result.getData.getSchema === outputSchema)
-    assert(result.getData.getSize === 2)
-    assert(result.getData.getColumnVector(0).getInt(0) === 7)
-    assert(result.getData.getColumnVector(0).getInt(1) === 7)
-    assert(result.getSelectionVector === input.getSelectionVector)
-    assert(result.isSelected(0))
-    assert(!result.isSelected(1))
-    assert(result.getLifetime === Lifetime.OWNED)
-  }
 
   test("create selection vector: single value") {
     Seq(true, false).foreach { testValue =>
@@ -61,13 +37,7 @@ class DefaultExpressionHandlerSuite extends AnyFunSuite with ExpressionTestUtils
   }
 
   test("create selection vector: multiple values array, partial array") {
-    Seq(
-      (0, testValues.length),
-      (0, 3),
-      (2, 2),
-      (2, 4),
-      (3, testValues.length),
-      (testValues.length, testValues.length)).foreach { pair =>
+    Seq((0, testValues.length), (0, 3), (2, 2), (2, 4), (3, testValues.length)).foreach { pair =>
       val (from, to) = (pair._1, pair._2)
       val outputVector = selectionVector(testValues, from, to)
       assert(outputVector.getDataType === BOOLEAN)
@@ -77,10 +47,6 @@ class DefaultExpressionHandlerSuite extends AnyFunSuite with ExpressionTestUtils
         assert(outputVector.getBoolean(rowId - from) == testValues(rowId))
       }
     }
-  }
-
-  test("create selection vector: empty values") {
-    assert(selectionVector(Array.empty[Boolean], 0, 0).getSize === 0)
   }
 
   test("create selection vector: update values array and expect no changes in output") {
@@ -94,15 +60,14 @@ class DefaultExpressionHandlerSuite extends AnyFunSuite with ExpressionTestUtils
   }
 
   test("create selection vector: invalid to and/or from offset") {
-    Seq((-1, 0), (3, 2), (2, testValues.length + 1), (testValues.length + 1, 100))
-      .foreach { pair =>
-        val (from, to) = (pair._1, pair._2)
-        val ex = intercept[IllegalArgumentException] {
-          selectionVector(testValues, from, to)
-        }
-        assert(ex.getMessage.contains(
-          s"invalid range from=$from, to=$to, values length=${testValues.length}"))
+    Seq((3, 2), (2, testValues.length + 1), (testValues.length + 1, 100)).foreach { pair =>
+      val (from, to) = (pair._1, pair._2)
+      val ex = intercept[IllegalArgumentException] {
+        selectionVector(testValues, from, to)
       }
+      assert(ex.getMessage.contains(
+        s"invalid range from=$from, to=$to, values length=${testValues.length}"))
+    }
   }
 
   test("create selection vector: null values array") {

@@ -16,27 +16,39 @@
 package io.delta.kernel.expressions;
 
 import io.delta.kernel.annotation.Evolving;
-import io.delta.kernel.data.FilteredColumnarBatch;
+import io.delta.kernel.data.ColumnVector;
+import io.delta.kernel.data.ColumnarBatch;
+import java.util.Optional;
 
 /**
- * Evaluates a {@link Predicate} by narrowing the selection of a batch without rewriting its data. A
- * row unselected by the input remains unselected in the result.
+ * Special interface for evaluating {@link Predicate} on input batch and return a selection vector
+ * containing one value for each row in input batch indicating whether the row has passed the
+ * predicate or not.
+ *
+ * <p>Optionally it takes an existing selection vector along with the input batch for evaluation.
+ * Result selection vector is combined with the given existing selection vector and a new selection
+ * vector is returned. This mechanism allows running an input batch through several predicate
+ * evaluations without rewriting the input batch to remove rows that do not pass the predicate after
+ * each predicate evaluation. The new selection should be same or more selective as the existing
+ * selection vector. For example if a row is marked as unselected in existing selection vector, then
+ * it should remain unselected in the returned selection vector even when the given predicate
+ * returns true for the row.
  *
  * @since 3.0.0
  */
 @Evolving
-public interface PredicateEvaluator extends AutoCloseable {
+public interface PredicateEvaluator {
   /**
-   * Evaluate the predicate and return the input data with a narrowed selection.
+   * Evaluate the predicate on given inputData. Combine the existing selection vector with the
+   * output of the predicate result and return a new selection vector.
    *
-   * <p>The output has the same data, row count, and row order as {@code input}. A row unselected in
-   * the input remains unselected. The lifetime is declared independently for each result batch.
-   *
-   * @param input input data and existing selection
-   * @return the input data with the predicate selection applied
+   * @param inputData {@link ColumnarBatch} of data to which the predicate expression refers for
+   *     input.
+   * @param existingSelectionVector Optional existing selection vector. If not empty, it is combined
+   *     with the predicate result. The caller is also releasing the ownership of
+   *     `existingSelectionVector` to this callee, and the callee is responsible for closing it.
+   * @return A {@link ColumnVector} of boolean type that captures the predicate result for each row
+   *     together with the existing selection vector.
    */
-  FilteredColumnarBatch eval(FilteredColumnarBatch input);
-
-  @Override
-  default void close() {}
+  ColumnVector eval(ColumnarBatch inputData, Optional<ColumnVector> existingSelectionVector);
 }

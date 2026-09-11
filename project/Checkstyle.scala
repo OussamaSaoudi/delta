@@ -51,27 +51,7 @@ object Checkstyle {
   private lazy val compileJavastyle = taskKey[Unit]("compileJavastyle")
   private lazy val testJavastyle = taskKey[Unit]("testJavastyle")
 
-  def javaCheckstyleSettings(
-      checkstyleFile: String,
-      checkManagedSources: Boolean = true): Def.SettingsDefinition = {
-    val runCompileCheckstyle =
-      if (checkManagedSources) {
-        Def.task {
-          (Compile / checkstyle).value
-        }
-      } else {
-        Def.task {
-          com.etsy.sbt.checkstyle.Checkstyle.checkstyle(
-            (Compile / unmanagedSources).value,
-            (Compile / checkstyleConfigLocation).value,
-            (Compile / resourceDirectories).value,
-            (Compile / checkstyleOutputFile).value,
-            (Compile / checkstyleXsltTransformations).value,
-            (Compile / checkstyleSeverityLevel).value,
-            streams.value.log)
-        }
-      }
-
+  def javaCheckstyleSettings(checkstyleFile: String): Def.SettingsDefinition = {
     // Can be run explicitly via: build/sbt $module/checkstyle
     // Will automatically be run during compilation (e.g. build/sbt compile)
     // and during tests (e.g. build/sbt test)
@@ -84,7 +64,7 @@ object Checkstyle {
       checkstyleSeverityLevel := CheckstyleSeverityLevel.Ignore,
 
       compileJavastyle := {
-        runCompileCheckstyle.value
+        (Compile / checkstyle).value
         javaCheckstyle(streams.value.log, checkstyleOutputFile.value)
       },
       (Compile / compile) := ((Compile / compile) dependsOn compileJavastyle).value,

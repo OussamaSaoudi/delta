@@ -21,7 +21,6 @@ import static java.util.Objects.requireNonNull;
 import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.MapValue;
-import io.delta.kernel.defaults.internal.data.DefaultValueRetainer;
 import io.delta.kernel.types.DataType;
 import java.math.BigDecimal;
 import java.util.Optional;
@@ -30,7 +29,7 @@ import java.util.Optional;
  * Abstract implementation of {@link ColumnVector} that provides the default functionality common to
  * most of the specific data type {@link ColumnVector} implementations.
  */
-public abstract class AbstractColumnVector implements RetainableColumnVector {
+public abstract class AbstractColumnVector implements ColumnVector {
   private final int size;
   private final DataType dataType;
   private final Optional<boolean[]> nullability;
@@ -63,11 +62,6 @@ public abstract class AbstractColumnVector implements RetainableColumnVector {
   public void close() {
     // By default, nothing to close, if the implementation has any resources to release
     // it can override it
-  }
-
-  @Override
-  public Object retainValue(int rowId) {
-    return DefaultValueRetainer.retainDefaultVector(this, getDataType(), rowId);
   }
 
   /**

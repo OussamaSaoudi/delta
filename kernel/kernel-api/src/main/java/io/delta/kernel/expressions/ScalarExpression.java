@@ -22,7 +22,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
-import java.util.Objects;
 import java.util.stream.Collectors;
 
 /**
@@ -49,25 +48,6 @@ import java.util.stream.Collectors;
  *       <ul>
  *         <li>Semantic: <code>ADD(expr1, expr2)</code>. Return the sum of two numeric expressions.
  *             If either of the expressions is null, returns null.
- *         <li>Since Version: 4.1.0
- *       </ul>
- *   <li>Name: <code>SUBTRACT</code>
- *       <ul>
- *         <li>Semantic: <code>SUBTRACT(expr1, expr2)</code>. Subtract the second numeric expression
- *             from the first. If either expression is null, returns null.
- *         <li>Since Version: 4.1.0
- *       </ul>
- *   <li>Name: <code>MULTIPLY</code>
- *       <ul>
- *         <li>Semantic: <code>MULTIPLY(expr1, expr2)</code>. Return the product of two numeric
- *             expressions. If either expression is null, returns null.
- *         <li>Since Version: 4.1.0
- *       </ul>
- *   <li>Name: <code>DIVIDE</code>
- *       <ul>
- *         <li>Semantic: <code>DIVIDE(expr1, expr2)</code>. Divide the first numeric expression by
- *             the second. Integral division truncates toward zero and fails on a zero divisor;
- *             floating-point division follows IEEE 754. If either expression is null, returns null.
  *         <li>Since Version: 4.1.0
  *       </ul>
  *   <li>Name: <code>TIMEADD</code>
@@ -119,22 +99,5 @@ public class ScalarExpression implements Expression {
   @Override
   public List<Expression> getChildren() {
     return children;
-  }
-
-  @Override
-  public boolean equals(Object other) {
-    if (this == other) {
-      return true;
-    }
-    if (other == null || getClass() != other.getClass()) {
-      return false;
-    }
-    ScalarExpression that = (ScalarExpression) other;
-    return name.equals(that.name) && children.equals(that.children);
-  }
-
-  @Override
-  public int hashCode() {
-    return Objects.hash(getClass(), name, children);
   }
 }

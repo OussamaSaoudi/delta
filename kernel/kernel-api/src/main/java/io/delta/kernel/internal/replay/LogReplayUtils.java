@@ -15,14 +15,15 @@
  */
 package io.delta.kernel.internal.replay;
 
+import static io.delta.kernel.internal.util.Preconditions.checkArgument;
+
 import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.ColumnarBatch;
-import io.delta.kernel.expressions.Column;
 import io.delta.kernel.internal.actions.AddFile;
 import io.delta.kernel.internal.actions.DeletionVectorDescriptor;
 import io.delta.kernel.internal.actions.RemoveFile;
-import io.delta.kernel.internal.util.ColumnBinding;
 import io.delta.kernel.internal.util.Tuple2;
+import io.delta.kernel.types.DataType;
 import io.delta.kernel.types.StructType;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -87,11 +88,27 @@ public class LogReplayUtils {
    * `a.b1` returns `0, 1`.
    */
   static int[] getPathOrdinals(StructType schema, String... path) {
-    return ColumnBinding.resolve(schema, new Column(path)).getOrdinals();
+    checkArgument(path.length > 0, "Invalid path");
+    int[] pathOrdinals = new int[path.length];
+    DataType currentLevelDataType = schema;
+    for (int level = 0; level < path.length; level++) {
+      checkArgument(currentLevelDataType instanceof StructType, "Invalid search path");
+      StructType asStructType = (StructType) currentLevelDataType;
+      pathOrdinals[level] = asStructType.indexOf(path[level]);
+      currentLevelDataType = asStructType.at(pathOrdinals[level]).getDataType();
+    }
+    return pathOrdinals;
   }
 
   /** Get the vector corresponding to the given ordinals at each level of the column path. */
   static ColumnVector getVector(ColumnarBatch batch, int[] pathOrdinals) {
-    return ColumnBinding.getVector(batch, pathOrdinals);
+    checkArgument(pathOrdinals.length > 0, "Invalid path ordinals size");
+    ColumnVector vector = null;
+    for (int level = 0; level < pathOrdinals.length; level++) {
+      int levelOrdinal = pathOrdinals[level];
+      vector = (level == 0) ? batch.getColumnVector(levelOrdinal) : vector.getChild(levelOrdinal);
+    }
+
+    return vector;
   }
 }

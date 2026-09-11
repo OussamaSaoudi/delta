@@ -15,224 +15,154 @@
  */
 package io.delta.kernel.internal.execution;
 
-import io.delta.kernel.data.ColumnVector;
 import io.delta.kernel.data.ColumnarBatch;
-import io.delta.kernel.data.FilteredColumnarBatch;
 import io.delta.kernel.data.Row;
-import io.delta.kernel.engine.ExpressionHandler;
+import io.delta.kernel.execution.PlanEngine;
+import io.delta.kernel.execution.PlanEngine.BatchEvaluator;
 import io.delta.kernel.expressions.Expression;
-import io.delta.kernel.expressions.ExpressionEvaluator;
 import io.delta.kernel.expressions.StructExpression;
-import io.delta.kernel.internal.data.GenericRow;
 import io.delta.kernel.internal.util.Utils;
-import io.delta.kernel.plans.SemiJoin;
+import io.delta.kernel.plans.PlanNode.SemiJoin;
 import io.delta.kernel.types.DataType;
 import io.delta.kernel.types.StructField;
 import io.delta.kernel.types.StructType;
 import io.delta.kernel.utils.CloseableIterator;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.NoSuchElementException;
 
 /** Build-side hash set followed by streaming semi or anti filtering. */
 final class SemiJoinOperator {
   private SemiJoinOperator() {}
 
-  static CloseableIterator<FilteredColumnarBatch> open(SemiJoin node, ExecutionContext context) {
-    ExpressionHandler expressions = context.expressions();
+  static CloseableIterator<ColumnarBatch> open(
+      SemiJoin node, OperatorDispatcher execution) {
+    PlanEngine engine = execution.engine();
     BoundKeys probeKeys =
-        new BoundKeys(node.probe().outputSchema(), node.probeKeys(), node.keyTypes(), expressions);
+        new BoundKeys(node.probe().outputSchema(), node.probeKeys(), node.keyTypes(), engine);
     BoundKeys buildKeys = null;
-    CloseableIterator<FilteredColumnarBatch> probe = null;
-    CloseableIterator<FilteredColumnarBatch> build = null;
+    CloseableIterator<ColumnarBatch> probe = null;
+    CloseableIterator<ColumnarBatch> build = null;
+    StateTable buildState = null;
     try {
       buildKeys =
           new BoundKeys(
-              node.build().outputSchema(), node.buildKeys(), node.keyTypes(), expressions);
-      probe = context.open(node.probe());
-      build = context.open(node.build());
-      return new SemiJoinIterator(node, expressions, probeKeys, buildKeys, probe, build);
+              node.build().outputSchema(), node.buildKeys(), node.keyTypes(), engine);
+      probe = execution.open(node.probe());
+      build = execution.open(node.build());
+      buildState = StateTable.keyed(engine, probeKeys.keySchema, 0);
+      return new SemiJoinIterator(
+          node.inverted(), engine, probeKeys, buildKeys, probe, build, buildState);
     } catch (RuntimeException | Error failure) {
-      Utils.closeCloseablesAndAddSuppressed(failure, probeKeys, buildKeys, probe, build);
+      ManagedIterator.closeAndSuppress(failure, probeKeys, buildKeys, probe, build);
       throw failure;
     }
   }
 
-  private static final class SemiJoinIterator implements CloseableIterator<FilteredColumnarBatch> {
-    private final SemiJoin node;
-    private final ExpressionHandler expressions;
+  private static final class SemiJoinIterator extends ManagedIterator<ColumnarBatch> {
+    private final boolean inverted;
+    private final PlanEngine engine;
     private final BoundKeys probeKeys;
     private final BoundKeys buildKeys;
-    private final CloseableIterator<FilteredColumnarBatch> probe;
-    private final CloseableIterator<FilteredColumnarBatch> build;
+    private final CloseableIterator<ColumnarBatch> probe;
+    private final CloseableIterator<ColumnarBatch> build;
     private final StateTable buildState;
     private boolean buildDrained;
-    private boolean closed;
 
     private SemiJoinIterator(
-        SemiJoin node,
-        ExpressionHandler expressions,
+        boolean inverted,
+        PlanEngine engine,
         BoundKeys probeKeys,
         BoundKeys buildKeys,
-        CloseableIterator<FilteredColumnarBatch> probe,
-        CloseableIterator<FilteredColumnarBatch> build) {
-      this.node = node;
-      this.expressions = expressions;
+        CloseableIterator<ColumnarBatch> probe,
+        CloseableIterator<ColumnarBatch> build,
+        StateTable buildState) {
+      super(probeKeys, buildKeys, probe, build);
+      this.inverted = inverted;
+      this.engine = engine;
       this.probeKeys = probeKeys;
       this.buildKeys = buildKeys;
       this.probe = probe;
       this.build = build;
-      this.buildState = StateTable.keyed(probeKeys.keySchema, 0);
+      this.buildState = buildState;
     }
 
     @Override
-    public boolean hasNext() {
-      requireOpen();
+    protected boolean hasNextOpen() {
       drainBuild();
-      try {
-        if (probe.hasNext()) {
-          return true;
-        }
-        close();
-        return false;
-      } catch (RuntimeException | Error failure) {
-        fail(failure);
-        throw failure;
-      }
+      return probe.hasNext();
     }
 
     @Override
-    public FilteredColumnarBatch next() {
-      if (!hasNext()) {
-        throw new NoSuchElementException();
-      }
-      try {
-        return filter(probe.next());
-      } catch (RuntimeException | Error failure) {
-        fail(failure);
-        throw failure;
-      }
-    }
-
-    @Override
-    public void close() {
-      if (closed) {
-        return;
-      }
-      closed = true;
-      Utils.closeCloseables(probe, build, probeKeys, buildKeys, buildState);
+    protected ColumnarBatch nextOpen() {
+      return filter(probe.next());
     }
 
     private void drainBuild() {
       if (buildDrained) {
         return;
       }
-      try {
-        while (build.hasNext()) {
-          addBuildBatch(build.next());
-        }
-        Utils.closeCloseables(build, buildKeys);
-        buildDrained = true;
-      } catch (RuntimeException | Error failure) {
-        fail(failure);
-        throw failure;
+      while (build.hasNext()) {
+        addBuildBatch(build.next());
+      }
+      Utils.closeCloseables(build);
+      buildDrained = true;
+    }
+
+    private void addBuildBatch(ColumnarBatch batch) {
+      ColumnarBatch keys = buildKeys.evaluate(batch);
+      for (int rowId = 0; rowId < batch.getSize(); rowId++) {
+        buildState.probeOrInsert(row(keys, rowId));
       }
     }
 
-    private void addBuildBatch(FilteredColumnarBatch batch) {
-      validateBatch("build", node.build().outputSchema(), batch);
-      ColumnarBatch keys = buildKeys.evaluate(batch, "build");
-      for (int rowId = 0; rowId < batch.getData().getSize(); rowId++) {
-        if (!batch.isSelected(rowId)) {
-          continue;
-        }
-        buildState.probeOrInsert(buildKeys.keyAt(keys, rowId));
-      }
-    }
-
-    private FilteredColumnarBatch filter(FilteredColumnarBatch batch) {
-      validateBatch("probe", node.probe().outputSchema(), batch);
-      ColumnarBatch keys = probeKeys.evaluate(batch, "probe");
-      int size = batch.getData().getSize();
+    private ColumnarBatch filter(ColumnarBatch batch) {
+      ColumnarBatch keys = probeKeys.evaluate(batch);
+      int size = batch.getSize();
       boolean[] selected = new boolean[size];
       for (int rowId = 0; rowId < size; rowId++) {
-        if (batch.isSelected(rowId)) {
-          boolean member = buildState.contains(probeKeys.keyAt(keys, rowId));
-          selected[rowId] = node.inverted() != member;
-        }
+        boolean member = buildState.contains(row(keys, rowId));
+        selected[rowId] = inverted != member;
       }
-      ColumnVector selection = expressions.createSelectionVector(selected, 0, size);
-      return batch.withSelectionVector(selection, batch.getLifetime());
+      return engine.filter(batch, selected);
     }
 
-    private void fail(Throwable failure) {
-      closed = true;
-      Utils.closeCloseablesAndAddSuppressed(
-          failure, probe, build, probeKeys, buildKeys, buildState);
-    }
-
-    private void requireOpen() {
-      if (closed) {
-        throw new IllegalStateException("SemiJoin iterator is closed");
-      }
+    private static Row row(ColumnarBatch batch, int rowId) {
+      return batch == null ? null : batch.getRow(rowId);
     }
   }
 
   private static final class BoundKeys implements AutoCloseable {
     private final StructType keySchema;
-    private final MutableBatchRow probe;
-    private final Row emptyKey;
-    private final ExpressionEvaluator evaluator;
+    private final BatchEvaluator evaluator;
 
     private BoundKeys(
         StructType inputSchema,
         List<Expression> keys,
         List<DataType> keyTypes,
-        ExpressionHandler expressions) {
+        PlanEngine engine) {
       List<StructField> fields = new ArrayList<>(keyTypes.size());
       for (int index = 0; index < keyTypes.size(); index++) {
         fields.add(new StructField("_key_" + index, keyTypes.get(index), true));
       }
       this.keySchema = new StructType(fields);
-      this.probe = new MutableBatchRow(keySchema);
-      this.emptyKey = keys.isEmpty() ? GenericRow.fromOwnedValues(keySchema, new Object[0]) : null;
       this.evaluator =
           keys.isEmpty()
               ? null
-              : expressions.getEvaluator(inputSchema, new StructExpression(keys), keySchema);
+              : engine.bind(inputSchema, new StructExpression(keys), keySchema);
     }
 
-    private ColumnarBatch evaluate(FilteredColumnarBatch batch, String side) {
+    private ColumnarBatch evaluate(ColumnarBatch batch) {
       if (evaluator == null) {
         return null;
       }
-      FilteredColumnarBatch result = evaluator.eval(batch);
-      if (!keySchema.equals(result.getData().getSchema())
-          || result.getData().getSize() != batch.getData().getSize()) {
-        throw new IllegalStateException(
-            "SemiJoin " + side + " evaluator returned an unaligned batch");
-      }
-      return result.getData();
-    }
-
-    private Row keyAt(ColumnarBatch keys, int rowId) {
-      if (evaluator == null) {
-        return emptyKey;
-      }
-      probe.pointTo(keys, rowId);
-      return probe;
+      return evaluator.eval(batch);
     }
 
     @Override
     public void close() {
-      Utils.closeCloseables(evaluator);
-    }
-  }
-
-  private static void validateBatch(
-      String side, StructType expectedSchema, FilteredColumnarBatch batch) {
-    if (!expectedSchema.equals(batch.getData().getSchema())) {
-      throw new IllegalArgumentException("SemiJoin " + side + " batch has an unexpected schema");
+      if (evaluator != null) {
+        evaluator.close();
+      }
     }
   }
 }

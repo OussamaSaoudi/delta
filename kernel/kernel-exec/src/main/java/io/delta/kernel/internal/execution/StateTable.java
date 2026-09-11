@@ -18,41 +18,48 @@ package io.delta.kernel.internal.execution;
 import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.data.Row;
+import io.delta.kernel.execution.PlanEngine;
 import io.delta.kernel.internal.data.GenericRow;
 import io.delta.kernel.internal.util.RowKernels;
 import io.delta.kernel.types.StructType;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 /** Boxed execution state with zero-copy lookup and copy-on-insert keys. */
-final class StateTable implements AutoCloseable {
+final class StateTable {
+  private static final Row[] NO_VALUES = new Row[0];
+
+  private final StructType keySchema;
+  private final PlanEngine engine;
   private final int valueSlotCount;
   private final List<Entry> entries = new ArrayList<>();
-  private final Map<Key, Key> keyedEntries;
+  private final Map<Entry, Entry> keyedEntries;
   private final Probe probe = new Probe();
-  private boolean closed;
 
   /** Creates initially empty keyed state, including an empty-key join set. */
-  static StateTable keyed(StructType keySchema, int valueSlotCount) {
-    return new StateTable(keySchema, valueSlotCount, false);
+  static StateTable keyed(PlanEngine engine, StructType keySchema, int valueSlotCount) {
+    return new StateTable(engine, keySchema, valueSlotCount, false);
   }
 
   /** Creates the single entry required by a global aggregate, even for empty input. */
-  static StateTable global(int valueSlotCount) {
-    return new StateTable(new StructType(), valueSlotCount, true);
+  static StateTable global(PlanEngine engine, int valueSlotCount) {
+    return new StateTable(engine, new StructType(), valueSlotCount, true);
   }
 
-  private StateTable(StructType keySchema, int valueSlotCount, boolean global) {
-    requireNonNull(keySchema, "keySchema is null");
+  private StateTable(
+      PlanEngine engine, StructType keySchema, int valueSlotCount, boolean global) {
+    this.engine = requireNonNull(engine, "engine is null");
+    this.keySchema = requireNonNull(keySchema, "keySchema is null");
     if (valueSlotCount < 0) {
       throw new IllegalArgumentException("valueSlotCount is negative: " + valueSlotCount);
     }
     this.valueSlotCount = valueSlotCount;
     this.keyedEntries = keySchema.length() == 0 ? null : new HashMap<>();
     if (global) {
-      entries.add(new Entry(GenericRow.fromOwnedValues(keySchema, new Object[0])));
+      entries.add(new Entry(new GenericRow(keySchema, Collections.emptyMap()), 0));
     }
   }
 
@@ -60,22 +67,22 @@ final class StateTable implements AutoCloseable {
     checkCandidate(candidate);
     if (keyedEntries == null) {
       if (entries.isEmpty()) {
-        entries.add(new Entry(RowKernels.materialize(candidate)));
+        entries.add(new Entry(new GenericRow(keySchema, Collections.emptyMap()), 0));
       }
       return 0;
     }
 
     probe.reset(candidate);
-    Key existing = keyedEntries.get(probe);
+    Entry existing = keyedEntries.get(probe);
     if (existing != null) {
       return existing.entryRef;
     }
 
-    Row ownedKey = RowKernels.materialize(candidate);
+    Row ownedKey = engine.retainRow(candidate, keySchema);
     int entryRef = entries.size();
-    entries.add(new Entry(ownedKey));
-    Key key = new Key(ownedKey, probe.hashCode(), entryRef);
-    keyedEntries.put(key, key);
+    Entry entry = new Entry(ownedKey, probe.hashCode());
+    entries.add(entry);
+    keyedEntries.put(entry, entry);
     return entryRef;
   }
 
@@ -92,33 +99,19 @@ final class StateTable implements AutoCloseable {
     return entry(entryRef).key;
   }
 
-  Object getValue(int entryRef, int slot) {
+  Row getValue(int entryRef, int slot) {
     return entry(entryRef).values[checkSlot(slot)];
   }
 
-  void setValue(int entryRef, int slot, Object ownedValue) {
+  void setValue(int entryRef, int slot, Row ownedValue) {
     entry(entryRef).values[checkSlot(slot)] = ownedValue;
   }
 
   int size() {
-    checkOpen();
     return entries.size();
   }
 
-  @Override
-  public void close() {
-    if (!closed) {
-      closed = true;
-      entries.clear();
-      if (keyedEntries != null) {
-        keyedEntries.clear();
-      }
-      probe.clear();
-    }
-  }
-
   private Entry entry(int entryRef) {
-    checkOpen();
     if (entryRef < 0 || entryRef >= entries.size()) {
       throw new IndexOutOfBoundsException("Invalid entry reference: " + entryRef);
     }
@@ -133,34 +126,25 @@ final class StateTable implements AutoCloseable {
   }
 
   private void checkCandidate(Row candidate) {
-    checkOpen();
+    if (keySchema.length() == 0) {
+      return;
+    }
     requireNonNull(candidate, "candidate is null");
-  }
-
-  private void checkOpen() {
-    if (closed) {
-      throw new IllegalStateException("State table is closed");
+    if (candidate.getSchema().length() < keySchema.length()) {
+      throw new IllegalArgumentException("Candidate is narrower than the state key");
     }
   }
 
   private final class Entry {
     private final Row key;
-    private final Object[] values = new Object[valueSlotCount];
-
-    private Entry(Row key) {
-      this.key = key;
-    }
-  }
-
-  private static final class Key {
-    private final Row row;
     private final int hashCode;
     private final int entryRef;
+    private final Row[] values = valueSlotCount == 0 ? NO_VALUES : new Row[valueSlotCount];
 
-    private Key(Row row, int hashCode, int entryRef) {
-      this.row = row;
+    private Entry(Row key, int hashCode) {
+      this.key = key;
       this.hashCode = hashCode;
-      this.entryRef = entryRef;
+      this.entryRef = entries.size();
     }
 
     @Override
@@ -170,7 +154,8 @@ final class StateTable implements AutoCloseable {
 
     @Override
     public boolean equals(Object other) {
-      return other instanceof Key && RowKernels.equalValues(row, ((Key) other).row);
+      return other instanceof StateTable.Entry
+          && RowKernels.equalValues(key, keySchema, ((Entry) other).key);
     }
   }
 
@@ -180,12 +165,7 @@ final class StateTable implements AutoCloseable {
 
     private void reset(Row row) {
       this.row = row;
-      this.hashCode = RowKernels.hashValues(row);
-    }
-
-    private void clear() {
-      row = null;
-      hashCode = 0;
+      this.hashCode = RowKernels.hashValues(row, keySchema);
     }
 
     @Override
@@ -195,7 +175,8 @@ final class StateTable implements AutoCloseable {
 
     @Override
     public boolean equals(Object other) {
-      return other instanceof Key && RowKernels.equalValues(row, ((Key) other).row);
+      return other instanceof StateTable.Entry
+          && RowKernels.equalValues(row, keySchema, ((Entry) other).key);
     }
   }
 }

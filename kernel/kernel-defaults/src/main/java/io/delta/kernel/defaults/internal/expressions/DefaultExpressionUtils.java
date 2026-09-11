@@ -18,28 +18,25 @@ package io.delta.kernel.defaults.internal.expressions;
 import static io.delta.kernel.defaults.internal.DefaultEngineErrors.unsupportedExpressionException;
 import static io.delta.kernel.internal.util.Preconditions.checkArgument;
 import static java.lang.String.format;
-import static java.util.Objects.requireNonNull;
 
+import io.delta.kernel.data.ArrayValue;
 import io.delta.kernel.data.ColumnVector;
-import io.delta.kernel.defaults.internal.data.vector.AbstractDelegatingColumnVector;
+import io.delta.kernel.data.MapValue;
 import io.delta.kernel.expressions.Expression;
 import io.delta.kernel.expressions.Literal;
 import io.delta.kernel.expressions.Predicate;
 import io.delta.kernel.internal.util.Utils;
 import io.delta.kernel.types.*;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.util.Comparator;
 import java.util.List;
+import java.util.function.Function;
 import java.util.function.IntPredicate;
+import java.util.stream.Collectors;
 
 /** Utility methods used by the default expression evaluator. */
-public final class DefaultExpressionUtils {
-  private enum ArithmeticOperation {
-    ADD,
-    SUBTRACT,
-    MULTIPLY,
-    DIVIDE
-  }
+class DefaultExpressionUtils {
 
   static final Comparator<BigDecimal> BIGDECIMAL_COMPARATOR = Comparator.naturalOrder();
   static final Comparator<byte[]> BINARY_COMPARTOR =
@@ -53,106 +50,15 @@ public final class DefaultExpressionUtils {
         }
         return Integer.compare(leftOp.length, rightOp.length);
       };
-  static final Comparator<String> STRING_COMPARATOR = DefaultExpressionUtils::compareStrings;
+  static final Comparator<String> STRING_COMPARATOR =
+      (leftOp, rightOp) -> {
+        byte[] leftBytes = leftOp.getBytes(StandardCharsets.UTF_8);
+        byte[] rightBytes = rightOp.getBytes(StandardCharsets.UTF_8);
+        return BINARY_COMPARTOR.compare(leftBytes, rightBytes);
+      };
 
   private DefaultExpressionUtils() {}
 
-  private static int compareStrings(String left, String right) {
-    int leftOffset = 0;
-    int rightOffset = 0;
-    while (leftOffset < left.length() && rightOffset < right.length()) {
-      int leftCodePoint = left.codePointAt(leftOffset);
-      int rightCodePoint = right.codePointAt(rightOffset);
-      if (leftCodePoint != rightCodePoint) {
-        return Integer.compare(leftCodePoint, rightCodePoint);
-      }
-      leftOffset += Character.charCount(leftCodePoint);
-      rightOffset += Character.charCount(rightCodePoint);
-    }
-    return Integer.compare(left.length() - leftOffset, right.length() - rightOffset);
-  }
-
-  public static boolean supportsComparison(DataType type) {
-    return type instanceof BooleanType
-        || type instanceof ByteType
-        || type instanceof ShortType
-        || type instanceof IntegerType
-        || type instanceof DateType
-        || type instanceof LongType
-        || type instanceof TimestampType
-        || type instanceof TimestampNTZType
-        || type instanceof FloatType
-        || type instanceof DoubleType
-        || type instanceof DecimalType
-        || type instanceof StringType
-        || type instanceof GeometryType
-        || type instanceof GeographyType
-        || type instanceof BinaryType;
-  }
-
-  /** Compares two non-null Kernel values using the default expression ordering. */
-  public static int compare(DataType type, Object left, Object right) {
-    requireNonNull(type, "type is null");
-    requireNonNull(left, "left is null");
-    requireNonNull(right, "right is null");
-    if (type instanceof BooleanType) {
-      return Boolean.compare((Boolean) left, (Boolean) right);
-    } else if (type instanceof ByteType) {
-      return Byte.compare(((Number) left).byteValue(), ((Number) right).byteValue());
-    } else if (type instanceof ShortType) {
-      return Short.compare(((Number) left).shortValue(), ((Number) right).shortValue());
-    } else if (type instanceof IntegerType || type instanceof DateType) {
-      return Integer.compare(((Number) left).intValue(), ((Number) right).intValue());
-    } else if (type instanceof LongType
-        || type instanceof TimestampType
-        || type instanceof TimestampNTZType) {
-      return Long.compare(((Number) left).longValue(), ((Number) right).longValue());
-    } else if (type instanceof FloatType) {
-      return Float.compare(((Number) left).floatValue(), ((Number) right).floatValue());
-    } else if (type instanceof DoubleType) {
-      return Double.compare(((Number) left).doubleValue(), ((Number) right).doubleValue());
-    } else if (type instanceof DecimalType) {
-      return BIGDECIMAL_COMPARATOR.compare((BigDecimal) left, (BigDecimal) right);
-    } else if (type instanceof StringType
-        || type instanceof GeometryType
-        || type instanceof GeographyType) {
-      return STRING_COMPARATOR.compare((String) left, (String) right);
-    } else if (type instanceof BinaryType) {
-      return BINARY_COMPARTOR.compare((byte[]) left, (byte[]) right);
-    }
-    throw new UnsupportedOperationException("No comparator available for data type: " + type);
-  }
-
-  /** Compares two non-null vector values without boxing primitive values. */
-  public static int compare(
-      DataType type, ColumnVector left, int leftRow, ColumnVector right, int rightRow) {
-    if (type instanceof BooleanType) {
-      return Boolean.compare(left.getBoolean(leftRow), right.getBoolean(rightRow));
-    } else if (type instanceof ByteType) {
-      return Byte.compare(left.getByte(leftRow), right.getByte(rightRow));
-    } else if (type instanceof ShortType) {
-      return Short.compare(left.getShort(leftRow), right.getShort(rightRow));
-    } else if (type instanceof IntegerType || type instanceof DateType) {
-      return Integer.compare(left.getInt(leftRow), right.getInt(rightRow));
-    } else if (type instanceof LongType
-        || type instanceof TimestampType
-        || type instanceof TimestampNTZType) {
-      return Long.compare(left.getLong(leftRow), right.getLong(rightRow));
-    } else if (type instanceof FloatType) {
-      return Float.compare(left.getFloat(leftRow), right.getFloat(rightRow));
-    } else if (type instanceof DoubleType) {
-      return Double.compare(left.getDouble(leftRow), right.getDouble(rightRow));
-    } else if (type instanceof DecimalType) {
-      return BIGDECIMAL_COMPARATOR.compare(left.getDecimal(leftRow), right.getDecimal(rightRow));
-    } else if (type instanceof StringType
-        || type instanceof GeometryType
-        || type instanceof GeographyType) {
-      return STRING_COMPARATOR.compare(left.getString(leftRow), right.getString(rightRow));
-    } else if (type instanceof BinaryType) {
-      return BINARY_COMPARTOR.compare(left.getBinary(leftRow), right.getBinary(rightRow));
-    }
-    throw new UnsupportedOperationException("No comparator available for data type: " + type);
-  }
   /**
    * Utility method that calculates the nullability result from given two vectors. Result is null if
    * at least one side is a null.
@@ -171,7 +77,9 @@ public final class DefaultExpressionUtils {
    * accessors.
    */
   static ColumnVector booleanWrapperVector(
-      ColumnVector childVector, IntPredicate valueAccessor, IntPredicate nullabilityAccessor) {
+      ColumnVector childVector,
+      Function<Integer, Boolean> valueAccessor,
+      Function<Integer, Boolean> nullabilityAccessor) {
 
     return new ColumnVector() {
 
@@ -192,12 +100,12 @@ public final class DefaultExpressionUtils {
 
       @Override
       public boolean isNullAt(int rowId) {
-        return nullabilityAccessor.test(rowId);
+        return nullabilityAccessor.apply(rowId);
       }
 
       @Override
       public boolean getBoolean(int rowId) {
-        return valueAccessor.test(rowId);
+        return valueAccessor.apply(rowId);
       }
     };
   }
@@ -215,11 +123,56 @@ public final class DefaultExpressionUtils {
     checkArgument(
         left.getSize() == right.getSize(), "Left and right operand have different vector sizes.");
 
-    DataType type = left.getDataType();
-    if (!supportsComparison(type)) {
-      throw new UnsupportedOperationException(type + " can not be compared.");
+    DataType dataType = left.getDataType();
+    IntPredicate vectorValueComparator;
+    if (dataType instanceof BooleanType) {
+      vectorValueComparator =
+          rowId ->
+              booleanComparator.test(
+                  Boolean.compare(left.getBoolean(rowId), right.getBoolean(rowId)));
+    } else if (dataType instanceof ByteType) {
+      vectorValueComparator =
+          rowId -> booleanComparator.test(Byte.compare(left.getByte(rowId), right.getByte(rowId)));
+    } else if (dataType instanceof ShortType) {
+      vectorValueComparator =
+          rowId ->
+              booleanComparator.test(Short.compare(left.getShort(rowId), right.getShort(rowId)));
+    } else if (dataType instanceof IntegerType || dataType instanceof DateType) {
+      vectorValueComparator =
+          rowId -> booleanComparator.test(Integer.compare(left.getInt(rowId), right.getInt(rowId)));
+    } else if (dataType instanceof LongType
+        || dataType instanceof TimestampType
+        || dataType instanceof TimestampNTZType) {
+      vectorValueComparator =
+          rowId -> booleanComparator.test(Long.compare(left.getLong(rowId), right.getLong(rowId)));
+    } else if (dataType instanceof FloatType) {
+      vectorValueComparator =
+          rowId ->
+              booleanComparator.test(Float.compare(left.getFloat(rowId), right.getFloat(rowId)));
+    } else if (dataType instanceof DoubleType) {
+      vectorValueComparator =
+          rowId ->
+              booleanComparator.test(Double.compare(left.getDouble(rowId), right.getDouble(rowId)));
+    } else if (dataType instanceof DecimalType) {
+      vectorValueComparator =
+          rowId ->
+              booleanComparator.test(
+                  BIGDECIMAL_COMPARATOR.compare(left.getDecimal(rowId), right.getDecimal(rowId)));
+    } else if (dataType instanceof StringType) {
+      vectorValueComparator =
+          rowId ->
+              booleanComparator.test(
+                  STRING_COMPARATOR.compare(left.getString(rowId), right.getString(rowId)));
+    } else if (dataType instanceof BinaryType) {
+      vectorValueComparator =
+          rowId ->
+              booleanComparator.test(
+                  BINARY_COMPARTOR.compare(left.getBinary(rowId), right.getBinary(rowId)));
+    } else {
+      throw new UnsupportedOperationException(dataType + " can not be compared.");
     }
-    return rowId -> booleanComparator.test(compare(type, left, rowId, right, rowId));
+
+    return vectorValueComparator;
   }
 
   /**
@@ -322,38 +275,132 @@ public final class DefaultExpressionUtils {
   }
 
   /**
-   * Combines a list of column vectors using the precomputed selected child for each row.
+   * Combines a list of column vectors into one column vector based on the resolution of idxToReturn
    *
    * @param vectors List of ColumnVectors of the same data type with length >= 1
-   * @param selectedChildren index of the vector to use for each row
+   * @param idxToReturn Function that takes in a rowId and returns the index of the column vector to
+   *     use as the return value
    */
-  static ColumnVector combinationVector(List<ColumnVector> vectors, int[] selectedChildren) {
-    return new AbstractDelegatingColumnVector(
-        vectors.get(0).getSize(), vectors.get(0).getDataType()) {
-      private boolean closed;
+  static ColumnVector combinationVector(
+      List<ColumnVector> vectors, Function<Integer, Integer> idxToReturn) {
+    return new ColumnVector() {
+      // Store the last lookup value to avoid multiple looks up for same rowId.
+      // The general pattern is call `isNullAt(rowId)` followed by `getBoolean(rowId)` or
+      // some other value accessor. So the cache of one value is enough.
+      private int lastLookupRowId = -1;
+      private ColumnVector lastLookupVector = null;
+
+      @Override
+      public DataType getDataType() {
+        return vectors.get(0).getDataType();
+      }
+
+      @Override
+      public int getSize() {
+        return vectors.get(0).getSize();
+      }
 
       @Override
       public void close() {
-        if (!closed) {
-          closed = true;
-          Utils.closeCloseables(vectors.toArray(new ColumnVector[0]));
-        }
+        Utils.closeCloseables(vectors.toArray(new ColumnVector[0]));
       }
 
       @Override
-      protected ColumnVector delegateVector(int rowId) {
-        return getVector(rowId);
+      public boolean isNullAt(int rowId) {
+        return getVector(rowId).isNullAt(rowId);
       }
 
       @Override
-      protected int delegateRowId(int rowId) {
-        return rowId;
+      public boolean getBoolean(int rowId) {
+        return getVector(rowId).getBoolean(rowId);
+      }
+
+      @Override
+      public byte getByte(int rowId) {
+        return getVector(rowId).getByte(rowId);
+      }
+
+      @Override
+      public short getShort(int rowId) {
+        return getVector(rowId).getShort(rowId);
+      }
+
+      @Override
+      public int getInt(int rowId) {
+        return getVector(rowId).getInt(rowId);
+      }
+
+      @Override
+      public long getLong(int rowId) {
+        return getVector(rowId).getLong(rowId);
+      }
+
+      @Override
+      public float getFloat(int rowId) {
+        return getVector(rowId).getFloat(rowId);
+      }
+
+      @Override
+      public double getDouble(int rowId) {
+        return getVector(rowId).getDouble(rowId);
+      }
+
+      @Override
+      public byte[] getBinary(int rowId) {
+        return getVector(rowId).getBinary(rowId);
+      }
+
+      @Override
+      public String getString(int rowId) {
+        return getVector(rowId).getString(rowId);
+      }
+
+      @Override
+      public BigDecimal getDecimal(int rowId) {
+        return getVector(rowId).getDecimal(rowId);
+      }
+
+      @Override
+      public MapValue getMap(int rowId) {
+        return getVector(rowId).getMap(rowId);
+      }
+
+      @Override
+      public ArrayValue getArray(int rowId) {
+        return getVector(rowId).getArray(rowId);
+      }
+
+      @Override
+      public ColumnVector getChild(int ordinal) {
+        return combinationVector(
+            vectors.stream().map(v -> v.getChild(ordinal)).collect(Collectors.toList()),
+            idxToReturn);
       }
 
       private ColumnVector getVector(int rowId) {
-        return vectors.get(selectedChildren[rowId]);
+        if (rowId == lastLookupRowId) {
+          return lastLookupVector;
+        }
+        lastLookupRowId = rowId;
+        lastLookupVector = vectors.get(idxToReturn.apply(rowId));
+        return lastLookupVector;
       }
     };
+  }
+
+  /** Represents an arithmetic operator that can be applied to two numeric values. */
+  public interface ArithmeticOperator {
+    byte apply(byte a, byte b);
+
+    short apply(short a, short b);
+
+    int apply(int a, int b);
+
+    long apply(long a, long b);
+
+    float apply(float a, float b);
+
+    double apply(double a, double b);
   }
 
   /**
@@ -364,16 +411,16 @@ public final class DefaultExpressionUtils {
    *
    * @param left the left operand column vector
    * @param right the right operand column vector
-   * @param operation the arithmetic operation to apply
+   * @param operator the arithmetic operator to apply
    * @return a new column vector representing the result of the arithmetic operation
    */
-  static ColumnVector arithmeticVector(ColumnVector left, ColumnVector right, String operation) {
+  static ColumnVector arithmeticVector(
+      ColumnVector left, ColumnVector right, ArithmeticOperator operator) {
     checkArgument(
         left.getSize() == right.getSize(), "Left and right operand have different vector sizes.");
     checkArgument(
         left.getDataType().equals(right.getDataType()),
         "Left and right operand have different data types.");
-    ArithmeticOperation arithmeticOperation = ArithmeticOperation.valueOf(operation);
     return new ColumnVector() {
       @Override
       public DataType getDataType() {
@@ -397,123 +444,34 @@ public final class DefaultExpressionUtils {
 
       @Override
       public byte getByte(int rowId) {
-        return evalByte(arithmeticOperation, left.getByte(rowId), right.getByte(rowId));
+        return operator.apply(left.getByte(rowId), right.getByte(rowId));
       }
 
       @Override
       public short getShort(int rowId) {
-        return evalShort(arithmeticOperation, left.getShort(rowId), right.getShort(rowId));
+        return operator.apply(left.getShort(rowId), right.getShort(rowId));
       }
 
       @Override
       public int getInt(int rowId) {
-        return evalInt(arithmeticOperation, left.getInt(rowId), right.getInt(rowId));
+        return operator.apply(left.getInt(rowId), right.getInt(rowId));
       }
 
       @Override
       public long getLong(int rowId) {
-        return evalLong(arithmeticOperation, left.getLong(rowId), right.getLong(rowId));
+        return operator.apply(left.getLong(rowId), right.getLong(rowId));
       }
 
       @Override
       public float getFloat(int rowId) {
-        return evalFloat(arithmeticOperation, left.getFloat(rowId), right.getFloat(rowId));
+        return operator.apply(left.getFloat(rowId), right.getFloat(rowId));
       }
 
       @Override
       public double getDouble(int rowId) {
-        return evalDouble(arithmeticOperation, left.getDouble(rowId), right.getDouble(rowId));
+        return operator.apply(left.getDouble(rowId), right.getDouble(rowId));
       }
     };
-  }
-
-  private static byte evalByte(ArithmeticOperation operation, byte left, byte right) {
-    int result = evalInt(operation, left, right);
-    if (result < Byte.MIN_VALUE || result > Byte.MAX_VALUE) {
-      throw arithmeticOverflow(operation, ByteType.BYTE);
-    }
-    return (byte) result;
-  }
-
-  private static short evalShort(ArithmeticOperation operation, short left, short right) {
-    int result = evalInt(operation, left, right);
-    if (result < Short.MIN_VALUE || result > Short.MAX_VALUE) {
-      throw arithmeticOverflow(operation, ShortType.SHORT);
-    }
-    return (short) result;
-  }
-
-  private static int evalInt(ArithmeticOperation operation, int left, int right) {
-    switch (operation) {
-      case ADD:
-        return Math.addExact(left, right);
-      case SUBTRACT:
-        return Math.subtractExact(left, right);
-      case MULTIPLY:
-        return Math.multiplyExact(left, right);
-      case DIVIDE:
-        if (left == Integer.MIN_VALUE && right == -1) {
-          throw arithmeticOverflow(operation, IntegerType.INTEGER);
-        }
-        return left / right;
-      default:
-        throw new IllegalStateException("Unexpected arithmetic operation: " + operation);
-    }
-  }
-
-  private static long evalLong(ArithmeticOperation operation, long left, long right) {
-    switch (operation) {
-      case ADD:
-        return Math.addExact(left, right);
-      case SUBTRACT:
-        return Math.subtractExact(left, right);
-      case MULTIPLY:
-        return Math.multiplyExact(left, right);
-      case DIVIDE:
-        if (left == Long.MIN_VALUE && right == -1) {
-          throw arithmeticOverflow(operation, LongType.LONG);
-        }
-        return left / right;
-      default:
-        throw new IllegalStateException("Unexpected arithmetic operation: " + operation);
-    }
-  }
-
-  private static float evalFloat(ArithmeticOperation operation, float left, float right) {
-    switch (operation) {
-      case ADD:
-        return left + right;
-      case SUBTRACT:
-        return left - right;
-      case MULTIPLY:
-        return left * right;
-      case DIVIDE:
-        return left / right;
-      default:
-        throw new IllegalStateException("Unexpected arithmetic operation: " + operation);
-    }
-  }
-
-  private static double evalDouble(ArithmeticOperation operation, double left, double right) {
-    switch (operation) {
-      case ADD:
-        return left + right;
-      case SUBTRACT:
-        return left - right;
-      case MULTIPLY:
-        return left * right;
-      case DIVIDE:
-        return left / right;
-      default:
-        throw new IllegalStateException("Unexpected arithmetic operation: " + operation);
-    }
-  }
-
-  private static ArithmeticException arithmeticOverflow(
-      ArithmeticOperation operation, DataType dataType) {
-    return new ArithmeticException(
-        String.format(
-            "Arithmetic overflow while evaluating %s for %s values", operation, dataType));
   }
 
   /**

@@ -26,12 +26,8 @@ import java.util.Optional;
 public class DeletionVectorUtils {
   public static Tuple2<DeletionVectorDescriptor, RoaringBitmapArray> loadNewDvAndBitmap(
       Engine engine, String tablePath, DeletionVectorDescriptor dv) {
-    return loadNewDvAndBitmap(engine, Optional.of(tablePath), dv);
-  }
-
-  public static Tuple2<DeletionVectorDescriptor, RoaringBitmapArray> loadNewDvAndBitmap(
-      Engine engine, Optional<String> tablePath, DeletionVectorDescriptor dv) {
-    DeletionVectorStoredBitmap storedBitmap = new DeletionVectorStoredBitmap(dv, tablePath);
+    DeletionVectorStoredBitmap storedBitmap =
+        new DeletionVectorStoredBitmap(dv, Optional.of(tablePath));
     try {
       RoaringBitmapArray bitmap = storedBitmap.load(engine.getFileSystemClient());
       return new Tuple2<>(dv, bitmap);
