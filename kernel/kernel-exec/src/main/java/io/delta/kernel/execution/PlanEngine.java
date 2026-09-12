@@ -35,8 +35,7 @@ public interface PlanEngine {
   }
 
   /** Binds a struct expression producing one aligned row of {@code outputSchema} per input row. */
-  BatchEvaluator bind(
-      StructType inputSchema, Expression expression, StructType outputSchema);
+  BatchEvaluator bind(StructType inputSchema, Expression expression, StructType outputSchema);
 
   /** Binds a predicate that returns only matching rows. */
   BatchEvaluator bind(StructType inputSchema, Predicate predicate);
@@ -49,6 +48,9 @@ public interface PlanEngine {
 
   /** Retains one value as a one-field row in this engine's native representation. */
   Row retainValue(Row input, int ordinal, StructType outputSchema);
+
+  /** Creates one LONG value in this engine's native representation. */
+  Row longValue(long value, StructType outputSchema);
 
   /** Appends aligned columns using this engine's native row representation. */
   ColumnarBatch appendColumns(

@@ -39,8 +39,7 @@ public final class RowBackedColumnarBatch implements ColumnarBatch {
   private final ColumnVector[] columns;
   private final Lifetime lifetime;
 
-  public RowBackedColumnarBatch(
-      StructType schema, List<? extends Row> rows, Lifetime lifetime) {
+  public RowBackedColumnarBatch(StructType schema, List<? extends Row> rows, Lifetime lifetime) {
     this.schema = requireNonNull(schema, "schema is null");
     this.rows = requireNonNull(rows, "rows is null");
     this.size = this.rows.size();
@@ -75,7 +74,6 @@ public final class RowBackedColumnarBatch implements ColumnarBatch {
   }
 
   /** Returns one backing row without constructing a positional view. */
-  @Override
   public Row getRow(int rowId) {
     checkArgument(rowId >= 0 && rowId < size, "Invalid rowId: %s", rowId);
     return rows.get(rowId);

@@ -100,14 +100,6 @@ public interface ColumnarBatch {
     throw new UnsupportedOperationException("Not yet implemented");
   }
 
-  /** Returns one positional row view. */
-  default Row getRow(int rowId) {
-    if (rowId < 0 || rowId >= getSize()) {
-      throw new IndexOutOfBoundsException("Invalid row id: " + rowId);
-    }
-    return new ColumnarBatchRow(this, rowId);
-  }
-
   /** @return iterator of {@link Row}s in this batch */
   default CloseableIterator<Row> getRows() {
     final ColumnarBatch batch = this;
@@ -125,7 +117,9 @@ public interface ColumnarBatch {
         if (!hasNext()) {
           throw new NoSuchElementException();
         }
-        return batch.getRow(rowId++);
+        Row row = new ColumnarBatchRow(batch, rowId);
+        rowId += 1;
+        return row;
       }
 
       @Override

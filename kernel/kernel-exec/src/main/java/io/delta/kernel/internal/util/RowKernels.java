@@ -17,7 +17,10 @@ package io.delta.kernel.internal.util;
 
 import static java.util.Objects.requireNonNull;
 
+import io.delta.kernel.data.ColumnarBatch;
 import io.delta.kernel.data.Row;
+import io.delta.kernel.internal.data.ColumnarBatchRow;
+import io.delta.kernel.internal.data.RowBackedColumnarBatch;
 import io.delta.kernel.types.BinaryType;
 import io.delta.kernel.types.BooleanType;
 import io.delta.kernel.types.ByteType;
@@ -35,16 +38,26 @@ import io.delta.kernel.types.StringType;
 import io.delta.kernel.types.StructType;
 import io.delta.kernel.types.TimestampNTZType;
 import io.delta.kernel.types.TimestampType;
-import java.math.BigDecimal;
 import java.util.Arrays;
 
 /** Hash, equality, and ordering for scalar and struct execution values. */
 public final class RowKernels {
   private RowKernels() {}
 
+  /** Returns a row without allocating a positional view when the batch is row-backed. */
+  public static Row rowAt(ColumnarBatch batch, int rowId) {
+    requireNonNull(batch, "batch is null");
+    if (batch instanceof RowBackedColumnarBatch) {
+      return ((RowBackedColumnarBatch) batch).getRow(rowId);
+    }
+    if (rowId < 0 || rowId >= batch.getSize()) {
+      throw new IndexOutOfBoundsException("Invalid row id: " + rowId);
+    }
+    return new ColumnarBatchRow(batch, rowId);
+  }
+
   /** Compares two non-null row values. */
-  public static int compare(
-      DataType type, Row left, int leftOrdinal, Row right, int rightOrdinal) {
+  public static int compare(DataType type, Row left, int leftOrdinal, Row right, int rightOrdinal) {
     requireNonNull(type, "type is null");
     requireNonNull(left, "left row is null");
     requireNonNull(right, "right row is null");
@@ -196,14 +209,12 @@ public final class RowKernels {
     return Arrays.hashCode(row.getBinary(ordinal));
   }
 
-  private static boolean equalRows(
-      Row left, Row right, StructType type, boolean validateSchema) {
+  private static boolean equalRows(Row left, Row right, StructType type, boolean validateSchema) {
     if (validateSchema && (!type.equals(left.getSchema()) || !type.equals(right.getSchema()))) {
       return false;
     }
     for (int ordinal = 0; ordinal < type.length(); ordinal++) {
-      if (!equal(
-          left, right, type.at(ordinal).getDataType(), ordinal, validateSchema)) {
+      if (!equal(left, right, type.at(ordinal).getDataType(), ordinal, validateSchema)) {
         return false;
       }
     }
@@ -219,17 +230,13 @@ public final class RowKernels {
     }
     if (type instanceof StructType) {
       return equalRows(
-          left.getStruct(ordinal),
-          right.getStruct(ordinal),
-          (StructType) type,
-          validateSchema);
+          left.getStruct(ordinal), right.getStruct(ordinal), (StructType) type, validateSchema);
     }
     requireScalar(type, "equality");
     return equalScalar(left, right, type, ordinal);
   }
 
-  private static boolean equalScalar(
-      Row left, Row right, DataType type, int ordinal) {
+  private static boolean equalScalar(Row left, Row right, DataType type, int ordinal) {
     if (type instanceof BooleanType) {
       return left.getBoolean(ordinal) == right.getBoolean(ordinal);
     }

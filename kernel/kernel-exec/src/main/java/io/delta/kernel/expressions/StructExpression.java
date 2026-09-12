@@ -49,8 +49,7 @@ public final class StructExpression implements Expression {
   @Override
   public boolean equals(Object other) {
     return this == other
-        || (other instanceof StructExpression
-            && fields.equals(((StructExpression) other).fields));
+        || (other instanceof StructExpression && fields.equals(((StructExpression) other).fields));
   }
 
   @Override

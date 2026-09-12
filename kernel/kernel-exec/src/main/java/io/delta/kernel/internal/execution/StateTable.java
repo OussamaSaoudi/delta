@@ -49,8 +49,7 @@ final class StateTable {
     return new StateTable(engine, new StructType(), valueSlotCount, true);
   }
 
-  private StateTable(
-      PlanEngine engine, StructType keySchema, int valueSlotCount, boolean global) {
+  private StateTable(PlanEngine engine, StructType keySchema, int valueSlotCount, boolean global) {
     this.engine = requireNonNull(engine, "engine is null");
     this.keySchema = requireNonNull(keySchema, "keySchema is null");
     if (valueSlotCount < 0) {

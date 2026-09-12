@@ -17,7 +17,7 @@
 package io.delta.kernel.execution
 
 import java.util.{Collections, Optional}
-import java.util.concurrent.{Callable, CompletableFuture, Executors, TimeUnit, TimeoutException}
+import java.util.concurrent.{Callable, CompletableFuture, Executors, TimeoutException, TimeUnit}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
@@ -117,7 +117,8 @@ class PlanResultCacheSuite extends AnyFunSuite {
       assert(!bounded.prefetch(scan(2), completed(oversized), 3))
       assert(retained.closed)
       assert(oversized.closed)
-      assert(bounded.weightBytes() === 0)
+      assert(bounded.get(scan(1)) == null)
+      assert(bounded.get(scan(2)) == null)
     } finally {
       bounded.close()
     }
@@ -138,9 +139,7 @@ class PlanResultCacheSuite extends AnyFunSuite {
   private def batch(value: Int): ColumnarBatch =
     new RowBackedColumnarBatch(schema, Seq(row(value)).asJava, Lifetime.OWNED)
 
-  private def completed(
-      result: CloseableIterator[ColumnarBatch]
-  ): CompletableFuture[CloseableIterator[ColumnarBatch]] =
+  private def completed(result: CloseableIterator[ColumnarBatch]) =
     CompletableFuture.completedFuture(result)
 
   private def collectInts(result: CloseableIterator[ColumnarBatch]): Seq[Int] = {
@@ -169,5 +168,4 @@ class PlanResultCacheSuite extends AnyFunSuite {
     override def next(): ColumnarBatch = iterator.next()
     override def close(): Unit = closed = true
   }
-
 }

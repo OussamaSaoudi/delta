@@ -68,10 +68,6 @@ public final class PlanResultCache implements AutoCloseable {
     return install(scan, new RowSource(result, checkWeight(approximateBytes)));
   }
 
-  public synchronized long weightBytes() {
-    return weightBytes;
-  }
-
   public void invalidateAll() {
     List<RowSource> removed;
     synchronized (this) {

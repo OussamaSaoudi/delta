@@ -21,6 +21,7 @@ import io.delta.kernel.execution.PlanEngine;
 import io.delta.kernel.execution.PlanEngine.BatchEvaluator;
 import io.delta.kernel.expressions.Expression;
 import io.delta.kernel.expressions.StructExpression;
+import io.delta.kernel.internal.util.RowKernels;
 import io.delta.kernel.internal.util.Utils;
 import io.delta.kernel.plans.PlanNode.SemiJoin;
 import io.delta.kernel.types.DataType;
@@ -34,8 +35,7 @@ import java.util.List;
 final class SemiJoinOperator {
   private SemiJoinOperator() {}
 
-  static CloseableIterator<ColumnarBatch> open(
-      SemiJoin node, OperatorDispatcher execution) {
+  static CloseableIterator<ColumnarBatch> open(SemiJoin node, OperatorDispatcher execution) {
     PlanEngine engine = execution.engine();
     BoundKeys probeKeys =
         new BoundKeys(node.probe().outputSchema(), node.probeKeys(), node.keyTypes(), engine);
@@ -45,8 +45,7 @@ final class SemiJoinOperator {
     StateTable buildState = null;
     try {
       buildKeys =
-          new BoundKeys(
-              node.build().outputSchema(), node.buildKeys(), node.keyTypes(), engine);
+          new BoundKeys(node.build().outputSchema(), node.buildKeys(), node.keyTypes(), engine);
       probe = execution.open(node.probe());
       build = execution.open(node.build());
       buildState = StateTable.keyed(engine, probeKeys.keySchema, 0);
@@ -127,7 +126,7 @@ final class SemiJoinOperator {
     }
 
     private static Row row(ColumnarBatch batch, int rowId) {
-      return batch == null ? null : batch.getRow(rowId);
+      return batch == null ? null : RowKernels.rowAt(batch, rowId);
     }
   }
 
@@ -136,19 +135,14 @@ final class SemiJoinOperator {
     private final BatchEvaluator evaluator;
 
     private BoundKeys(
-        StructType inputSchema,
-        List<Expression> keys,
-        List<DataType> keyTypes,
-        PlanEngine engine) {
+        StructType inputSchema, List<Expression> keys, List<DataType> keyTypes, PlanEngine engine) {
       List<StructField> fields = new ArrayList<>(keyTypes.size());
       for (int index = 0; index < keyTypes.size(); index++) {
         fields.add(new StructField("_key_" + index, keyTypes.get(index), true));
       }
       this.keySchema = new StructType(fields);
       this.evaluator =
-          keys.isEmpty()
-              ? null
-              : engine.bind(inputSchema, new StructExpression(keys), keySchema);
+          keys.isEmpty() ? null : engine.bind(inputSchema, new StructExpression(keys), keySchema);
     }
 
     private ColumnarBatch evaluate(ColumnarBatch batch) {

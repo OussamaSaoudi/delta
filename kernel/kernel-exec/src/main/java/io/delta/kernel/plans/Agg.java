@@ -19,48 +19,60 @@ import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.expressions.Expression;
 import io.delta.kernel.types.DataType;
-import java.util.Optional;
+import io.delta.kernel.types.IntegerType;
+import io.delta.kernel.types.LongType;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
 /** An aggregate function and its typed expression operands. */
 public final class Agg {
   public enum Function {
     MIN,
     MAX,
+    SUM,
+    COUNT,
+    COUNT_STAR,
     MIN_NON_NULL_BY,
     MAX_NON_NULL_BY
   }
 
   private final Function function;
-  private final Expression value;
-  private final DataType valueType;
-  private final Expression nullSentinel;
-  private final DataType nullSentinelType;
-  private final Expression key;
-  private final DataType keyType;
+  private final List<Expression> operands;
+  private final List<DataType> operandTypes;
 
-  private Agg(
-      Function function,
-      Expression value,
-      DataType valueType,
-      Expression nullSentinel,
-      DataType nullSentinelType,
-      Expression key,
-      DataType keyType) {
+  private Agg(Function function, List<Expression> operands, List<DataType> operandTypes) {
     this.function = requireNonNull(function, "function is null");
-    this.value = value;
-    this.valueType = valueType;
-    this.nullSentinel = nullSentinel;
-    this.nullSentinelType = nullSentinelType;
-    this.key = key;
-    this.keyType = keyType;
+    this.operands = immutableCopy(operands, "operand is null");
+    this.operandTypes = immutableCopy(operandTypes, "operand type is null");
+    if (this.operands.size() != this.operandTypes.size()) {
+      throw new IllegalArgumentException("Aggregate operands and types have different arity");
+    }
   }
 
   public static Agg min(Expression value, DataType valueType) {
-    return value(Function.MIN, value, valueType);
+    return unary(Function.MIN, value, valueType);
   }
 
   public static Agg max(Expression value, DataType valueType) {
-    return value(Function.MAX, value, valueType);
+    return unary(Function.MAX, value, valueType);
+  }
+
+  /** Returns a nullable LONG sum over INT or LONG inputs. */
+  public static Agg sum(Expression value, DataType valueType) {
+    requireLongInput(valueType, "SUM");
+    return unary(Function.SUM, value, valueType);
+  }
+
+  /** Returns the non-null LONG count of non-null values. */
+  public static Agg count(Expression value, DataType valueType) {
+    return unary(Function.COUNT, value, valueType);
+  }
+
+  /** Returns the non-null LONG count of input rows. */
+  public static Agg countStar() {
+    return new Agg(Function.COUNT_STAR, Collections.emptyList(), Collections.emptyList());
   }
 
   public static Agg minNonNullBy(
@@ -85,15 +97,40 @@ public final class Agg {
         Function.MAX_NON_NULL_BY, value, valueType, nullSentinel, nullSentinelType, key, keyType);
   }
 
-  private static Agg value(Function function, Expression value, DataType valueType) {
+  public Function function() {
+    return function;
+  }
+
+  /** Returns value, or value/sentinel/key for a non-null-by aggregate. */
+  public List<Expression> operands() {
+    return operands;
+  }
+
+  /** Returns the types aligned with {@link #operands()}. */
+  public List<DataType> operandTypes() {
+    return operandTypes;
+  }
+
+  public DataType resultType() {
+    switch (function) {
+      case SUM:
+      case COUNT:
+      case COUNT_STAR:
+        return LongType.LONG;
+      default:
+        return operandTypes.get(0);
+    }
+  }
+
+  public boolean resultNullable() {
+    return function != Function.COUNT && function != Function.COUNT_STAR;
+  }
+
+  private static Agg unary(Function function, Expression value, DataType valueType) {
     return new Agg(
         function,
-        requireNonNull(value, "value is null"),
-        requireNonNull(valueType, "valueType is null"),
-        null,
-        null,
-        null,
-        null);
+        Collections.singletonList(requireNonNull(value, "value is null")),
+        Collections.singletonList(requireNonNull(valueType, "valueType is null")));
   }
 
   private static Agg nonNullBy(
@@ -106,40 +143,24 @@ public final class Agg {
       DataType keyType) {
     return new Agg(
         function,
-        requireNonNull(value, "value is null"),
-        requireNonNull(valueType, "valueType is null"),
-        requireNonNull(nullSentinel, "nullSentinel is null"),
-        requireNonNull(nullSentinelType, "nullSentinelType is null"),
-        requireNonNull(key, "key is null"),
-        requireNonNull(keyType, "keyType is null"));
+        Arrays.asList(value, nullSentinel, key),
+        Arrays.asList(valueType, nullSentinelType, keyType));
   }
 
-  public Function function() {
-    return function;
+  private static void requireLongInput(DataType type, String function) {
+    requireNonNull(type, "valueType is null");
+    if (!(type instanceof IntegerType) && !(type instanceof LongType)) {
+      throw new IllegalArgumentException(
+          function + " requires an INT or LONG input, found " + type);
+    }
   }
 
-  public Expression value() {
-    return value;
+  private static <T> List<T> immutableCopy(List<T> values, String nullMessage) {
+    requireNonNull(values, "values is null");
+    List<T> copy = new ArrayList<>(values.size());
+    for (T value : values) {
+      copy.add(requireNonNull(value, nullMessage));
+    }
+    return Collections.unmodifiableList(copy);
   }
-
-  public DataType valueType() {
-    return valueType;
-  }
-
-  public Optional<Expression> nullSentinel() {
-    return Optional.ofNullable(nullSentinel);
-  }
-
-  public Optional<DataType> nullSentinelType() {
-    return Optional.ofNullable(nullSentinelType);
-  }
-
-  public Optional<Expression> key() {
-    return Optional.ofNullable(key);
-  }
-
-  public Optional<DataType> keyType() {
-    return Optional.ofNullable(keyType);
-  }
-
 }

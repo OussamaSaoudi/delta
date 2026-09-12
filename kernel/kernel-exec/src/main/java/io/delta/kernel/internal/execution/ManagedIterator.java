@@ -29,9 +29,7 @@ abstract class ManagedIterator<T> implements CloseableIterator<T> {
   private boolean exhausted;
 
   static <T, R> CloseableIterator<R> map(
-      CloseableIterator<T> input,
-      Function<T, R> mapper,
-      AutoCloseable... resources) {
+      CloseableIterator<T> input, Function<T, R> mapper, AutoCloseable... resources) {
     requireNonNull(input, "input is null");
     requireNonNull(mapper, "mapper is null");
     AutoCloseable[] owned = new AutoCloseable[resources.length + 1];

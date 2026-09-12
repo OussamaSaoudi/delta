@@ -16,7 +16,7 @@
 
 package io.delta.kernel.execution
 
-import java.util.{Collections, Optional}
+import java.util.{Collections, HashMap, Optional}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
@@ -24,17 +24,13 @@ import scala.collection.mutable.ArrayBuffer
 import io.delta.kernel.data.{ColumnarBatch, ColumnVector, Row}
 import io.delta.kernel.data.ColumnarBatch.Lifetime
 import io.delta.kernel.execution.PlanEngine.BatchEvaluator
-import io.delta.kernel.expressions.{
-  Expression,
-  ExpressionEvaluator,
-  Predicate,
-  PredicateEvaluator,
-  StructExpression}
+import io.delta.kernel.expressions.{Column, Expression, ExpressionEvaluator, Predicate, PredicateEvaluator, StructExpression}
 import io.delta.kernel.internal.data.{GenericColumnVector, GenericRow, RowBackedColumnarBatch}
+import io.delta.kernel.plans.Agg
 import io.delta.kernel.plans.PlanNode
-import io.delta.kernel.plans.PlanNode.{FileScan, Filter, Project, UnionAll, Values}
+import io.delta.kernel.plans.PlanNode.{Aggregate, Cte, FileScan, Filter, Project, UnionAll, Values}
 import io.delta.kernel.test.{BaseMockExpressionHandler, MockEngineUtils}
-import io.delta.kernel.types.{BooleanType, DataType, IntegerType, StructType}
+import io.delta.kernel.types.{BooleanType, DataType, IntegerType, LongType, StructType}
 import io.delta.kernel.utils.CloseableIterator
 
 import org.scalatest.funsuite.AnyFunSuite
@@ -124,6 +120,20 @@ class PlanExecutorSuite extends AnyFunSuite with MockEngineUtils {
     assert(engine.evaluations === 2)
   }
 
+  test("CTE references materialize one engine-native result") {
+    val engine = new TrackingPlanEngine
+    val shared = new Cte(
+      7L,
+      new Project(valuesPlan(1, 2), new Column("id"), schema))
+    val root = new UnionAll(Seq[PlanNode](shared, shared).asJava)
+
+    withExecutor(engine) { executor =>
+      assert(collectInts(executor.execute(root)) === Seq(1, 2, 1, 2))
+    }
+    assert(engine.expressionBindings === 1)
+    assert(engine.evaluations === 1)
+  }
+
   test("an evaluator chooses the lifetime of each output batch") {
     val engine = new TrackingPlanEngine(Seq(Lifetime.OWNED, Lifetime.BORROWED))
     val union = new UnionAll(Seq[PlanNode](valuesPlan(1), valuesPlan(2)).asJava)
@@ -166,6 +176,101 @@ class PlanExecutorSuite extends AnyFunSuite with MockEngineUtils {
     }
   }
 
+  test("SUM and COUNT use LONG results for INT and LONG inputs") {
+    val inputSchema = new StructType()
+      .add("group", IntegerType.INTEGER, false)
+      .add("intValue", IntegerType.INTEGER, true)
+      .add("longValue", LongType.LONG, true)
+    val outputSchema = new StructType()
+      .add("group", IntegerType.INTEGER, false)
+      .add("intSum", LongType.LONG, true)
+      .add("longSum", LongType.LONG, true)
+      .add("nonNullInts", LongType.LONG, false)
+      .add("rows", LongType.LONG, false)
+    val input = new Values(
+      inputSchema,
+      Seq(
+        row(inputSchema, Int.box(1), Int.box(1), Long.box(10)),
+        row(inputSchema, Int.box(1), Int.box(2), null),
+        row(inputSchema, Int.box(1), null, Long.box(30)),
+        row(inputSchema, Int.box(2), null, null)).asJava)
+    val aggregate = new Aggregate(
+      input,
+      Seq[Expression](new Column("group")).asJava,
+      Seq(
+        Agg.sum(new Column("intValue"), IntegerType.INTEGER),
+        Agg.sum(new Column("longValue"), LongType.LONG),
+        Agg.count(new Column("intValue"), IntegerType.INTEGER),
+        Agg.countStar()).asJava,
+      outputSchema)
+
+    val cache = new PlanResultCache(4, Long.MaxValue)
+    val result = new PlanExecutor(mockEngine(expressionHandler = columnExpressions), cache)
+      .execute(aggregate)
+    try {
+      val batch = result.next()
+      assert(!result.hasNext)
+      val rows = batch.getRows
+      try {
+        val first = rows.next()
+        assert((
+          first.getInt(0),
+          first.getLong(1),
+          first.getLong(2),
+          first.getLong(3),
+          first.getLong(4)) === (1, 3L, 40L, 2L, 3L))
+        val second = rows.next()
+        assert(second.getInt(0) === 2)
+        assert(second.isNullAt(1))
+        assert(second.isNullAt(2))
+        assert(second.getLong(3) === 0L)
+        assert(second.getLong(4) === 1L)
+        assert(!rows.hasNext)
+      } finally {
+        rows.close()
+      }
+    } finally {
+      result.close()
+      cache.close()
+    }
+  }
+
+  test("global SUM is null and COUNT is zero for empty input") {
+    val inputSchema = new StructType().add("value", LongType.LONG, true)
+    val outputSchema = new StructType()
+      .add("sum", LongType.LONG, true)
+      .add("count", LongType.LONG, false)
+      .add("rows", LongType.LONG, false)
+    val aggregate = new Aggregate(
+      new Values(inputSchema, Seq.empty[Row].asJava),
+      Seq.empty[Expression].asJava,
+      Seq(
+        Agg.sum(new Column("value"), LongType.LONG),
+        Agg.count(new Column("value"), LongType.LONG),
+        Agg.countStar()).asJava,
+      outputSchema)
+
+    val cache = new PlanResultCache(4, Long.MaxValue)
+    val result = new PlanExecutor(mockEngine(expressionHandler = columnExpressions), cache)
+      .execute(aggregate)
+    try {
+      val rows = result.next().getRows
+      try {
+        val row = rows.next()
+        assert(row.isNullAt(0))
+        assert(row.getLong(1) === 0L)
+        assert(row.getLong(2) === 0L)
+        assert(!rows.hasNext)
+        assert(!result.hasNext)
+      } finally {
+        rows.close()
+      }
+    } finally {
+      result.close()
+      cache.close()
+    }
+  }
+
   private def withExecutor(engine: PlanEngine)(testCode: PlanExecutor => Unit): Unit = {
     val cache = new PlanResultCache(16, Long.MaxValue)
     try {
@@ -182,6 +287,32 @@ class PlanExecutorSuite extends AnyFunSuite with MockEngineUtils {
     new GenericRow(
       schema,
       Collections.singletonMap[Integer, Object](Int.box(0), Int.box(value)))
+
+  private def row(schema: StructType, values: Object*): Row = {
+    val present = new HashMap[Integer, Object]
+    values.zipWithIndex.foreach { case (value, ordinal) =>
+      if (value != null) present.put(Int.box(ordinal), value)
+    }
+    new GenericRow(schema, present)
+  }
+
+  private val columnExpressions = new BaseMockExpressionHandler {
+    override def getEvaluator(
+        inputSchema: StructType,
+        expression: Expression,
+        outputType: DataType): ExpressionEvaluator = {
+      val names = expression.asInstanceOf[Column].getNames
+      require(names.length === 1)
+      val ordinal = inputSchema.indexOf(names.head)
+      require(ordinal >= 0)
+      new ExpressionEvaluator {
+        override def eval(input: ColumnarBatch): ColumnVector =
+          input.getColumnVector(ordinal)
+
+        override def close(): Unit = ()
+      }
+    }
+  }
 
   private def collectInts(result: CloseableIterator[ColumnarBatch]): Seq[Int] = {
     val values = ArrayBuffer.empty[Int]
@@ -225,6 +356,9 @@ class PlanExecutorSuite extends AnyFunSuite with MockEngineUtils {
 
     override def retainValue(input: Row, ordinal: Int, schema: StructType): Row =
       throw new UnsupportedOperationException("This stateless test engine does not retain values")
+
+    override def longValue(value: Long, schema: StructType): Row =
+      throw new UnsupportedOperationException("This stateless test engine does not create values")
 
     override def appendColumns(
         input: ColumnarBatch,

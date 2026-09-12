@@ -16,14 +16,13 @@ interface PlanEngine {
   ColumnarBatch filter(...);
   Row retainRow(...);
   Row retainValue(...);
+  Row longValue(...);
   ColumnarBatch appendColumns(...);
   CloseableIterator<ColumnarBatch> scan(PlanNode.FileScan scan);
 }
 
 PlanResultCache(int maxEntries, long maxBytes)
 CloseableIterator<ColumnarBatch> PlanResultCache.get(FileScan scan)
-boolean PlanResultCache.prefetch(
-    FileScan scan, CloseableIterator<ColumnarBatch> result, long approxBytes)
 boolean PlanResultCache.prefetch(
     FileScan scan,
     CompletableFuture<CloseableIterator<ColumnarBatch>> result,
@@ -51,14 +50,15 @@ values, then asks the engine to append result columns to the key batch.
 ## Plans and semantics
 
 All node kinds are nested in `PlanNode`: `Values`, `FileScan`, `Filter`, `Project`, `UnionAll`,
-`Aggregate`, and `SemiJoin`. Nodes carry output and operand types. Plans are trees; repeated
-Catalyst inputs are copied during Spark conversion. Only `FileScan` has structural equality because
-it is the only cache key. A `FileScan` contains at most one entry for each file path.
+`Aggregate`, `SemiJoin`, and `Cte`. Nodes carry output and operand types. A `Cte` ID names one
+execution-local materialized input. Only `FileScan` has structural equality because it is the only
+cache key. A `FileScan` contains at most one entry for each file path.
 
 Group and join keys use null-safe equality. `MIN` and `MAX` ignore null operands. For
 `*_NON_NULL_BY(value, sentinel, key)`, a row qualifies when sentinel and key are non-null; the
 winning value may be null. Ties are unspecified. Hash keys may contain scalars and nested structs;
-collection-bearing keys fall back to the host executor.
+collection-bearing keys fall back to the host executor. `SUM` accepts INT and LONG values and
+returns a checked nullable LONG; `COUNT(value)` and `COUNT(*)` return non-null LONG values.
 
 ## Cache and execution
 

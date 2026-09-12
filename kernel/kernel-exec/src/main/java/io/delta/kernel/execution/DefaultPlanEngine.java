@@ -33,6 +33,7 @@ import io.delta.kernel.internal.data.GenericRow;
 import io.delta.kernel.internal.data.RowBackedColumnarBatch;
 import io.delta.kernel.internal.deletionvectors.DeletionVectorStoredBitmap;
 import io.delta.kernel.internal.deletionvectors.RoaringBitmapArray;
+import io.delta.kernel.internal.util.RowKernels;
 import io.delta.kernel.internal.util.Utils;
 import io.delta.kernel.plans.PlanNode.FileScan;
 import io.delta.kernel.plans.PlanNode.Format;
@@ -88,8 +89,7 @@ final class DefaultPlanEngine implements PlanEngine {
     if (expression instanceof StructExpression) {
       return bindFields(inputSchema, ((StructExpression) expression).fields(), outputSchema);
     }
-    ExpressionEvaluator evaluator =
-        expressions.getEvaluator(inputSchema, expression, outputSchema);
+    ExpressionEvaluator evaluator = expressions.getEvaluator(inputSchema, expression, outputSchema);
     return new BatchEvaluator() {
       private ColumnVector result;
       private boolean closed;
@@ -190,7 +190,7 @@ final class DefaultPlanEngine implements PlanEngine {
     List<Row> rows = new ArrayList<>();
     for (int rowId = 0; rowId < keep.length; rowId++) {
       if (keep[rowId]) {
-        rows.add(input.getRow(rowId));
+        rows.add(RowKernels.rowAt(input, rowId));
       }
     }
     return new RowBackedColumnarBatch(input.getSchema(), rows, input.getLifetime());
@@ -222,14 +222,20 @@ final class DefaultPlanEngine implements PlanEngine {
     requireNonNull(input, "input is null");
     requireNonNull(outputSchema, "outputSchema is null");
     if (outputSchema.length() != 1
-        || !outputSchema.at(0).getDataType().equals(
-            input.getSchema().at(ordinal).getDataType())) {
+        || !outputSchema.at(0).getDataType().equals(input.getSchema().at(ordinal).getDataType())) {
       throw new IllegalArgumentException("Retained value schema does not match input");
     }
     Object value = materializeValue(input, ordinal, outputSchema.at(0).getDataType());
-    return value == null
-        ? null
-        : new GenericRow(outputSchema, Collections.singletonMap(0, value));
+    return value == null ? null : new GenericRow(outputSchema, Collections.singletonMap(0, value));
+  }
+
+  @Override
+  public Row longValue(long value, StructType outputSchema) {
+    requireNonNull(outputSchema, "outputSchema is null");
+    if (outputSchema.length() != 1 || !(outputSchema.at(0).getDataType() instanceof LongType)) {
+      throw new IllegalArgumentException("LONG value requires a one-field LONG schema");
+    }
+    return new GenericRow(outputSchema, Collections.singletonMap(0, value));
   }
 
   @Override
@@ -388,10 +394,7 @@ final class DefaultPlanEngine implements PlanEngine {
     }
 
     private ColumnarBatch finish(
-        ScanFile file,
-        ColumnarBatch input,
-        long firstRowIndex,
-        RoaringBitmapArray bitmap) {
+        ScanFile file, ColumnarBatch input, long firstRowIndex, RoaringBitmapArray bitmap) {
       if (!readSchema.equals(input.getSchema())) {
         throw new IllegalArgumentException(
             "Scan reader returned schema " + input.getSchema() + ", expected " + readSchema);
@@ -432,8 +435,7 @@ final class DefaultPlanEngine implements PlanEngine {
         return null;
       }
       try {
-        return new DeletionVectorStoredBitmap(
-                descriptor.get(), node.tableRoot().map(URI::toString))
+        return new DeletionVectorStoredBitmap(descriptor.get(), node.tableRoot().map(URI::toString))
             .load(engine.getFileSystemClient());
       } catch (IOException failure) {
         throw new UncheckedIOException(
@@ -447,7 +449,6 @@ final class DefaultPlanEngine implements PlanEngine {
     }
   }
 
-
   private static ColumnarBatch dropColumn(ColumnarBatch input, int dropped) {
     if (dropped < 0) {
       throw new IllegalArgumentException("Column to drop is absent");
@@ -460,8 +461,7 @@ final class DefaultPlanEngine implements PlanEngine {
         columns[target++] = input.getColumnVector(source);
       }
     }
-    return new VectorBatch(
-        new StructType(fields), input.getSize(), columns, input.getLifetime());
+    return new VectorBatch(new StructType(fields), input.getSize(), columns, input.getLifetime());
   }
 
   private static Object materializeValue(Row row, int ordinal, DataType type) {
@@ -515,8 +515,7 @@ final class DefaultPlanEngine implements PlanEngine {
       return new GenericRow(schema, values);
     }
     if (type instanceof ArrayType || type instanceof MapType) {
-      throw new UnsupportedOperationException(
-          "Aggregate retention does not support " + type);
+      throw new UnsupportedOperationException("Aggregate retention does not support " + type);
     }
     throw new UnsupportedOperationException("Unsupported retained value type " + type);
   }
@@ -532,8 +531,7 @@ final class DefaultPlanEngine implements PlanEngine {
     private final ColumnVector[] columns;
     private final Lifetime lifetime;
 
-    private VectorBatch(
-        StructType schema, int size, ColumnVector[] columns, Lifetime lifetime) {
+    private VectorBatch(StructType schema, int size, ColumnVector[] columns, Lifetime lifetime) {
       this.schema = requireNonNull(schema, "schema is null");
       this.size = size;
       this.columns = requireNonNull(columns, "columns is null").clone();

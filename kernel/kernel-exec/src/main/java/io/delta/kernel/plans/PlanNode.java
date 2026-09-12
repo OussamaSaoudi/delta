@@ -148,13 +148,15 @@ public abstract class PlanNode {
       for (int index = 0; index < this.aggregates.size(); index++) {
         Agg aggregate = this.aggregates.get(index);
         StructField field = outputSchema().at(this.groupBy.size() + index);
-        if (!aggregate.valueType().equals(field.getDataType()) || !field.isNullable()) {
+        if (!aggregate.resultType().equals(field.getDataType())
+            || aggregate.resultNullable() != field.isNullable()) {
           throw new IllegalArgumentException(
               "Aggregate output field `"
                   + field.getName()
                   + "` must have type "
-                  + aggregate.valueType()
-                  + " and be nullable");
+                  + aggregate.resultType()
+                  + " and nullable="
+                  + aggregate.resultNullable());
         }
       }
     }
@@ -232,6 +234,26 @@ public abstract class PlanNode {
     }
   }
 
+  /** One execution-local reusable result. Every reference to an ID must name the same input. */
+  public static final class Cte extends PlanNode {
+    private final long id;
+    private final PlanNode input;
+
+    public Cte(long id, PlanNode input) {
+      super(requireNonNull(input, "input is null").outputSchema());
+      this.id = id;
+      this.input = input;
+    }
+
+    public long id() {
+      return id;
+    }
+
+    public PlanNode input() {
+      return input;
+    }
+  }
+
   /** Inline owned rows matching a declared schema. */
   public static final class Values extends PlanNode {
     private final List<Row> ownedRows;
@@ -287,12 +309,7 @@ public abstract class PlanNode {
         List<String> fileConstantColumns,
         StructType outputSchema) {
       return new FileScan(
-          Format.JSON,
-          files,
-          tableRoot,
-          fileConstantColumns,
-          outputSchema,
-          Optional.empty());
+          Format.JSON, files, tableRoot, fileConstantColumns, outputSchema, Optional.empty());
     }
 
     public static FileScan parquet(
@@ -302,12 +319,7 @@ public abstract class PlanNode {
         StructType outputSchema,
         Optional<Predicate> pushdownHint) {
       return new FileScan(
-          Format.PARQUET,
-          files,
-          tableRoot,
-          fileConstantColumns,
-          outputSchema,
-          pushdownHint);
+          Format.PARQUET, files, tableRoot, fileConstantColumns, outputSchema, pushdownHint);
     }
 
     public Format format() {
@@ -360,8 +372,7 @@ public abstract class PlanNode {
 
     private void validateScan() {
       if (tableRoot.isPresent() && !tableRoot.get().isAbsolute()) {
-        throw new IllegalArgumentException(
-            "Table root is not an absolute URI: " + tableRoot.get());
+        throw new IllegalArgumentException("Table root is not an absolute URI: " + tableRoot.get());
       }
       if (format == Format.JSON && pushdownHint.isPresent()) {
         throw new IllegalArgumentException("JSON scan cannot have a pushdown hint");
@@ -377,8 +388,7 @@ public abstract class PlanNode {
         if (!paths.add(path)) {
           throw new IllegalArgumentException("Duplicate scan file path `" + path + "`");
         }
-        requireRow(
-            file.getFileConstants(), constantsSchema, "Scan file " + index + " constants");
+        requireRow(file.getFileConstants(), constantsSchema, "Scan file " + index + " constants");
         Optional<DeletionVectorDescriptor> dv = file.getDeletionVector();
         if (dv.isPresent()
             && DeletionVectorDescriptor.UUID_DV_MARKER.equals(dv.get().getStorageType())
@@ -389,15 +399,12 @@ public abstract class PlanNode {
       }
     }
 
-    private static List<String> validateConstants(
-        List<String> names, StructType outputSchema) {
-      List<String> copy =
-          immutableCopy(names, "file constant column is null");
+    private static List<String> validateConstants(List<String> names, StructType outputSchema) {
+      List<String> copy = immutableCopy(names, "file constant column is null");
       Set<String> seen = new HashSet<>();
       for (String name : copy) {
         if (!seen.add(name)) {
-          throw new IllegalArgumentException(
-              "Duplicate file constant column `" + name + "`");
+          throw new IllegalArgumentException("Duplicate file constant column `" + name + "`");
         }
         int ordinal = outputSchema.indexOf(name);
         if (ordinal < 0) {
@@ -435,8 +442,7 @@ public abstract class PlanNode {
     }
   }
 
-  private static <T> List<T> immutableCopy(
-      List<? extends T> values, String nullMessage) {
+  private static <T> List<T> immutableCopy(List<? extends T> values, String nullMessage) {
     requireNonNull(values, "values is null");
     java.util.ArrayList<T> copy = new java.util.ArrayList<>(values.size());
     for (T value : values) {

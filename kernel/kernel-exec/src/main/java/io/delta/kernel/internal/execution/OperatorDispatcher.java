@@ -18,21 +18,27 @@ package io.delta.kernel.internal.execution;
 import static java.util.Objects.requireNonNull;
 
 import io.delta.kernel.data.ColumnarBatch;
+import io.delta.kernel.data.Row;
 import io.delta.kernel.execution.PlanEngine;
 import io.delta.kernel.execution.PlanEngine.BatchEvaluator;
 import io.delta.kernel.execution.PlanResultCache;
 import io.delta.kernel.internal.data.RowBackedColumnarBatch;
-import io.delta.kernel.plans.PlanNode.Aggregate;
-import io.delta.kernel.plans.PlanNode.Filter;
+import io.delta.kernel.internal.util.RowKernels;
 import io.delta.kernel.plans.PlanNode;
+import io.delta.kernel.plans.PlanNode.Aggregate;
+import io.delta.kernel.plans.PlanNode.Cte;
 import io.delta.kernel.plans.PlanNode.FileScan;
+import io.delta.kernel.plans.PlanNode.Filter;
 import io.delta.kernel.plans.PlanNode.Project;
 import io.delta.kernel.plans.PlanNode.SemiJoin;
 import io.delta.kernel.plans.PlanNode.UnionAll;
 import io.delta.kernel.plans.PlanNode.Values;
+import io.delta.kernel.utils.CloseableIterable;
 import io.delta.kernel.utils.CloseableIterator;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /** Recursive type dispatch for one plan execution. */
 public final class OperatorDispatcher {
@@ -40,6 +46,7 @@ public final class OperatorDispatcher {
 
   private final PlanEngine engine;
   private final PlanResultCache cache;
+  private final Map<Long, CloseableIterable<ColumnarBatch>> ctes = new LinkedHashMap<>();
 
   private OperatorDispatcher(PlanEngine engine, PlanResultCache cache) {
     this.engine = requireNonNull(engine, "engine is null");
@@ -77,6 +84,9 @@ public final class OperatorDispatcher {
     if (node instanceof SemiJoin) {
       return SemiJoinOperator.open((SemiJoin) node, this);
     }
+    if (node instanceof Cte) {
+      return openCte((Cte) node);
+    }
     throw new UnsupportedOperationException("Unsupported plan node: " + node.getClass().getName());
   }
 
@@ -85,6 +95,27 @@ public final class OperatorDispatcher {
     return prefetched != null
         ? prefetched
         : requireNonNull(engine.scan(scan), "Scan iterator is null");
+  }
+
+  private CloseableIterator<ColumnarBatch> openCte(Cte cte) {
+    CloseableIterable<ColumnarBatch> result =
+        ctes.computeIfAbsent(
+            cte.id(),
+            ignored ->
+                CloseableIterable.inMemoryIterable(
+                    ManagedIterator.map(open(cte.input()), this::retain)));
+    return result.iterator();
+  }
+
+  private ColumnarBatch retain(ColumnarBatch batch) {
+    if (batch.getLifetime() == ColumnarBatch.Lifetime.OWNED) {
+      return batch;
+    }
+    List<Row> rows = new ArrayList<>(batch.getSize());
+    for (int rowId = 0; rowId < batch.getSize(); rowId++) {
+      rows.add(engine.retainRow(RowKernels.rowAt(batch, rowId), batch.getSchema()));
+    }
+    return new RowBackedColumnarBatch(batch.getSchema(), rows, ColumnarBatch.Lifetime.OWNED);
   }
 
   private static CloseableIterator<ColumnarBatch> openValues(Values node) {
@@ -117,8 +148,7 @@ public final class OperatorDispatcher {
 
   private CloseableIterator<ColumnarBatch> openProject(Project node) {
     BatchEvaluator evaluator =
-        engine.bind(
-            node.input().outputSchema(), node.rowExpression(), node.outputSchema());
+        engine.bind(node.input().outputSchema(), node.rowExpression(), node.outputSchema());
     return ManagedIterator.map(open(node.input()), evaluator::eval, evaluator);
   }
 
