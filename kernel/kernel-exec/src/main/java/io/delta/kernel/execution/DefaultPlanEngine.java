@@ -564,6 +564,20 @@ final class DefaultPlanEngine implements PlanEngine {
     }
 
     @Override
+    public ColumnarBatch withNewColumn(int ordinal, StructField field, ColumnVector column) {
+      if (ordinal < 0 || ordinal > columns.length) {
+        throw new IllegalArgumentException("Invalid column ordinal: " + ordinal);
+      }
+      List<StructField> fields = new ArrayList<>(schema.fields());
+      fields.add(ordinal, requireNonNull(field, "field is null"));
+      ColumnVector[] result = new ColumnVector[columns.length + 1];
+      System.arraycopy(columns, 0, result, 0, ordinal);
+      result[ordinal] = requireNonNull(column, "column is null");
+      System.arraycopy(columns, ordinal, result, ordinal + 1, columns.length - ordinal);
+      return new VectorBatch(new StructType(fields), size, result, lifetime);
+    }
+
+    @Override
     public Lifetime getLifetime() {
       return lifetime;
     }

@@ -1188,6 +1188,7 @@ lazy val kernelDefaults = (project in file("kernel/kernel-defaults"))
     // Put the shaded kernel-api JAR on the classpath (compile & test)
     Compile / unmanagedJars += (kernelApi / Compile / packageBin).value,
     Test / unmanagedJars += (kernelApi / Compile / packageBin).value,
+    Test / unmanagedJars += (kernelExec / Compile / packageBin).value,
 
     // Make sure the shaded JAR is produced before we compile/run tests
     Compile / compile := (Compile / compile).dependsOn(kernelApi / Compile / packageBin).value,
